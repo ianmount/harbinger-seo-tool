@@ -18,6 +18,8 @@ const envSchema = z.object({
   AIRTABLE_PAT: optionalString,
   AIRTABLE_BASE_ID: optionalString,
   AIRTABLE_PARTNERS_TABLE: optionalString,
+  APP_PASSWORD: optionalString,
+  APP_AUTH_SECRET: optionalString,
 })
 
 export type Env = z.infer<typeof envSchema>
@@ -40,6 +42,8 @@ const REQUIRED_KEYS = [
   "AIRTABLE_PAT",
   "AIRTABLE_BASE_ID",
   "AIRTABLE_PARTNERS_TABLE",
+  "APP_PASSWORD",
+  "APP_AUTH_SECRET",
 ] as const satisfies ReadonlyArray<keyof Env>
 
 export type RequiredKey = (typeof REQUIRED_KEYS)[number]

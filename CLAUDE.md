@@ -41,6 +41,19 @@ Local dev: set in `.env.local` (never committed; template in `.env.example`).
 - `DATAFORSEO_LOGIN`, `DATAFORSEO_PASSWORD`
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`
 - `AIRTABLE_PAT`, `AIRTABLE_BASE_ID`, `AIRTABLE_PARTNERS_TABLE`
+- `APP_PASSWORD`, `APP_AUTH_SECRET` (see Auth below)
+
+## Auth
+Single-password app-level gate in front of the entire app. This protects the production deployment because Vercel's free-tier "Vercel Authentication" only covers previews.
+
+- **Password** lives in `APP_PASSWORD`. Whatever string you set there is what gets typed at `/login`. No user accounts, no email, nothing else.
+- **Signing key** for the session cookie lives in `APP_AUTH_SECRET`. HMAC-SHA256. Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`.
+- Cookie is named `harbinger_auth`, httpOnly + Secure (in production) + SameSite=Lax, signed payload `{ iat, exp }`, **30-day expiry**. No refresh — re-login after 30 days.
+- `proxy.ts` at the project root gates everything. Public bypass paths: `/login`, `/api/auth/login`, `/api/auth/logout`. Next.js internals (`/_next`, `/favicon.ico`) are excluded via the matcher. Unauthed HTML request → redirect to `/login?next=…`; unauthed `/api/*` → `401 { error: "unauthorized" }`.
+- Fails closed: if `APP_PASSWORD` or `APP_AUTH_SECRET` is unset, no one can log in and everyone sees `/login`. Safer than failing open.
+- Rate limit: 5 failed logins per IP per 10 minutes → `429`. In-memory per serverless instance (best-effort; Vercel cold starts reset it). Upgrade to Upstash/Redis if the threat model needs it.
+- Logout: `POST /api/auth/logout` (200 JSON) or `GET /api/auth/logout` (302 to `/login`). Both clear the cookie.
+- No auth library (NextAuth etc.) — handwritten in `lib/auth.ts` using `node:crypto`. Proxy defaults to Node.js runtime in Next 16, so `node:crypto` works there too.
 
 ## Coding Conventions
 - TypeScript strict mode. No `any` types — use `unknown` and narrow, or define proper types.
