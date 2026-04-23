@@ -72,3 +72,28 @@ export interface KeywordResult {
  * supported for when a caller has already resolved to a specific location id.
  */
 export type DfsLocation = { code: number } | { name: string }
+
+/** Google Search Console property the authed account has access to. */
+export interface GSCSiteInfo {
+  siteUrl: string
+  permissionLevel: string
+}
+
+/** Row from searchanalytics.query with dimensions ['query', 'page']. */
+export interface GSCQueryRow {
+  query: string
+  page: string
+  clicks: number
+  impressions: number
+  ctr: number
+  position: number
+}
+
+/** Row from searchanalytics.query with dimensions ['date']. */
+export interface GSCDailyRow {
+  date: string
+  clicks: number
+  impressions: number
+  ctr: number
+  position: number
+}
