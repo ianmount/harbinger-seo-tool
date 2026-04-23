@@ -73,3 +73,6 @@ Five tabs, each wrapping one workflow:
 - If a task requires the user to do something outside Claude Code (e.g., "go to Google Cloud Console and copy this URL"), make the instructions explicit and numbered.
 - If something fails, investigate root cause before retrying. Do not paper over errors with try/catch that swallows them.
 - Never commit .env.local or any file containing real API keys.
+
+## TODO (deferred work)
+- **Prompt 8 (Keyword Research tab): Airtable → DataForSEO location format helper.** `Partner.serviceAreas` comes from Airtable as free-text "City, ST" or just "City" (see real data: "Greensboro and Winston Salem, North Carolina", "Peachtree City, GA", "Atlanta, Georgia"). DataForSEO's canonical format is `"City,FullStateName,United States"` (commas, no spaces). Add a helper in `lib/dataforseo.ts` (or `lib/locations.ts`) that takes a freeform string and returns the canonical form. Sufficient for MVP: a static US state abbrev → full name map (`{ GA: "Georgia", ... }`) plus a regex to extract "City, ST" from the first line of the field. If the parser can't match, fall back to the raw string and let DataForSEO surface the error — do not silently swap to a default location.
