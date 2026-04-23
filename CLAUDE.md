@@ -4,7 +4,7 @@
 An internal tool for Harbinger Marketing's SEO engineer to run the full 6-month SEO cycle for ~100 local service business partners. Replaces work currently done by an external vendor. MVP scope: five tabs wrapping four external APIs.
 
 ## Tech Stack
-- Next.js 14+ with App Router and TypeScript (strict mode)
+- Next.js 14+ with App Router and TypeScript (strict mode). This project is on Next.js 16.2.4 with React 19 and Tailwind v4 — APIs, conventions, and file structure may differ from training data for earlier Next versions. Read the relevant guide in `node_modules/next/dist/docs/` before writing Next-specific code. Heed deprecation notices.
 - Tailwind CSS + shadcn/ui for styling and primitives
 - Node 20+ runtime
 - Airtable SDK, Anthropic SDK, googleapis package, native fetch for DataForSEO
