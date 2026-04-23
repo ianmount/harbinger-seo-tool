@@ -2,7 +2,7 @@ import "server-only"
 import Airtable, { type FieldSet, type Record as AirtableRecord } from "airtable"
 import { z } from "zod"
 import { requireEnv } from "@/lib/env"
-import type { Partner } from "@/lib/types"
+import type { Partner, PartnerContextField } from "@/lib/types"
 
 // Airtable multi-select/lookup fields return arrays; text fields return strings.
 // User asked that multi-value fields be exposed as strings, so coerce arrays to
@@ -34,10 +34,36 @@ const partnerFieldsSchema = z.object({
 
 type ParsedFields = z.infer<typeof partnerFieldsSchema>
 
+// Every partner record in Airtable carries its name as "<Business> | Profile".
+// Strip the suffix so UIs get the plain business name.
+function stripProfileSuffix(name: string): string {
+  return name.replace(/\s*\|\s*Profile\s*$/i, "").trim()
+}
+
+// Airtable records created from the shared template ship with placeholder
+// blocks that begin with "**Template**". Flag any field still holding that
+// boilerplate so the UI can warn the user before piping it to Claude.
+function isTemplateBoilerplate(value: string | undefined): boolean {
+  if (!value) return false
+  return /^\s*\*{0,2}template\*{0,2}\b/i.test(value)
+}
+
 function toPartner(id: string, parsed: ParsedFields): Partner {
+  const candidates: Array<[PartnerContextField, string | undefined]> = [
+    ["services", parsed.Services],
+    ["serviceAreas", parsed["Service Areas"]],
+    ["partnerGoals", parsed["Partner Goals"]],
+    ["targetAudience", parsed["Target Audience"]],
+    ["contentMarketing", parsed["Content Marketing"]],
+    ["industryKnowledge", parsed["Industry Knowledge"]],
+  ]
+  const unfilledContext = candidates
+    .filter(([, value]) => isTemplateBoilerplate(value))
+    .map(([field]) => field)
+
   return {
     id,
-    name: parsed.Profile,
+    name: stripProfileSuffix(parsed.Profile),
     services: parsed.Services,
     serviceAreas: parsed["Service Areas"],
     website: parsed.Website,
@@ -45,6 +71,7 @@ function toPartner(id: string, parsed: ParsedFields): Partner {
     targetAudience: parsed["Target Audience"],
     contentMarketing: parsed["Content Marketing"],
     industryKnowledge: parsed["Industry Knowledge"],
+    ...(unfilledContext.length > 0 ? { unfilledContext } : {}),
   }
 }
 
