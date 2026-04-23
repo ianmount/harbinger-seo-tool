@@ -5,7 +5,7 @@ An internal tool for Harbinger Marketing's SEO engineer to run the full 6-month 
 
 ## Tech Stack
 - Next.js 14+ with App Router and TypeScript (strict mode). This project is on Next.js 16.2.4 with React 19 and Tailwind v4 — APIs, conventions, and file structure may differ from training data for earlier Next versions. Read the relevant guide in `node_modules/next/dist/docs/` before writing Next-specific code. Heed deprecation notices.
-- Tailwind CSS + shadcn/ui for styling and primitives
+- Tailwind CSS + shadcn/ui for styling and primitives. **shadcn was installed manually, not via `npx shadcn init`**, because the sandbox allowlist blocks `ui.shadcn.com`. Components were fetched from `https://raw.githubusercontent.com/shadcn-ui/ui/main/apps/v4/registry/new-york-v4/ui/`. Style is `new-york` (the only style available for Tailwind v4); base color is `slate`; CSS variables live in `app/globals.css` under `:root` and `.dark`. To add a new component in the future: (a) ask the user to add `ui.shadcn.com` to the sandbox allowlist and then run `npx shadcn@latest add <name>`, OR (b) fetch `components/ui/<name>.tsx` from the same GitHub raw URL and rewrite any `@/registry/new-york-v4/ui/*` imports to `@/components/ui/*`. Note: upstream replaced `toast` with `sonner` — use `sonner` for toast notifications.
 - Node 20+ runtime
 - Airtable SDK, Anthropic SDK, googleapis package, native fetch for DataForSEO
 - Runs on localhost only for MVP (no deployment yet)
