@@ -1,36 +1,50 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Harbinger SEO Tool
 
-## Getting Started
+Internal tool for Harbinger Marketing's SEO engineer to run the full 6-month SEO cycle for local service business partners. Five tabs wrap four external APIs (Anthropic, DataForSEO, Google Search Console, Airtable).
 
-First, run the development server:
+See `CLAUDE.md` for full project context, architecture, and conventions.
+
+## Stack
+
+Next.js 16 (App Router, TypeScript strict) + Tailwind v4 + shadcn/ui. See `CLAUDE.md` → Tech Stack for version specifics and the shadcn manual-install note.
+
+## Local development
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+cp .env.example .env.local   # then fill in real values
+npm run dev                  # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Two of the four external API hosts (`api.airtable.com`, `api.dataforseo.com`) are blocked by the Claude Code sandbox egress allowlist, so local dev inside the sandbox cannot fully exercise those clients. Outside the sandbox (a normal dev laptop), local dev works against all four APIs.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Deployment (Vercel)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Production URL: **https://harbinger-seo-tool.vercel.app**
 
-## Learn More
+Vercel auto-detects Next.js — no `vercel.json` or custom build config. The default `next build` from `package.json` scripts is what runs.
 
-To learn more about Next.js, take a look at the following resources:
+### Triggering a deploy
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- **Production:** push to `main`. Vercel rebuilds and redeploys automatically.
+- **Preview:** push to any other branch. Vercel creates a preview URL per branch.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### Viewing logs
 
-## Deploy on Vercel
+1. https://vercel.com → the `harbinger-seo-tool` project → **Deployments** tab.
+2. Click the deployment you want.
+3. Two tabs of interest:
+   - **Build Logs** — for compile/install errors.
+   - **Runtime Logs** (or "Logs" on Function pages) — for errors and `console.log` output from API routes.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### Adding or updating environment variables
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1. Vercel dashboard → the project → **Settings** → **Environment Variables**.
+2. Add/edit the variable. Choose which environments it applies to (Production, Preview, Development).
+3. **Env var changes only take effect on the next deploy.** After updating, either push a commit or click **Redeploy** on the most recent deployment in the Deployments tab.
+
+The full list of env vars the app expects is in `.env.example`. Vercel exposes `VERCEL_URL` at runtime (e.g. `harbinger-seo-tool.vercel.app`) — routes that need the canonical app URL (such as OAuth redirect URIs) should derive it from `VERCEL_URL` and fall back to `localhost:3000` for local dev.
+
+### Quick checks after a deploy
+
+- `GET /api/health` → `{ ok: true, envPresent: {...} }` reports whether each service's env keys are populated. Use this to confirm a redeploy picked up env-var changes.

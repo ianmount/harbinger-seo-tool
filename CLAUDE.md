@@ -8,7 +8,15 @@ An internal tool for Harbinger Marketing's SEO engineer to run the full 6-month 
 - Tailwind CSS + shadcn/ui for styling and primitives. **shadcn was installed manually, not via `npx shadcn init`**, because the sandbox allowlist blocks `ui.shadcn.com`. Components were fetched from `https://raw.githubusercontent.com/shadcn-ui/ui/main/apps/v4/registry/new-york-v4/ui/`. Style is `new-york` (the only style available for Tailwind v4); base color is `slate`; CSS variables live in `app/globals.css` under `:root` and `.dark`. To add a new component in the future: (a) ask the user to add `ui.shadcn.com` to the sandbox allowlist and then run `npx shadcn@latest add <name>`, OR (b) fetch `components/ui/<name>.tsx` from the same GitHub raw URL and rewrite any `@/registry/new-york-v4/ui/*` imports to `@/components/ui/*`. Note: upstream replaced `toast` with `sonner` — use `sonner` for toast notifications.
 - Node 20+ runtime
 - Airtable SDK, Anthropic SDK, googleapis package, native fetch for DataForSEO
-- Runs on localhost only for MVP (no deployment yet)
+- Deployed to Vercel (see Deployment & Dev Workflow below); not localhost-only anymore
+
+## Deployment & Dev Workflow
+- Deployed to Vercel at **https://harbinger-seo-tool.vercel.app**. Every push to `main` triggers an automatic production redeploy; pushes to other branches create preview deploys.
+- **Env vars for the deployed app live in the Vercel dashboard** (Settings → Environment Variables), NOT in `.env.local`. `.env.local` is kept in the repo root as a template for local dev only; it is not the source of truth for the deployed app.
+- Primary test target is the Vercel URL. The sandbox's own localhost is not usable for external APIs — two of the four external hosts (`api.airtable.com`, `api.dataforseo.com`) are blocked by the Claude Code sandbox egress allowlist. Vercel has full network access, so the deployed app can reach all four.
+- To view logs: Vercel dashboard → Deployments → click the deployment → Logs tab (build logs and runtime/function logs are separate tabs there).
+- To add/update an env var: Vercel dashboard → Settings → Environment Variables. Changes take effect only on the next deploy, so trigger a redeploy after updating (push a commit, or "Redeploy" button on the latest deployment).
+- If a route depends on `VERCEL_URL` / similar runtime-only vars (e.g. OAuth redirect URIs), branch on `process.env.VERCEL_URL` to build `https://${VERCEL_URL}` and fall back to `http://localhost:3000` when not set.
 
 ## External APIs
 1. **Anthropic Claude** — strategy, content generation, outreach drafts, report narratives. Use `claude-opus-4-7` unless the user says otherwise.
@@ -26,7 +34,9 @@ An internal tool for Harbinger Marketing's SEO engineer to run the full 6-month 
 - `lib/` — typed clients and helpers (airtable.ts, claude.ts, dataforseo.ts, gsc.ts, types.ts)
 - `components/` — shared React components (PartnerSelector, TabNav, shadcn components in components/ui)
 
-## Environment Variables (all in .env.local, never commit)
+## Environment Variables
+Deployed app: set in Vercel dashboard (Settings → Environment Variables).
+Local dev: set in `.env.local` (never committed; template in `.env.example`).
 - `ANTHROPIC_API_KEY`
 - `DATAFORSEO_LOGIN`, `DATAFORSEO_PASSWORD`
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`
