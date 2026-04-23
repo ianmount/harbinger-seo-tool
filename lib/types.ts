@@ -40,3 +40,35 @@ export interface Partner {
   industryKnowledge?: string
   unfilledContext?: PartnerContextField[]
 }
+
+/**
+ * Normalized keyword result across DataForSEO endpoints. Fields use the raw
+ * API naming (snake_case) so the mapping from DataForSEO responses is direct.
+ *
+ * - `search_volume`, `cpc`, `competition`, `competition_level`: populated by
+ *   keyword_ideas, keyword_suggestions, and search_volume endpoints.
+ * - `keyword_difficulty` (0–100): populated by bulk_keyword_difficulty, and
+ *   opportunistically by keyword_ideas/suggestions when DataForSEO includes
+ *   it under `keyword_properties`.
+ * - `competition` is normalized to the 0–1 range. The Google Ads endpoint
+ *   returns a 0–100 index; we divide by 100.
+ * - `competition_level` is the string bucket DataForSEO returns
+ *   ("HIGH" / "MEDIUM" / "LOW"). Always uppercase when present.
+ */
+export type CompetitionLevel = "HIGH" | "MEDIUM" | "LOW"
+
+export interface KeywordResult {
+  keyword: string
+  search_volume?: number
+  cpc?: number
+  competition?: number
+  competition_level?: CompetitionLevel
+  keyword_difficulty?: number
+}
+
+/**
+ * DataForSEO location param. Prefer `{ name }` for "live" endpoints because
+ * they accept `location_name` directly without a code lookup. `{ code }` is
+ * supported for when a caller has already resolved to a specific location id.
+ */
+export type DfsLocation = { code: number } | { name: string }
