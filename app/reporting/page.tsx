@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import type { DateRange } from "react-day-picker"
 import { marked } from "marked"
 import ReactMarkdown from "react-markdown"
@@ -8,13 +8,21 @@ import { CalendarIcon, DownloadIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Calendar } from "@/components/ui/calendar"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { useSelectedPartner } from "@/lib/use-selected-partner"
+import { findGscSiteCandidates } from "@/lib/gsc-site-match"
 import { cn } from "@/lib/utils"
 import type {
   GSCDailyRow,
+  GSCSiteInfo,
   GSCTopPageRow,
   GSCTopQueryRow,
-  Partner,
 } from "@/lib/types"
 
 type Phase =
@@ -23,6 +31,12 @@ type Phase =
   | { status: "generating" }
   | { status: "done"; report: string; partnerName: string; range: DateRange }
   | { status: "error"; message: string }
+
+type SitesState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; candidates: GSCSiteInfo[] }
 
 interface GscReportData {
   topQueries: GSCTopQueryRow[]
@@ -55,13 +69,6 @@ function formatRange(range: DateRange | undefined): string {
     })
   if (!range.to) return fmt(range.from)
   return `${fmt(range.from)} – ${fmt(range.to)}`
-}
-
-function partnerWebsiteToGscSiteUrl(website: string): string {
-  let url = website.trim()
-  if (!/^https?:\/\//i.test(url)) url = `https://${url}`
-  if (!url.endsWith("/")) url = `${url}/`
-  return url
 }
 
 function triggerHtmlDownload(
@@ -134,25 +141,73 @@ export default function ReportingPage() {
   const [range, setRange] = useState<DateRange | undefined>(defaultRange)
   const [phase, setPhase] = useState<Phase>({ status: "idle" })
   const [popoverOpen, setPopoverOpen] = useState(false)
+  const [sitesState, setSitesState] = useState<SitesState>({ status: "idle" })
+  const [chosenSiteUrl, setChosenSiteUrl] = useState<string | null>(null)
+
+  // Fetch the accessible GSC properties once a partner is selected, then keep
+  // only ones whose hostname matches the partner's website.
+  useEffect(() => {
+    if (!partner) {
+      setSitesState({ status: "idle" })
+      return
+    }
+    const partnerWebsite = partner.website
+    const abort = new AbortController()
+    setSitesState({ status: "loading" })
+
+    async function load() {
+      try {
+        const response = await fetch("/api/gsc/sites", { signal: abort.signal })
+        const body = (await response.json().catch(() => ({}))) as {
+          sites?: GSCSiteInfo[]
+          error?: string
+        }
+        if (!response.ok) {
+          throw new Error(body.error ?? `HTTP ${response.status}`)
+        }
+        const candidates = findGscSiteCandidates(
+          partnerWebsite,
+          body.sites ?? [],
+        )
+        setSitesState({ status: "ready", candidates })
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === "AbortError") return
+        setSitesState({
+          status: "error",
+          message:
+            err instanceof Error ? err.message : "Failed to load GSC sites",
+        })
+      }
+    }
+    load()
+    return () => abort.abort()
+  }, [partner])
+
+  // Auto-select the highest-ranked candidate whenever the candidate list
+  // changes (e.g., partner switch). User can still override via the Select.
+  useEffect(() => {
+    if (sitesState.status === "ready") {
+      setChosenSiteUrl(sitesState.candidates[0]?.siteUrl ?? null)
+    } else {
+      setChosenSiteUrl(null)
+    }
+  }, [sitesState])
 
   const canGenerate = useMemo(
     () =>
       !!partner &&
       !!range?.from &&
       !!range?.to &&
+      !!chosenSiteUrl &&
       (phase.status === "idle" ||
         phase.status === "done" ||
         phase.status === "error"),
-    [partner, range, phase.status],
-  )
-
-  const siteUrl = useMemo(
-    () => (partner ? partnerWebsiteToGscSiteUrl(partner.website) : null),
-    [partner],
+    [partner, range, chosenSiteUrl, phase.status],
   )
 
   const handleGenerate = useCallback(async () => {
-    if (!partner || !range?.from || !range?.to || !siteUrl) return
+    if (!partner || !range?.from || !range?.to || !chosenSiteUrl) return
+    const siteUrl = chosenSiteUrl
     const startDate = iso(range.from)
     const endDate = iso(range.to)
 
@@ -237,7 +292,7 @@ export default function ReportingPage() {
           err instanceof Error ? err.message : "Failed to generate report",
       })
     }
-  }, [partner, range, siteUrl])
+  }, [partner, range, chosenSiteUrl])
 
   return (
     <div className="space-y-6">
@@ -291,6 +346,18 @@ export default function ReportingPage() {
               </Popover>
             </div>
 
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-muted-foreground">
+                GSC property
+              </span>
+              <GscSiteSelect
+                state={sitesState}
+                value={chosenSiteUrl}
+                onChange={setChosenSiteUrl}
+                partnerWebsite={partner.website}
+              />
+            </div>
+
             <Button
               onClick={handleGenerate}
               disabled={!canGenerate}
@@ -303,8 +370,6 @@ export default function ReportingPage() {
                   : "Generate Report"}
             </Button>
           </section>
-
-          <PartnerSiteHint partner={partner} siteUrl={siteUrl} />
 
           <Status phase={phase} />
 
@@ -322,21 +387,63 @@ export default function ReportingPage() {
   )
 }
 
-function PartnerSiteHint({
-  partner,
-  siteUrl,
+function GscSiteSelect({
+  state,
+  value,
+  onChange,
+  partnerWebsite,
 }: {
-  partner: Partner
-  siteUrl: string | null
+  state: SitesState
+  value: string | null
+  onChange: (v: string) => void
+  partnerWebsite: string
 }) {
-  if (!siteUrl) return null
+  if (state.status === "loading" || state.status === "idle") {
+    return (
+      <div className="w-[360px] rounded-md border px-3 py-2 text-sm text-muted-foreground">
+        Loading GSC properties…
+      </div>
+    )
+  }
+  if (state.status === "error") {
+    return (
+      <div
+        className="w-[360px] rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+        role="alert"
+      >
+        {state.message}
+      </div>
+    )
+  }
+  if (state.candidates.length === 0) {
+    return (
+      <div
+        className="w-[360px] rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+        role="alert"
+      >
+        No GSC property matched{" "}
+        <code className="font-mono">{partnerWebsite}</code>. The authed Google
+        account needs access (see{" "}
+        <code className="font-mono">/api/gsc/sites</code>).
+      </div>
+    )
+  }
   return (
-    <p className="text-xs text-muted-foreground">
-      {partner.name} · GSC siteUrl: <code className="text-foreground">{siteUrl}</code>
-      {" · "}
-      If this doesn&apos;t match a property, check what&apos;s available at{" "}
-      <code>/api/gsc/sites</code>.
-    </p>
+    <Select value={value ?? ""} onValueChange={onChange}>
+      <SelectTrigger className="w-[360px]" aria-label="GSC property">
+        <SelectValue placeholder="Select a GSC property…" />
+      </SelectTrigger>
+      <SelectContent>
+        {state.candidates.map((s) => (
+          <SelectItem key={s.siteUrl} value={s.siteUrl}>
+            <span className="font-mono text-xs">{s.siteUrl}</span>
+            <span className="ml-2 text-[10px] text-muted-foreground">
+              {s.permissionLevel}
+            </span>
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   )
 }
 
