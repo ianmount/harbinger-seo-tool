@@ -70,6 +70,11 @@ interface SortState {
 
 const FILTER_ALL = "__all__"
 const MAX_SEEDS = 6
+const DEFAULT_MAX_KEYWORDS = 300
+// Keep in sync with MAX_KEYWORDS_HARD_LIMIT in /api/claude/keywords/route.ts.
+// Past this the compact-tuple output risks truncating against Claude's
+// max_tokens ceiling.
+const MAX_KEYWORDS_CEILING = 500
 
 function parseSeedsFromTextarea(text: string): string[] {
   return text
@@ -238,6 +243,9 @@ export default function KeywordResearchPage() {
   })
   const [selectedLocation, setSelectedLocation] =
     useState<DfsLabsLocation | null>(null)
+  const [maxKeywordsInput, setMaxKeywordsInput] = useState<string>(
+    String(DEFAULT_MAX_KEYWORDS),
+  )
 
   useEffect(() => {
     // Reset state when partner changes. The URL param drives partner selection,
@@ -248,6 +256,7 @@ export default function KeywordResearchPage() {
     setRecFilter(FILTER_ALL)
     setSeedsText("")
     setSelectedLocation(null)
+    setMaxKeywordsInput(String(DEFAULT_MAX_KEYWORDS))
   }, [partner?.id])
 
   const defaultSeeds = useMemo(
@@ -278,6 +287,11 @@ export default function KeywordResearchPage() {
       })
       return
     }
+    const parsedMax = parseInt(maxKeywordsInput, 10)
+    const maxKeywords =
+      Number.isFinite(parsedMax) && parsedMax > 0
+        ? Math.min(parsedMax, MAX_KEYWORDS_CEILING)
+        : DEFAULT_MAX_KEYWORDS
     if (!selectedLocation) {
       setPhase({
         status: "error",
@@ -513,6 +527,7 @@ export default function KeywordResearchPage() {
             partner,
             rawKeywords: enriched,
             gscHistorical,
+            maxKeywords,
           }),
         },
         "Claude clustering",
@@ -531,7 +546,7 @@ export default function KeywordResearchPage() {
           err instanceof Error ? err.message : "Claude clustering failed",
       })
     }
-  }, [partner, effectiveSeeds, selectedLocation])
+  }, [partner, effectiveSeeds, selectedLocation, maxKeywordsInput])
 
   const rows = useMemo<ScoredKeyword[]>(
     () => (phase.status === "done" ? phase.rows : []),
@@ -636,6 +651,27 @@ export default function KeywordResearchPage() {
                 {effectiveSeeds.length > 0
                   ? `Using: ${effectiveSeeds.slice(0, MAX_SEEDS).join(", ")}`
                   : "No seeds yet."}
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="max-keywords">Max keywords to surface</Label>
+              <input
+                id="max-keywords"
+                type="number"
+                min={10}
+                max={MAX_KEYWORDS_CEILING}
+                step={10}
+                value={maxKeywordsInput}
+                onChange={(e) => setMaxKeywordsInput(e.target.value)}
+                disabled={running}
+                className="h-9 w-[140px] rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              <p className="text-xs text-muted-foreground">
+                How many keywords to send to Claude for clustering and scoring.
+                Every scored keyword appears in the results table. Default{" "}
+                {DEFAULT_MAX_KEYWORDS}, hard-capped at {MAX_KEYWORDS_CEILING} to
+                keep Claude&apos;s output within token limits.
               </p>
             </div>
 

@@ -48,6 +48,11 @@ const bodySchema = z.object({
   partner: partnerSchema,
   rawKeywords: z.array(rawKeywordSchema),
   gscHistorical: z.array(gscRowSchema).default([]),
+  // Caller-controlled ceiling on how many keywords we feed to Claude (and,
+  // since every scored keyword surfaces in the output, how many end up in
+  // the results table). Hard-capped at MAX_KEYWORDS_HARD_LIMIT below to
+  // stay inside Claude's output-token budget.
+  maxKeywords: z.number().int().positive().optional(),
 })
 
 type ParsedBody = z.infer<typeof bodySchema>
@@ -83,9 +88,12 @@ type ClaudeKeywordTuple = z.infer<typeof claudeKeywordTupleSchema>
 
 // Token-budget guard. 300 keywords × ~15 compact-output tokens ≈ 4.5k
 // output tokens, well inside CLAUDE_MAX_TOKENS. The prompt itself caps
-// around 15k input tokens at this count. If we ever need to go beyond
-// 300, split into multiple Claude calls and merge clusters.
-const MAX_KEYWORDS_TO_SCORE = 300
+// around 15k input tokens at this count. The caller can tune
+// `maxKeywords` in the request body; MAX_KEYWORDS_HARD_LIMIT is the
+// absolute ceiling past which we start risking truncation even with
+// the compact-tuple output format.
+const DEFAULT_MAX_KEYWORDS = 300
+const MAX_KEYWORDS_HARD_LIMIT = 500
 const CLAUDE_MAX_TOKENS = 32000
 
 const SYSTEM_PROMPT =
@@ -359,7 +367,9 @@ export async function POST(request: Request) {
     )
   }
 
-  const keywords = deduped.slice(0, MAX_KEYWORDS_TO_SCORE)
+  const requestedMax = parsed.data.maxKeywords ?? DEFAULT_MAX_KEYWORDS
+  const effectiveMax = Math.min(requestedMax, MAX_KEYWORDS_HARD_LIMIT)
+  const keywords = deduped.slice(0, effectiveMax)
   const truncated = deduped.length - keywords.length
 
   const prompt = buildPrompt(parsed.data, keywords)
