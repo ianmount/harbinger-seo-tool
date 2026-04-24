@@ -6,10 +6,29 @@ import { requireEnv } from "@/lib/env"
 export const DEFAULT_MODEL = "claude-opus-4-7"
 export const DEFAULT_MAX_TOKENS = 4096
 
+/**
+ * Published Anthropic pricing for Claude Opus (per 1M tokens). These are
+ * used by callers that want to surface an estimated cost in the UI — the
+ * number is an approximation, not a billing reconciliation. Update if
+ * Anthropic changes the published rates.
+ */
+export const OPUS_INPUT_PRICE_PER_MTOK = 15
+export const OPUS_OUTPUT_PRICE_PER_MTOK = 75
+
 export interface CallClaudeOptions {
   model?: string
   maxTokens?: number
   system?: string
+}
+
+export interface ClaudeUsage {
+  input_tokens: number
+  output_tokens: number
+}
+
+export interface ClaudeResult {
+  text: string
+  usage: ClaudeUsage
 }
 
 export class ClaudeApiError extends Error {
@@ -29,10 +48,10 @@ function getClient(): Anthropic {
   return cachedClient
 }
 
-export async function callClaude(
+export async function callClaudeDetailed(
   prompt: string,
   opts: CallClaudeOptions = {},
-): Promise<string> {
+): Promise<ClaudeResult> {
   const model = opts.model ?? DEFAULT_MODEL
   const maxTokens = opts.maxTokens ?? DEFAULT_MAX_TOKENS
   const client = getClient()
@@ -76,5 +95,16 @@ export async function callClaude(
       undefined,
     )
   }
-  return textBlocks.map((b) => b.text).join("")
+  return {
+    text: textBlocks.map((b) => b.text).join(""),
+    usage: { input_tokens, output_tokens },
+  }
+}
+
+export async function callClaude(
+  prompt: string,
+  opts: CallClaudeOptions = {},
+): Promise<string> {
+  const { text } = await callClaudeDetailed(prompt, opts)
+  return text
 }
