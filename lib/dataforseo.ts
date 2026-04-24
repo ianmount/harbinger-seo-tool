@@ -318,21 +318,35 @@ const labsLocationItemSchema = z
 
 let cachedLocations: DfsLabsLocation[] | null = null
 let cachedLocationsFetchedAt = 0
+let cachedLocationsCountry = ""
 const LOCATIONS_CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24h
 
 /**
- * Fetch the full DataForSEO Labs location list. Cached in-process for 24h
- * because the taxonomy changes rarely and the response is large (~80k rows).
- * First call after cold start pays one GET to DFS; subsequent calls return
- * cached data.
+ * Fetch DataForSEO's Google Ads location list for a country. We use the
+ * Google Ads locations endpoint (not /v3/dataforseo_labs/locations_and_languages
+ * — that one only returns countries with their supported languages, not
+ * the full city/state taxonomy we need for keyword research). The
+ * location_code values returned here are Google's canonical IDs and work
+ * directly with DataForSEO Labs endpoints.
+ *
+ * Cached in-process for 24h because the taxonomy changes rarely and the
+ * response is large (US alone is ~100k rows). First call after cold start
+ * pays one DFS request (several seconds); subsequent calls return cache.
  */
-export async function listLabsLocations(): Promise<DfsLabsLocation[]> {
+export async function listLabsLocations(
+  countryIsoCode = "US",
+): Promise<DfsLabsLocation[]> {
+  const country = countryIsoCode.toUpperCase()
   const now = Date.now()
-  if (cachedLocations && now - cachedLocationsFetchedAt < LOCATIONS_CACHE_TTL_MS) {
+  if (
+    cachedLocations &&
+    cachedLocationsCountry === country &&
+    now - cachedLocationsFetchedAt < LOCATIONS_CACHE_TTL_MS
+  ) {
     return cachedLocations
   }
 
-  const url = `${DFS_BASE}/v3/dataforseo_labs/locations_and_languages`
+  const url = `${DFS_BASE}/v3/keywords_data/google_ads/locations/${country}`
   const response = await fetch(url, {
     method: "GET",
     headers: { Authorization: authHeader() },
@@ -341,7 +355,7 @@ export async function listLabsLocations(): Promise<DfsLabsLocation[]> {
   if (!response.ok) {
     const text = await response.text()
     throw new DataForSEOError(
-      `DataForSEO HTTP ${response.status} fetching locations: ${text.slice(0, 500)}`,
+      `DataForSEO HTTP ${response.status} fetching locations for ${country}: ${text.slice(0, 500)}`,
       { status: response.status },
     )
   }
@@ -378,8 +392,9 @@ export async function listLabsLocations(): Promise<DfsLabsLocation[]> {
 
   cachedLocations = locations
   cachedLocationsFetchedAt = now
+  cachedLocationsCountry = country
   console.log(
-    `[dataforseo] cached ${locations.length} Labs locations for ${LOCATIONS_CACHE_TTL_MS / 1000 / 60 / 60}h`,
+    `[dataforseo] cached ${locations.length} locations for country=${country}`,
   )
   return locations
 }

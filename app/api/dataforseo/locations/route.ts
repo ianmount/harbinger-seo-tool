@@ -44,15 +44,9 @@ export async function GET(request: Request) {
       url.searchParams.get("country") ?? DEFAULT_COUNTRY
     ).toUpperCase()
 
-    const all = await listLabsLocations()
-    const scoped = country
-      ? all.filter(
-          (l) =>
-            l.country_iso_code === country ||
-            // The country row itself has no parent and country_iso_code matches.
-            (l.location_type === "Country" && l.country_iso_code === country),
-        )
-      : all
+    // Whole list is already scoped to the requested country by
+    // listLabsLocations (it hits /v3/keywords_data/google_ads/locations/{cc}).
+    const scoped = await listLabsLocations(country)
 
     if (!q) {
       // No query: return the country row + its direct children (states/regions).
