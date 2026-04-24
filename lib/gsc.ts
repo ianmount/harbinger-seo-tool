@@ -2,7 +2,13 @@ import "server-only"
 import { google } from "googleapis"
 import type { OAuth2Client } from "google-auth-library"
 import { env, requireEnv } from "@/lib/env"
-import type { GSCDailyRow, GSCQueryRow, GSCSiteInfo } from "@/lib/types"
+import type {
+  GSCDailyRow,
+  GSCQueryRow,
+  GSCSiteInfo,
+  GSCTopPageRow,
+  GSCTopQueryRow,
+} from "@/lib/types"
 
 export const GSC_SCOPES = [
   "https://www.googleapis.com/auth/webmasters.readonly",
@@ -33,6 +39,24 @@ export class GSCError extends Error {
  * production URL, which is fine because the refresh token lives in env vars,
  * not per-request state.
  */
+/**
+ * Normalize a partner's freeform website URL into a GSC URL-prefix siteUrl.
+ *
+ * Ensures a protocol and a trailing slash. Partners stored as domain
+ * properties ("sc-domain:example.com") would need a different derivation —
+ * we'll add that once Airtable has a dedicated GSC field.
+ */
+export function partnerWebsiteToGscSiteUrl(website: string): string {
+  let url = website.trim()
+  if (!/^https?:\/\//i.test(url)) {
+    url = `https://${url}`
+  }
+  if (!url.endsWith("/")) {
+    url = `${url}/`
+  }
+  return url
+}
+
 export function getRedirectUri(): string {
   const prodHost = process.env.VERCEL_PROJECT_PRODUCTION_URL
   const base = prodHost ? `https://${prodHost}` : "http://localhost:3000"
@@ -158,6 +182,66 @@ export async function getQueries(params: {
       const page = keys[1]
       if (!query || !page) return []
       return [{ query, page, ...normalizeRow(row) }]
+    })
+  } catch (error: unknown) {
+    wrapApiError(error)
+  }
+}
+
+export async function getTopQueries(params: {
+  siteUrl: string
+  startDate: string
+  endDate: string
+  rowLimit?: number
+}): Promise<GSCTopQueryRow[]> {
+  assertRefreshToken()
+  const auth = getOAuth2Client()
+  const webmasters = google.webmasters({ version: "v3", auth })
+  try {
+    const response = await webmasters.searchanalytics.query({
+      siteUrl: params.siteUrl,
+      requestBody: {
+        startDate: params.startDate,
+        endDate: params.endDate,
+        dimensions: ["query"],
+        rowLimit: params.rowLimit ?? 100,
+      },
+    })
+    const rows = response.data.rows ?? []
+    return rows.flatMap((row: RawRow) => {
+      const query = row.keys?.[0]
+      if (!query) return []
+      return [{ query, ...normalizeRow(row) }]
+    })
+  } catch (error: unknown) {
+    wrapApiError(error)
+  }
+}
+
+export async function getTopPages(params: {
+  siteUrl: string
+  startDate: string
+  endDate: string
+  rowLimit?: number
+}): Promise<GSCTopPageRow[]> {
+  assertRefreshToken()
+  const auth = getOAuth2Client()
+  const webmasters = google.webmasters({ version: "v3", auth })
+  try {
+    const response = await webmasters.searchanalytics.query({
+      siteUrl: params.siteUrl,
+      requestBody: {
+        startDate: params.startDate,
+        endDate: params.endDate,
+        dimensions: ["page"],
+        rowLimit: params.rowLimit ?? 100,
+      },
+    })
+    const rows = response.data.rows ?? []
+    return rows.flatMap((row: RawRow) => {
+      const page = row.keys?.[0]
+      if (!page) return []
+      return [{ page, ...normalizeRow(row) }]
     })
   } catch (error: unknown) {
     wrapApiError(error)

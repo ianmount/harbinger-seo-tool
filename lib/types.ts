@@ -89,6 +89,24 @@ export interface GSCQueryRow {
   position: number
 }
 
+/** Row from searchanalytics.query with dimensions ['query']. */
+export interface GSCTopQueryRow {
+  query: string
+  clicks: number
+  impressions: number
+  ctr: number
+  position: number
+}
+
+/** Row from searchanalytics.query with dimensions ['page']. */
+export interface GSCTopPageRow {
+  page: string
+  clicks: number
+  impressions: number
+  ctr: number
+  position: number
+}
+
 /** Row from searchanalytics.query with dimensions ['date']. */
 export interface GSCDailyRow {
   date: string
