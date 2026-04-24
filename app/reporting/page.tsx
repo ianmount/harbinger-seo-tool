@@ -18,8 +18,10 @@ import {
 } from "@/components/ui/select"
 import { useSelectedPartner } from "@/lib/use-selected-partner"
 import { findGscSiteCandidates } from "@/lib/gsc-site-match"
+import { findGa4PropertyCandidates } from "@/lib/ga4-site-match"
 import { cn } from "@/lib/utils"
 import type {
+  GA4PropertyInfo,
   GA4SeoReport,
   GSCDailyRow,
   GSCSiteInfo,
@@ -46,6 +48,24 @@ type SitesState =
   | { status: "loading" }
   | { status: "error"; message: string }
   | { status: "ready"; candidates: GSCSiteInfo[] }
+
+/**
+ * GA4 property resolution state. Auto-detected by matching the partner's
+ * website hostname against each property's web-stream URL. When a partner
+ * has an explicit `ga4PropertyId` in Airtable, that value always wins
+ * (explicit override); only falls back to hostname matching when the field
+ * is empty.
+ */
+type Ga4State =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | {
+      status: "ready"
+      candidates: GA4PropertyInfo[]
+      /** "airtable" when Partner.ga4PropertyId is populated; "auto" otherwise. */
+      source: "airtable" | "auto" | "none"
+    }
 
 interface GscReportData {
   topQueries: GSCTopQueryRow[]
@@ -170,6 +190,10 @@ export default function ReportingPage() {
   const [popoverOpen, setPopoverOpen] = useState(false)
   const [sitesState, setSitesState] = useState<SitesState>({ status: "idle" })
   const [chosenSiteUrl, setChosenSiteUrl] = useState<string | null>(null)
+  const [ga4State, setGa4State] = useState<Ga4State>({ status: "idle" })
+  const [chosenGa4PropertyId, setChosenGa4PropertyId] = useState<string | null>(
+    null,
+  )
 
   // Fetch the accessible GSC properties once a partner is selected, then keep
   // only ones whose hostname matches the partner's website.
@@ -211,6 +235,90 @@ export default function ReportingPage() {
     return () => abort.abort()
   }, [partner])
 
+  // Fetch the list of GA4 properties and resolve a candidate for this
+  // partner. Runs in parallel with the GSC fetch above — the two are
+  // independent.
+  useEffect(() => {
+    if (!partner) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setGa4State({ status: "idle" })
+      return
+    }
+    const partnerWebsite = partner.website
+    const airtableOverride = partner.ga4PropertyId
+    const abort = new AbortController()
+    setGa4State({ status: "loading" })
+
+    async function load() {
+      try {
+        const response = await fetch("/api/ga4/properties", {
+          signal: abort.signal,
+        })
+        const body = (await response.json().catch(() => ({}))) as {
+          properties?: GA4PropertyInfo[]
+          error?: string
+          code?: string
+        }
+        if (!response.ok) {
+          // If Admin API enumeration fails but we have an Airtable override,
+          // we can still drive the Data API with the explicit property ID.
+          // Synthesize a single candidate so the rest of the flow works.
+          if (airtableOverride) {
+            setGa4State({
+              status: "ready",
+              source: "airtable",
+              candidates: [
+                {
+                  propertyId: airtableOverride.startsWith("properties/")
+                    ? airtableOverride
+                    : `properties/${airtableOverride}`,
+                  displayName: "(from Airtable)",
+                },
+              ],
+            })
+            return
+          }
+          throw new Error(body.error ?? `HTTP ${response.status}`)
+        }
+        const all = body.properties ?? []
+        if (airtableOverride) {
+          const normalized = airtableOverride.startsWith("properties/")
+            ? airtableOverride
+            : `properties/${airtableOverride}`
+          const found = all.find((p) => p.propertyId === normalized)
+          setGa4State({
+            status: "ready",
+            source: "airtable",
+            candidates: found
+              ? [found]
+              : [
+                  {
+                    propertyId: normalized,
+                    displayName: "(from Airtable, not visible in Admin API)",
+                  },
+                ],
+          })
+          return
+        }
+        const matched = findGa4PropertyCandidates(partnerWebsite, all)
+        setGa4State({
+          status: "ready",
+          source: matched.length > 0 ? "auto" : "none",
+          candidates: matched,
+        })
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === "AbortError") return
+        setGa4State({
+          status: "error",
+          message:
+            err instanceof Error ? err.message : "Failed to load GA4 properties",
+        })
+      }
+    }
+    load()
+    return () => abort.abort()
+  }, [partner])
+
   // Auto-select the highest-ranked candidate whenever the candidate list
   // changes (e.g., partner switch). User can still override via the Select.
   useEffect(() => {
@@ -221,6 +329,15 @@ export default function ReportingPage() {
       setChosenSiteUrl(null)
     }
   }, [sitesState])
+
+  useEffect(() => {
+    if (ga4State.status === "ready") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setChosenGa4PropertyId(ga4State.candidates[0]?.propertyId ?? null)
+    } else {
+      setChosenGa4PropertyId(null)
+    }
+  }, [ga4State])
 
   const canGenerate = useMemo(
     () =>
@@ -288,19 +405,20 @@ export default function ReportingPage() {
       return
     }
 
-    // GA4 is additive. If the partner has a ga4PropertyId we fetch current +
-    // prior period so Claude can call out trends; if the fetch fails we log
-    // and fall through to a GSC-only report rather than blocking on it.
+    // GA4 is additive. Property was resolved earlier (Airtable override or
+    // hostname auto-match). If we have one, fetch current + prior-period
+    // reports so Claude can call out trends; if the fetch fails we log and
+    // fall through to a GSC-only report rather than blocking on it.
     let ga4Data: GA4SeoReport | undefined
     let ga4PriorData: GA4SeoReport | undefined
-    if (partner.ga4PropertyId) {
+    if (chosenGa4PropertyId) {
       setPhase({ status: "fetching-ga4" })
       try {
         const current = await fetch("/api/ga4/report", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            propertyId: partner.ga4PropertyId,
+            propertyId: chosenGa4PropertyId,
             startDate,
             endDate,
           }),
@@ -323,7 +441,7 @@ export default function ReportingPage() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              propertyId: partner.ga4PropertyId,
+              propertyId: chosenGa4PropertyId,
               startDate: prior.startDate,
               endDate: prior.endDate,
             }),
@@ -385,7 +503,7 @@ export default function ReportingPage() {
           err instanceof Error ? err.message : "Failed to generate report",
       })
     }
-  }, [partner, range, chosenSiteUrl])
+  }, [partner, range, chosenSiteUrl, chosenGa4PropertyId])
 
   return (
     <div className="space-y-6">
@@ -451,18 +569,30 @@ export default function ReportingPage() {
               />
             </div>
 
-            <div className="ml-auto flex items-center gap-3">
-              <Ga4Badge partner={partner} />
-              <Button onClick={handleGenerate} disabled={!canGenerate}>
-                {phase.status === "fetching-gsc"
-                  ? "Pulling GSC data…"
-                  : phase.status === "fetching-ga4"
-                    ? "Pulling GA4 data…"
-                    : phase.status === "generating"
-                      ? "Generating report…"
-                      : "Generate Report"}
-              </Button>
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-muted-foreground">
+                GA4 property
+              </span>
+              <Ga4PropertySelect
+                state={ga4State}
+                value={chosenGa4PropertyId}
+                onChange={setChosenGa4PropertyId}
+              />
             </div>
+
+            <Button
+              onClick={handleGenerate}
+              disabled={!canGenerate}
+              className="ml-auto"
+            >
+              {phase.status === "fetching-gsc"
+                ? "Pulling GSC data…"
+                : phase.status === "fetching-ga4"
+                  ? "Pulling GA4 data…"
+                  : phase.status === "generating"
+                    ? "Generating report…"
+                    : "Generate Report"}
+            </Button>
           </section>
 
           <Status phase={phase} />
@@ -576,22 +706,73 @@ function Status({ phase }: { phase: Phase }) {
   return null
 }
 
-function Ga4Badge({ partner }: { partner: { ga4PropertyId?: string } }) {
-  if (partner.ga4PropertyId) {
+function Ga4PropertySelect({
+  state,
+  value,
+  onChange,
+}: {
+  state: Ga4State
+  value: string | null
+  onChange: (v: string) => void
+}) {
+  if (state.status === "loading" || state.status === "idle") {
     return (
-      <Badge variant="secondary" className="whitespace-nowrap">
-        GA4 · {partner.ga4PropertyId.replace(/^properties\//, "")}
+      <div className="w-[360px] rounded-md border px-3 py-2 text-sm text-muted-foreground">
+        Resolving GA4 property…
+      </div>
+    )
+  }
+  if (state.status === "error") {
+    // Non-fatal: the tab still works (GSC-only report). Surface the reason
+    // so the engineer can investigate, but don't block generation.
+    return (
+      <div
+        className="w-[360px] rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-900 dark:text-amber-200"
+        title={state.message}
+      >
+        GA4 unavailable — report will use GSC only
+      </div>
+    )
+  }
+  if (state.source === "none") {
+    return (
+      <Badge
+        variant="outline"
+        className="h-9 whitespace-nowrap px-3 text-muted-foreground"
+        title="No GA4 property matched this partner's website, and no override is set in Airtable. Report will use GSC only."
+      >
+        GA4 not configured
       </Badge>
     )
   }
+  const sourceLabel =
+    state.source === "airtable" ? "Airtable override" : "auto-detected"
   return (
-    <Badge
-      variant="outline"
-      className="whitespace-nowrap text-muted-foreground"
-      title="Partner has no GA4 Property ID in Airtable — report will use GSC data only."
-    >
-      GA4 not configured
-    </Badge>
+    <div className="flex items-center gap-2">
+      <Select value={value ?? ""} onValueChange={onChange}>
+        <SelectTrigger className="w-[360px]" aria-label="GA4 property">
+          <SelectValue placeholder="Select a GA4 property…" />
+        </SelectTrigger>
+        <SelectContent>
+          {state.candidates.map((p) => (
+            <SelectItem key={p.propertyId} value={p.propertyId}>
+              <span className="font-medium">{p.displayName}</span>
+              <span className="ml-2 font-mono text-[10px] text-muted-foreground">
+                {p.propertyId.replace(/^properties\//, "")}
+              </span>
+              {p.websiteUrl ? (
+                <span className="ml-2 text-[10px] text-muted-foreground">
+                  {p.websiteUrl}
+                </span>
+              ) : null}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Badge variant="secondary" className="text-[10px]">
+        {sourceLabel}
+      </Badge>
+    </div>
   )
 }
 

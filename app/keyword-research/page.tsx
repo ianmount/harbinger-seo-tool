@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/table"
 import { useSelectedPartner } from "@/lib/use-selected-partner"
 import { findBestGscSite } from "@/lib/gsc-site-match"
+import { findBestGa4Property } from "@/lib/ga4-site-match"
 import {
   findSuggestedDfsLocation,
   parseLocationCities,
@@ -31,6 +32,7 @@ import { cn } from "@/lib/utils"
 import type {
   DfsLabsLocation,
   GA4PageConversion,
+  GA4PropertyInfo,
   GSCQueryRow,
   GSCSiteInfo,
   GSCTopQueryRow,
@@ -487,7 +489,35 @@ export default function KeywordResearchPage() {
       console.warn("[keyword-research] GSC fetch failed, continuing:", err)
     }
 
+    // Resolve the GA4 property: Airtable override wins, otherwise auto-detect
+    // by hostname-matching against /api/ga4/properties. The signal is
+    // optional — every branch that fails just skips the boost.
+    let ga4PropertyId: string | null = null
     if (partner.ga4PropertyId) {
+      ga4PropertyId = partner.ga4PropertyId.startsWith("properties/")
+        ? partner.ga4PropertyId
+        : `properties/${partner.ga4PropertyId}`
+    } else {
+      try {
+        const propsBody = await fetchJson<{ properties: GA4PropertyInfo[] }>(
+          "/api/ga4/properties",
+          { method: "GET" },
+          "GA4 properties list",
+        )
+        const match = findBestGa4Property(
+          partner.website,
+          propsBody.properties ?? [],
+        )
+        ga4PropertyId = match?.propertyId ?? null
+      } catch (err) {
+        console.warn(
+          "[keyword-research] GA4 property lookup failed, continuing without page-signal boost:",
+          err,
+        )
+      }
+    }
+
+    if (ga4PropertyId) {
       try {
         const convBody = await fetchJson<{ results: GA4PageConversion[] }>(
           "/api/ga4/conversions",
@@ -495,7 +525,7 @@ export default function KeywordResearchPage() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              propertyId: partner.ga4PropertyId,
+              propertyId: ga4PropertyId,
               startDate,
               endDate,
             }),

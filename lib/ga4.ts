@@ -151,44 +151,115 @@ function safeRate(num: number, denom: number): number {
 }
 
 /**
- * Enumerate GA4 properties the authed account can see via the Admin API.
+ * Enumerate GA4 properties the authed account can see via the Admin API,
+ * with each property's primary web-stream URL attached when available.
  *
- * Requires the same analytics.readonly scope as the Data API. If this fails
- * with 403 it means the consented token doesn't cover the Admin API — the
- * primary mapping mechanism then becomes Airtable's `GA4 Property ID` field
- * (see Partner.ga4PropertyId), which is already how the reporting/keyword
- * flows resolve a partner to a property.
+ * Implemented as a two-step walk: first `accountSummaries.list` for the
+ * property list, then `properties.dataStreams.list` per property to resolve
+ * the website URL. The per-property call is the expensive part (N+1 pattern
+ * at roughly one call per property), so we:
+ *   - cap concurrency to 10 so we don't hammer Admin API quotas
+ *   - cache the full result at module scope for the life of the serverless
+ *     instance (`PROPERTY_CACHE_TTL_MS`). The cache is per-process on Vercel
+ *     so cold starts re-fetch, which is fine — worst case one slow request.
  *
- * `websiteUrl` would require an additional dataStreams.list call per property
- * (N+1); we leave it undefined and rely on the Airtable Website field for the
- * partner↔site link.
+ * Pass `{ forceRefresh: true }` to bypass the cache (e.g. after a partner
+ * reports a new property they just created).
+ *
+ * Requires analytics.readonly scope — covers both Admin read and Data. If
+ * the token lacks admin access this throws GA4Error with code=FORBIDDEN;
+ * callers can then fall back to Airtable's `GA4 Property ID` field.
+ *
+ * Streams whose `type !== "WEB_DATA_STREAM"` are ignored (mobile app
+ * streams have no SEO-relevant URL). When a property has multiple web
+ * streams we keep the first one returned — the SDK lists them in creation
+ * order, so the oldest / primary stream wins.
  */
-export async function listProperties(): Promise<GA4PropertyInfo[]> {
+const PROPERTY_CACHE_TTL_MS = 10 * 60 * 1000 // 10 minutes
+let propertyCache: { at: number; properties: GA4PropertyInfo[] } | null = null
+
+async function mapWithConcurrency<T, U>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<U>,
+): Promise<U[]> {
+  const results: U[] = new Array(items.length)
+  let next = 0
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const i = next++
+      if (i >= items.length) return
+      results[i] = await fn(items[i], i)
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
+export async function listProperties(
+  opts: { forceRefresh?: boolean } = {},
+): Promise<GA4PropertyInfo[]> {
+  if (
+    !opts.forceRefresh &&
+    propertyCache &&
+    Date.now() - propertyCache.at < PROPERTY_CACHE_TTL_MS
+  ) {
+    return propertyCache.properties
+  }
   assertRefreshToken()
   const auth = getOAuth2Client()
   const admin = google.analyticsadmin({ version: "v1beta", auth })
   try {
-    const properties: GA4PropertyInfo[] = []
+    // Step 1: enumerate properties via accountSummaries (handles paging).
+    const summaries: Array<{ property: string; displayName: string }> = []
     let pageToken: string | undefined
-    // Defensive loop: accountSummaries paginates at 50/page by default.
     do {
       const response = await admin.accountSummaries.list({
         pageSize: 200,
         pageToken,
       })
-      const summaries = response.data.accountSummaries ?? []
-      for (const account of summaries) {
-        const props = account.propertySummaries ?? []
-        for (const p of props) {
+      const accounts = response.data.accountSummaries ?? []
+      for (const account of accounts) {
+        for (const p of account.propertySummaries ?? []) {
           if (!p.property || !p.displayName) continue
-          properties.push({
-            propertyId: p.property, // already in "properties/X" form
+          summaries.push({
+            property: p.property,
             displayName: p.displayName,
           })
         }
       }
       pageToken = response.data.nextPageToken ?? undefined
     } while (pageToken)
+
+    // Step 2: fetch data streams for each property, concurrency-limited.
+    // A stream failure for one property shouldn't tank the whole list — we
+    // just leave websiteUrl undefined for that property and let the caller
+    // decide what to do (manual override).
+    const properties = await mapWithConcurrency(summaries, 10, async (p) => {
+      let websiteUrl: string | undefined
+      try {
+        const streamsResp = await admin.properties.dataStreams.list({
+          parent: p.property,
+          pageSize: 50,
+        })
+        const webStream = (streamsResp.data.dataStreams ?? []).find(
+          (s) => s.type === "WEB_DATA_STREAM" && s.webStreamData?.defaultUri,
+        )
+        websiteUrl = webStream?.webStreamData?.defaultUri ?? undefined
+      } catch (streamErr) {
+        console.warn(
+          `[ga4] dataStreams.list failed for ${p.property}; continuing without websiteUrl:`,
+          streamErr instanceof Error ? streamErr.message : streamErr,
+        )
+      }
+      return {
+        propertyId: p.property,
+        displayName: p.displayName,
+        websiteUrl,
+      }
+    })
+
+    propertyCache = { at: Date.now(), properties }
     return properties
   } catch (error: unknown) {
     wrapApiError(error, "listProperties")

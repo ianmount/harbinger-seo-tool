@@ -82,15 +82,16 @@ Five tabs, each wrapping one workflow:
 - No outreach email sending — drafts only
 
 ## GA4 conventions
-- **Property IDs live in Airtable** under the `GA4 Property ID` field and surface on `Partner.ga4PropertyId`. Values may be stored as a bare numeric ID (`"123456789"`) or the canonical resource name (`"properties/123456789"`) — both flow through `normalizePropertyId()` in `lib/ga4.ts` before any API call.
-- **Integration is optional per partner.** Code paths that use GA4 (`app/reporting`, `app/keyword-research`) must check for `partner.ga4PropertyId` and degrade gracefully when it's missing: the Reporting tab shows a "GA4 not configured" badge and generates a GSC-only report; the Keyword Research tab skips the high-converting-page signal entirely.
+- **Property resolution is hybrid: auto-detect first, Airtable override second.** The default flow is `listProperties()` in `lib/ga4.ts` → for every GA4 property the authed account can see, fetch its web data streams and record the `webStreamData.defaultUri`. `lib/ga4-site-match.ts` then matches the partner's `website` hostname against each stream URL. For 95% of partners this resolves the property automatically with zero Airtable work.
+- **Airtable `GA4 Property ID` field is an explicit override.** Populate it only when (a) the partner has multiple GA4 properties and auto-detect picks the wrong one, (b) the web stream's `defaultUri` doesn't match the public website (e.g. staging domain mapped to prod), or (c) Admin API enumeration is failing and you need to force a specific property. Values may be stored as a bare numeric ID (`"123456789"`) or the canonical resource name (`"properties/123456789"`) — both flow through `normalizePropertyId()` in `lib/ga4.ts`.
+- **Property list is cached for 10 minutes** per serverless instance (`PROPERTY_CACHE_TTL_MS`). The first request pays the N+1 cost of enumerating streams across all properties (concurrency-capped at 10); subsequent requests are instant. Hit `/api/ga4/properties?refresh=1` to bust the cache after provisioning a new property.
+- **Integration is optional per partner.** Code paths that use GA4 (`app/reporting`, `app/keyword-research`) must handle the "no match, no override" case gracefully: the Reporting tab shows a "GA4 not configured" badge and generates a GSC-only report; the Keyword Research tab skips the high-converting-page signal entirely.
 - **No partner-side coordination needed.** The SEO Ops Google account that's authorized for GSC has Viewer access to every partner's GA4 property. The same OAuth refresh token drives both APIs; changing GA4 scope requires re-consent (see Auth / Deployment notes below).
-- **Property enumeration via Admin API** is best-effort (`listProperties()` in `lib/ga4.ts`). Primary mapping is the Airtable field — Admin API is only useful for debugging or one-off onboarding.
 - **Partner onboarding checklist** when adding a new partner record to Airtable:
   1. Profile, Services, Service Areas, Website populated.
   2. Partner Goals / Target Audience / Industry Knowledge populated (the record-template boilerplate starts with `**Template**` and is flagged in `Partner.unfilledContext`).
-  3. **Confirm GA4 property ID populated in Airtable for partner.** Without this, the Reporting tab falls back to GSC-only and the Keyword Research tab can't apply the page-conversion signal.
-  4. Confirm the SEO Ops Google account has been granted Viewer on the GA4 property (usually already true, but check for new partners).
+  3. Confirm the SEO Ops Google account has been granted Viewer on the GA4 property (usually already true, but check for new partners).
+  4. After the first report generation, check the "GA4 property" dropdown on the Reporting tab: if it shows "auto-detected" with the right property, you're done. If it shows "GA4 not configured" or picks the wrong property, paste the property ID into Airtable's `GA4 Property ID` field as an explicit override.
 
 ## Instructions for Claude Code
 - Always read this file before starting a task. If a prompt asks you to do something that conflicts with this file, stop and ask.
