@@ -21,17 +21,19 @@ An internal tool for Harbinger Marketing's SEO engineer to run the full 6-month 
 ## External APIs
 1. **Anthropic Claude** — strategy, content generation, outreach drafts, report narratives. Use `claude-opus-4-7` unless the user says otherwise.
 2. **DataForSEO** — keyword research (volume, difficulty, suggestions), SERP data, backlink research. Basic Auth with login+password.
-3. **Google Search Console** — query performance data per partner site. OAuth 2.0 via googleapis.
-4. **Airtable** — source of truth for partner info (name, services, location, site URL, GSC siteUrl format). Read-only for MVP.
+3. **Google Search Console** — query performance data per partner site. OAuth 2.0 via googleapis. Scope: `webmasters.readonly`.
+4. **Google Analytics 4** — behavioral/conversion data (sessions, users, conversions, landing pages, traffic sources) per partner property. Shares the same OAuth client + refresh token as GSC. Scope: `analytics.readonly` (also covers the GA4 Admin API for property enumeration). Wrapped by `lib/ga4.ts`.
+5. **Airtable** — source of truth for partner info (name, services, location, site URL, GA4 property ID, GSC siteUrl format). Read-only for MVP.
 
 ## Folder Structure
 - `app/` — Next.js pages and API routes
   - `app/api/airtable/` — Airtable reads
   - `app/api/dataforseo/` — DataForSEO proxy (keeps keys server-side)
   - `app/api/gsc/` — GSC OAuth and search analytics
+  - `app/api/ga4/` — GA4 Data API proxy (report + conversions-by-page)
   - `app/api/claude/` — Claude API calls
   - `app/keyword-research/`, `app/strategy/`, `app/content/`, `app/backlinks/`, `app/reporting/` — the five tabs
-- `lib/` — typed clients and helpers (airtable.ts, claude.ts, dataforseo.ts, gsc.ts, types.ts)
+- `lib/` — typed clients and helpers (airtable.ts, claude.ts, dataforseo.ts, ga4.ts, gsc.ts, types.ts)
 - `components/` — shared React components (PartnerSelector, TabNav, shadcn components in components/ui)
 
 ## Environment Variables
@@ -78,6 +80,17 @@ Five tabs, each wrapping one workflow:
 - No multi-user authentication — single engineer, single machine
 - No background jobs or queues — all actions are synchronous
 - No outreach email sending — drafts only
+
+## GA4 conventions
+- **Property IDs live in Airtable** under the `GA4 Property ID` field and surface on `Partner.ga4PropertyId`. Values may be stored as a bare numeric ID (`"123456789"`) or the canonical resource name (`"properties/123456789"`) — both flow through `normalizePropertyId()` in `lib/ga4.ts` before any API call.
+- **Integration is optional per partner.** Code paths that use GA4 (`app/reporting`, `app/keyword-research`) must check for `partner.ga4PropertyId` and degrade gracefully when it's missing: the Reporting tab shows a "GA4 not configured" badge and generates a GSC-only report; the Keyword Research tab skips the high-converting-page signal entirely.
+- **No partner-side coordination needed.** The SEO Ops Google account that's authorized for GSC has Viewer access to every partner's GA4 property. The same OAuth refresh token drives both APIs; changing GA4 scope requires re-consent (see Auth / Deployment notes below).
+- **Property enumeration via Admin API** is best-effort (`listProperties()` in `lib/ga4.ts`). Primary mapping is the Airtable field — Admin API is only useful for debugging or one-off onboarding.
+- **Partner onboarding checklist** when adding a new partner record to Airtable:
+  1. Profile, Services, Service Areas, Website populated.
+  2. Partner Goals / Target Audience / Industry Knowledge populated (the record-template boilerplate starts with `**Template**` and is flagged in `Partner.unfilledContext`).
+  3. **Confirm GA4 property ID populated in Airtable for partner.** Without this, the Reporting tab falls back to GSC-only and the Keyword Research tab can't apply the page-conversion signal.
+  4. Confirm the SEO Ops Google account has been granted Viewer on the GA4 property (usually already true, but check for new partners).
 
 ## Instructions for Claude Code
 - Always read this file before starting a task. If a prompt asks you to do something that conflicts with this file, stop and ask.
