@@ -3,6 +3,7 @@ import { z } from "zod"
 import { requireEnv } from "@/lib/env"
 import type {
   CompetitionLevel,
+  DfsLabsLocation,
   DfsLocation,
   KeywordResult,
 } from "@/lib/types"
@@ -293,4 +294,92 @@ export async function searchVolume(
     ],
   )
   return extractGoogleAdsItems(envelope).map(normalizeGoogleAdsItem)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Location taxonomy.
+//
+// DataForSEO Labs' keyword_ideas / keyword_suggestions / bulk_keyword_difficulty
+// endpoints are picky about `location_name` (a lot of cities that exist in the
+// Google Ads location list are rejected at the Labs layer with status 40501).
+// The reliable path is `location_code` — numeric IDs that map 1:1 to locations
+// in DFS's Labs taxonomy. This helper fetches the full list once per process
+// so the UI can offer a searchable picker and callers can pass codes.
+
+const labsLocationItemSchema = z
+  .object({
+    location_code: z.number(),
+    location_name: z.string(),
+    location_code_parent: z.number().nullable().optional(),
+    country_iso_code: z.string().nullable().optional(),
+    location_type: z.string(),
+  })
+  .passthrough()
+
+let cachedLocations: DfsLabsLocation[] | null = null
+let cachedLocationsFetchedAt = 0
+const LOCATIONS_CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24h
+
+/**
+ * Fetch the full DataForSEO Labs location list. Cached in-process for 24h
+ * because the taxonomy changes rarely and the response is large (~80k rows).
+ * First call after cold start pays one GET to DFS; subsequent calls return
+ * cached data.
+ */
+export async function listLabsLocations(): Promise<DfsLabsLocation[]> {
+  const now = Date.now()
+  if (cachedLocations && now - cachedLocationsFetchedAt < LOCATIONS_CACHE_TTL_MS) {
+    return cachedLocations
+  }
+
+  const url = `${DFS_BASE}/v3/dataforseo_labs/locations_and_languages`
+  const response = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: authHeader() },
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new DataForSEOError(
+      `DataForSEO HTTP ${response.status} fetching locations: ${text.slice(0, 500)}`,
+      { status: response.status },
+    )
+  }
+
+  const json: unknown = await response.json()
+  const parsed = envelopeSchema.safeParse(json)
+  if (!parsed.success) {
+    throw new DataForSEOError(
+      `DataForSEO locations response did not match expected shape: ${parsed.error.message}`,
+    )
+  }
+  const envelope = parsed.data
+  if (envelope.status_code !== 20000) {
+    throw new DataForSEOError(
+      `DataForSEO locations returned status ${envelope.status_code}: ${envelope.status_message}`,
+      { dfsStatus: envelope.status_code },
+    )
+  }
+
+  const firstTask = envelope.tasks[0]
+  const rawItems = firstTask?.result ?? []
+  const locations: DfsLabsLocation[] = []
+  for (const raw of rawItems) {
+    const item = labsLocationItemSchema.safeParse(raw)
+    if (!item.success) continue
+    locations.push({
+      location_code: item.data.location_code,
+      location_name: item.data.location_name,
+      location_code_parent: item.data.location_code_parent ?? null,
+      country_iso_code: item.data.country_iso_code ?? null,
+      location_type: item.data.location_type,
+    })
+  }
+
+  cachedLocations = locations
+  cachedLocationsFetchedAt = now
+  console.log(
+    `[dataforseo] cached ${locations.length} Labs locations for ${LOCATIONS_CACHE_TTL_MS / 1000 / 60 / 60}h`,
+  )
+  return locations
 }

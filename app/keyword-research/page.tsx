@@ -26,10 +26,10 @@ import { findBestGscSite } from "@/lib/gsc-site-match"
 import {
   findSuggestedDfsLocation,
   parseLocationCities,
-  US_DFS_LOCATIONS,
 } from "@/lib/locations"
 import { cn } from "@/lib/utils"
 import type {
+  DfsLabsLocation,
   GSCSiteInfo,
   GSCTopQueryRow,
   KeywordCluster,
@@ -215,8 +215,6 @@ async function fetchJson<T>(
   return body
 }
 
-const LOCATION_CUSTOM = "__custom__"
-
 export default function KeywordResearchPage() {
   const { partner, loading: partnerLoading, error: partnerError } =
     useSelectedPartner()
@@ -228,8 +226,8 @@ export default function KeywordResearchPage() {
     key: "fitScore",
     direction: "desc",
   })
-  const [locationChoice, setLocationChoice] = useState<string>("United States")
-  const [customLocation, setCustomLocation] = useState<string>("")
+  const [selectedLocation, setSelectedLocation] =
+    useState<DfsLabsLocation | null>(null)
 
   useEffect(() => {
     // Reset state when partner changes. The URL param drives partner selection,
@@ -239,21 +237,18 @@ export default function KeywordResearchPage() {
     setClusterFilter(FILTER_ALL)
     setRecFilter(FILTER_ALL)
     setSeedsText("")
-    setCustomLocation("")
-    setLocationChoice(
-      partner ? findSuggestedDfsLocation(partner.serviceAreas) : "United States",
-    )
-  }, [partner?.id, partner])
+    setSelectedLocation(null)
+  }, [partner?.id])
 
   const defaultSeeds = useMemo(
     () => (partner ? generateDefaultSeeds(partner) : []),
     [partner],
   )
 
-  const effectiveLocation = useMemo(() => {
-    if (locationChoice === LOCATION_CUSTOM) return customLocation.trim()
-    return locationChoice
-  }, [locationChoice, customLocation])
+  const initialLocationQuery = useMemo(
+    () => (partner ? findSuggestedDfsLocation(partner.serviceAreas) : ""),
+    [partner],
+  )
 
   const effectiveSeeds = useMemo(() => {
     const fromText = parseSeedsFromTextarea(seedsText)
@@ -273,16 +268,16 @@ export default function KeywordResearchPage() {
       })
       return
     }
-    if (!effectiveLocation) {
+    if (!selectedLocation) {
       setPhase({
         status: "error",
         message:
-          "Pick a location, or enter a custom DataForSEO location name (e.g. \"Oklahoma City,Oklahoma,United States\").",
+          "Pick a location from the search dropdown before running research.",
       })
       return
     }
 
-    const location = effectiveLocation
+    const locationCode = selectedLocation.location_code
 
     // Stage 1: GSC (non-fatal — continue without historical if it fails)
     setPhase({ status: "running", stage: "gsc" })
@@ -338,7 +333,7 @@ export default function KeywordResearchPage() {
               body: JSON.stringify({
                 mode: "ideas",
                 seed,
-                location,
+                locationCode,
                 limit: 50,
               }),
             },
@@ -354,7 +349,7 @@ export default function KeywordResearchPage() {
               body: JSON.stringify({
                 mode: "suggestions",
                 seed,
-                location,
+                locationCode,
                 limit: 50,
               }),
             },
@@ -413,7 +408,7 @@ export default function KeywordResearchPage() {
           body: JSON.stringify({
             mode: "difficulty",
             keywords: keywordList,
-            location,
+            locationCode,
           }),
         },
         "DataForSEO difficulty",
@@ -476,7 +471,7 @@ export default function KeywordResearchPage() {
           err instanceof Error ? err.message : "Claude clustering failed",
       })
     }
-  }, [partner, effectiveSeeds, effectiveLocation])
+  }, [partner, effectiveSeeds, selectedLocation])
 
   const rows = useMemo<ScoredKeyword[]>(
     () => (phase.status === "done" ? phase.rows : []),
@@ -553,11 +548,10 @@ export default function KeywordResearchPage() {
         <>
           <PartnerSummary partner={partner} />
 
-          <LocationSelector
-            value={locationChoice}
-            onChange={setLocationChoice}
-            customValue={customLocation}
-            onCustomChange={setCustomLocation}
+          <LocationAutocomplete
+            initialQuery={initialLocationQuery}
+            selected={selectedLocation}
+            onSelect={setSelectedLocation}
             disabled={running}
           />
 
@@ -785,56 +779,206 @@ function PartnerSummary({ partner }: { partner: Partner }) {
   )
 }
 
-function LocationSelector({
-  value,
-  onChange,
-  customValue,
-  onCustomChange,
+function LocationAutocomplete({
+  initialQuery,
+  selected,
+  onSelect,
   disabled,
 }: {
-  value: string
-  onChange: (v: string) => void
-  customValue: string
-  onCustomChange: (v: string) => void
+  initialQuery: string
+  selected: DfsLabsLocation | null
+  onSelect: (loc: DfsLabsLocation | null) => void
   disabled?: boolean
 }) {
-  const isCustom = value === LOCATION_CUSTOM
+  const [query, setQuery] = useState(initialQuery)
+  const [results, setResults] = useState<DfsLabsLocation[]>([])
+  const [fetching, setFetching] = useState(false)
+  const [fetchError, setFetchError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  const [activeIndex, setActiveIndex] = useState(0)
+
+  // When the partner changes we want the initial query to re-seed the input.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setQuery(initialQuery)
+  }, [initialQuery])
+
+  // Debounced fetch against /api/dataforseo/locations?q=<query>
+  useEffect(() => {
+    const abort = new AbortController()
+    let cancelled = false
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFetching(true)
+    setFetchError(null)
+
+    const timer = setTimeout(async () => {
+      try {
+        const url = new URL(
+          "/api/dataforseo/locations",
+          window.location.origin,
+        )
+        if (query.trim()) url.searchParams.set("q", query.trim())
+        const response = await fetch(url.toString(), { signal: abort.signal })
+        const body = (await response.json().catch(() => ({}))) as {
+          results?: DfsLabsLocation[]
+          error?: string
+        }
+        if (!response.ok) {
+          throw new Error(body.error ?? `HTTP ${response.status}`)
+        }
+        if (!cancelled) {
+          setResults(body.results ?? [])
+          setActiveIndex(0)
+        }
+      } catch (err) {
+        if (cancelled || (err instanceof Error && err.name === "AbortError")) {
+          return
+        }
+        setFetchError(
+          err instanceof Error ? err.message : "Failed to load locations",
+        )
+      } finally {
+        if (!cancelled) setFetching(false)
+      }
+    }, 250)
+
+    return () => {
+      cancelled = true
+      abort.abort()
+      clearTimeout(timer)
+    }
+  }, [query])
+
+  const handleSelect = (loc: DfsLabsLocation) => {
+    onSelect(loc)
+    setQuery(loc.location_name)
+    setOpen(false)
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!open || results.length === 0) {
+      if (e.key === "ArrowDown") {
+        setOpen(true)
+      }
+      return
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault()
+      setActiveIndex((i) => Math.min(i + 1, results.length - 1))
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault()
+      setActiveIndex((i) => Math.max(i - 1, 0))
+    } else if (e.key === "Enter") {
+      e.preventDefault()
+      const pick = results[activeIndex]
+      if (pick) handleSelect(pick)
+    } else if (e.key === "Escape") {
+      setOpen(false)
+    }
+  }
+
   return (
     <section className="space-y-3 rounded-lg border p-4">
       <div className="flex flex-col gap-2">
-        <Label htmlFor="dfs-location">DataForSEO location</Label>
-        <Select value={value} onValueChange={onChange} disabled={disabled}>
-          <SelectTrigger id="dfs-location" className="w-[360px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent className="max-h-[400px]">
-            {US_DFS_LOCATIONS.map((loc) => (
-              <SelectItem key={loc} value={loc}>
-                {loc}
-              </SelectItem>
-            ))}
-            <SelectItem value={LOCATION_CUSTOM}>Custom…</SelectItem>
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          Country- and state-level locations are always valid in DataForSEO.
-          Use &ldquo;Custom…&rdquo; for a specific city in DFS&apos;s format:{" "}
-          <code className="font-mono">City,State,United States</code> — note
-          there are no spaces after the commas, and the state must be the full
-          name (e.g.{" "}
-          <code className="font-mono">Oklahoma City,Oklahoma,United States</code>
-          ). DFS may still reject smaller cities.
-        </p>
-        {isCustom ? (
+        <Label htmlFor="dfs-location-search">DataForSEO location</Label>
+        <div className="relative w-[420px]">
           <input
+            id="dfs-location-search"
             type="text"
-            value={customValue}
-            onChange={(e) => onCustomChange(e.target.value)}
-            placeholder="Oklahoma City,Oklahoma,United States"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value)
+              setOpen(true)
+              if (
+                selected &&
+                e.target.value.toLowerCase() !==
+                  selected.location_name.toLowerCase()
+              ) {
+                onSelect(null)
+              }
+            }}
+            onFocus={() => setOpen(true)}
+            onBlur={() => {
+              // Delay so click handlers on list items still fire.
+              setTimeout(() => setOpen(false), 150)
+            }}
+            onKeyDown={handleKeyDown}
+            placeholder="Search: city, state, zip, or country…"
             disabled={disabled}
-            className="mt-1 w-[360px] rounded-md border border-input bg-transparent px-3 py-2 font-mono text-sm shadow-xs focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 outline-none disabled:cursor-not-allowed disabled:opacity-50"
+            autoComplete="off"
+            role="combobox"
+            aria-expanded={open}
+            aria-controls="dfs-location-listbox"
+            aria-activedescendant={
+              open && results[activeIndex]
+                ? `dfs-location-opt-${results[activeIndex].location_code}`
+                : undefined
+            }
+            className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
           />
-        ) : null}
+          {open ? (
+            <ul
+              id="dfs-location-listbox"
+              role="listbox"
+              className="absolute z-50 mt-1 max-h-[320px] w-full overflow-auto rounded-md border bg-popover p-1 text-sm shadow-md"
+            >
+              {fetching && results.length === 0 ? (
+                <li className="px-2 py-1.5 text-muted-foreground">
+                  Searching…
+                </li>
+              ) : null}
+              {fetchError ? (
+                <li className="px-2 py-1.5 text-destructive">{fetchError}</li>
+              ) : null}
+              {!fetching && !fetchError && results.length === 0 ? (
+                <li className="px-2 py-1.5 text-muted-foreground">
+                  No matches. Try a broader search.
+                </li>
+              ) : null}
+              {results.map((loc, i) => (
+                <li
+                  key={loc.location_code}
+                  id={`dfs-location-opt-${loc.location_code}`}
+                  role="option"
+                  aria-selected={i === activeIndex}
+                  onMouseDown={(e) => {
+                    // onMouseDown fires before onBlur, so we can select
+                    // before the list closes.
+                    e.preventDefault()
+                    handleSelect(loc)
+                  }}
+                  onMouseEnter={() => setActiveIndex(i)}
+                  className={cn(
+                    "flex cursor-pointer items-center justify-between gap-2 rounded-sm px-2 py-1.5",
+                    i === activeIndex
+                      ? "bg-accent text-accent-foreground"
+                      : "",
+                  )}
+                >
+                  <span className="truncate">{loc.location_name}</span>
+                  <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {loc.location_type}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {selected ? (
+            <>
+              Selected:{" "}
+              <code className="font-mono">{selected.location_name}</code>{" "}
+              <span className="text-[10px]">(code {selected.location_code})</span>
+            </>
+          ) : (
+            <>
+              Pick a location. City, county, state, and country entries are
+              drawn live from DataForSEO&apos;s Labs taxonomy, so whatever you
+              select will be accepted by the API.
+            </>
+          )}
+        </p>
       </div>
     </section>
   )

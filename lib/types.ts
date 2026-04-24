@@ -92,11 +92,21 @@ export interface KeywordCluster {
 }
 
 /**
- * DataForSEO location param. Prefer `{ name }` for "live" endpoints because
- * they accept `location_name` directly without a code lookup. `{ code }` is
- * supported for when a caller has already resolved to a specific location id.
+ * DataForSEO location param. Prefer `{ code }` for Labs endpoints — their
+ * `location_name` matching is flaky (even "Atlanta,Georgia,United States"
+ * can get rejected with status 40501). Codes come from DFS's own location
+ * taxonomy and are always accepted when valid.
  */
 export type DfsLocation = { code: number } | { name: string }
+
+/** One row from DataForSEO's Labs location taxonomy. */
+export interface DfsLabsLocation {
+  location_code: number
+  location_name: string
+  location_code_parent: number | null
+  country_iso_code: string | null
+  location_type: string
+}
 
 /** Google Search Console property the authed account has access to. */
 export interface GSCSiteInfo {

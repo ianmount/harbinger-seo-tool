@@ -7,76 +7,62 @@ import {
   keywordSuggestions,
   searchVolume,
 } from "@/lib/dataforseo"
-import type { KeywordResult } from "@/lib/types"
+import type { DfsLocation } from "@/lib/types"
 
 export const dynamic = "force-dynamic"
 
-// Accepts either a single location name (legacy) or an ordered list of
-// candidates. Candidates are tried in order and we fall through on DFS
-// status 40501 ("Invalid Field: location_name") — this is how we handle
-// smaller US cities that aren't in DFS's location taxonomy, falling back
-// from city → state → country.
-const locationField = z.union([
-  z.string().trim().min(1),
-  z.array(z.string().trim().min(1)).min(1),
-])
-
-const seedBase = z.object({
-  seed: z.string().trim().min(1),
-  location: locationField,
-  limit: z.number().int().positive().max(1000).optional(),
-})
-
-const keywordsBase = z.object({
-  keywords: z.array(z.string().trim().min(1)).min(1).max(1000),
-  location: locationField,
-})
+// Prefer `locationCode` (numeric DFS location ID) — names are fragile across
+// DFS's Labs vs Google Ads taxonomies. `location` (string name) is still
+// accepted for quick one-off testing and backwards compatibility.
+const locationRefine = (
+  v: { location?: string; locationCode?: number },
+): boolean => Boolean(v.location) || Boolean(v.locationCode)
+const locationError = { message: "Provide locationCode (preferred) or location" }
 
 const bodySchema = z.discriminatedUnion("mode", [
-  seedBase.extend({ mode: z.literal("ideas") }),
-  seedBase.extend({ mode: z.literal("suggestions") }),
-  keywordsBase.extend({ mode: z.literal("volume") }),
-  keywordsBase.extend({ mode: z.literal("difficulty") }),
+  z
+    .object({
+      mode: z.literal("ideas"),
+      seed: z.string().trim().min(1),
+      limit: z.number().int().positive().max(1000).optional(),
+      location: z.string().trim().min(1).optional(),
+      locationCode: z.number().int().positive().optional(),
+    })
+    .refine(locationRefine, locationError),
+  z
+    .object({
+      mode: z.literal("suggestions"),
+      seed: z.string().trim().min(1),
+      limit: z.number().int().positive().max(1000).optional(),
+      location: z.string().trim().min(1).optional(),
+      locationCode: z.number().int().positive().optional(),
+    })
+    .refine(locationRefine, locationError),
+  z
+    .object({
+      mode: z.literal("volume"),
+      keywords: z.array(z.string().trim().min(1)).min(1).max(1000),
+      location: z.string().trim().min(1).optional(),
+      locationCode: z.number().int().positive().optional(),
+    })
+    .refine(locationRefine, locationError),
+  z
+    .object({
+      mode: z.literal("difficulty"),
+      keywords: z.array(z.string().trim().min(1)).min(1).max(1000),
+      location: z.string().trim().min(1).optional(),
+      locationCode: z.number().int().positive().optional(),
+    })
+    .refine(locationRefine, locationError),
 ])
 
-function toCandidates(location: string | string[]): string[] {
-  return Array.isArray(location) ? location : [location]
-}
-
-async function tryLocationCandidates(
-  candidates: string[],
-  fn: (location: string) => Promise<KeywordResult[]>,
-): Promise<{ results: KeywordResult[]; locationUsed: string }> {
-  let lastErr: unknown
-  const tried: string[] = []
-  for (const loc of candidates) {
-    try {
-      const results = await fn(loc)
-      return { results, locationUsed: loc }
-    } catch (err) {
-      lastErr = err
-      tried.push(loc)
-      if (
-        err instanceof DataForSEOError &&
-        err.dfsStatus === 40501
-      ) {
-        console.warn(
-          `[dataforseo] location "${loc}" rejected by DFS (40501), trying next fallback`,
-        )
-        continue
-      }
-      throw err
-    }
-  }
-  if (lastErr instanceof DataForSEOError) {
-    throw new DataForSEOError(
-      `DataForSEO rejected all ${tried.length} location candidates (${tried.join(" → ")}). Last error: ${lastErr.message}`,
-      { dfsStatus: lastErr.dfsStatus, status: lastErr.status },
-    )
-  }
-  throw (
-    lastErr ?? new Error("No DataForSEO location candidates were provided")
-  )
+function buildLocation(
+  code: number | undefined,
+  name: string | undefined,
+): DfsLocation {
+  if (code != null) return { code }
+  if (name) return { name }
+  throw new Error("locationCode or location is required")
 }
 
 function errorResponse(error: unknown) {
@@ -107,39 +93,30 @@ export async function POST(request: Request) {
     )
   }
 
-  const candidates = toCandidates(parsed.data.location)
+  const data = parsed.data
+  const location = buildLocation(data.locationCode, data.location)
 
   try {
-    const data = parsed.data
     switch (data.mode) {
       case "ideas": {
-        const { results, locationUsed } = await tryLocationCandidates(
-          candidates,
-          (loc) => keywordIdeas(data.seed, { name: loc }, { limit: data.limit }),
-        )
-        return NextResponse.json({ results, locationUsed })
+        const results = await keywordIdeas(data.seed, location, {
+          limit: data.limit,
+        })
+        return NextResponse.json({ results })
       }
       case "suggestions": {
-        const { results, locationUsed } = await tryLocationCandidates(
-          candidates,
-          (loc) =>
-            keywordSuggestions(data.seed, { name: loc }, { limit: data.limit }),
-        )
-        return NextResponse.json({ results, locationUsed })
+        const results = await keywordSuggestions(data.seed, location, {
+          limit: data.limit,
+        })
+        return NextResponse.json({ results })
       }
       case "volume": {
-        const { results, locationUsed } = await tryLocationCandidates(
-          candidates,
-          (loc) => searchVolume(data.keywords, { name: loc }),
-        )
-        return NextResponse.json({ results, locationUsed })
+        const results = await searchVolume(data.keywords, location)
+        return NextResponse.json({ results })
       }
       case "difficulty": {
-        const { results, locationUsed } = await tryLocationCandidates(
-          candidates,
-          (loc) => bulkKeywordDifficulty(data.keywords, { name: loc }),
-        )
-        return NextResponse.json({ results, locationUsed })
+        const results = await bulkKeywordDifficulty(data.keywords, location)
+        return NextResponse.json({ results })
       }
     }
   } catch (error: unknown) {
