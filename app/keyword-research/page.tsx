@@ -30,6 +30,8 @@ import {
 import { cn } from "@/lib/utils"
 import type {
   DfsLabsLocation,
+  GA4PageConversion,
+  GSCQueryRow,
   GSCSiteInfo,
   GSCTopQueryRow,
   KeywordCluster,
@@ -51,7 +53,13 @@ type Stage =
 type Phase =
   | { status: "idle" }
   | { status: "running"; stage: Stage; note?: string }
-  | { status: "done"; rows: ScoredKeyword[]; clusters: KeywordCluster[]; truncated: number }
+  | {
+      status: "done"
+      rows: ScoredKeyword[]
+      clusters: KeywordCluster[]
+      truncated: number
+      conversionSignalActive: boolean
+    }
   | { status: "error"; message: string }
 
 type SortKey =
@@ -62,6 +70,7 @@ type SortKey =
   | "fitScore"
   | "intent"
   | "recommendation"
+  | "pageConversionSignal"
 
 interface SortState {
   key: SortKey
@@ -241,7 +250,7 @@ function csvEscape(value: unknown): string {
   return s
 }
 
-function buildCsv(rows: ScoredKeyword[]): string {
+function buildCsv(rows: ScoredKeyword[], includeSignal: boolean): string {
   const headers = [
     "Keyword",
     "Cluster",
@@ -253,27 +262,39 @@ function buildCsv(rows: ScoredKeyword[]): string {
     "CPC",
     "Competition",
   ]
+  if (includeSignal) {
+    headers.push("Page Conversion Signal", "Landing Page")
+  }
   const lines = [headers.join(",")]
   for (const r of rows) {
-    lines.push(
-      [
-        csvEscape(r.keyword),
-        csvEscape(r.cluster),
-        csvEscape(r.search_volume ?? ""),
-        csvEscape(r.keyword_difficulty ?? ""),
-        csvEscape(r.fitScore),
-        csvEscape(r.intent),
-        csvEscape(r.recommendation),
-        csvEscape(r.cpc ?? ""),
-        csvEscape(r.competition_level ?? ""),
-      ].join(","),
-    )
+    const cols = [
+      csvEscape(r.keyword),
+      csvEscape(r.cluster),
+      csvEscape(r.search_volume ?? ""),
+      csvEscape(r.keyword_difficulty ?? ""),
+      csvEscape(r.fitScore),
+      csvEscape(r.intent),
+      csvEscape(r.recommendation),
+      csvEscape(r.cpc ?? ""),
+      csvEscape(r.competition_level ?? ""),
+    ]
+    if (includeSignal) {
+      cols.push(
+        csvEscape(r.pageConversionSignal ? "high-converter" : ""),
+        csvEscape(r.landingPage ?? ""),
+      )
+    }
+    lines.push(cols.join(","))
   }
   return lines.join("\n")
 }
 
-function downloadCsv(rows: ScoredKeyword[], partnerName: string) {
-  const csv = buildCsv(rows)
+function downloadCsv(
+  rows: ScoredKeyword[],
+  partnerName: string,
+  includeSignal: boolean,
+) {
+  const csv = buildCsv(rows, includeSignal)
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" })
   const url = URL.createObjectURL(blob)
   const a = document.createElement("a")
@@ -405,9 +426,17 @@ export default function KeywordResearchPage() {
     const locationLabels = selectedLocations.map((l) => l.location_name)
     const primaryLocationCode = selectedLocations[0].location_code
 
-    // Stage 1: GSC (non-fatal — continue without historical if it fails)
+    // Stage 1: GSC + GA4 (both non-fatal — continue without them if they fail)
     setPhase({ status: "running", stage: "gsc" })
     let gscHistorical: GSCTopQueryRow[] = []
+    let gscQueryPages: GSCQueryRow[] = []
+    let ga4Conversions: GA4PageConversion[] = []
+    const today = new Date()
+    const start90 = new Date()
+    start90.setDate(today.getDate() - 90)
+    const iso = (d: Date) => d.toISOString().slice(0, 10)
+    const startDate = iso(start90)
+    const endDate = iso(today)
     try {
       const sitesBody = await fetchJson<{ sites: GSCSiteInfo[] }>(
         "/api/gsc/sites",
@@ -416,28 +445,71 @@ export default function KeywordResearchPage() {
       )
       const siteUrl = findBestGscSite(partner.website, sitesBody.sites ?? [])
       if (siteUrl) {
-        const today = new Date()
-        const start = new Date()
-        start.setDate(today.getDate() - 90)
-        const iso = (d: Date) => d.toISOString().slice(0, 10)
-        const reportBody = await fetchJson<{ topQueries: GSCTopQueryRow[] }>(
-          "/api/gsc/report-data",
+        // Run the two GSC calls in parallel — top queries (for Claude's
+        // "recent searches" context) and query+page rows (for the GA4
+        // high-converting-page signal). The latter only matters when the
+        // partner has a GA4 property; we fetch unconditionally because it's
+        // cheap and the extra data helps debug missing signals later.
+        const [reportBody, queriesBody] = await Promise.all([
+          fetchJson<{ topQueries: GSCTopQueryRow[] }>(
+            "/api/gsc/report-data",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                siteUrl,
+                startDate,
+                endDate,
+                rowLimit: 200,
+              }),
+            },
+            "GSC report data",
+          ),
+          fetchJson<{ rows: GSCQueryRow[] }>(
+            "/api/gsc/queries",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                siteUrl,
+                startDate,
+                endDate,
+                rowLimit: 1000,
+              }),
+            },
+            "GSC query+page rows",
+          ),
+        ])
+        gscHistorical = reportBody.topQueries ?? []
+        gscQueryPages = queriesBody.rows ?? []
+      }
+    } catch (err) {
+      console.warn("[keyword-research] GSC fetch failed, continuing:", err)
+    }
+
+    if (partner.ga4PropertyId) {
+      try {
+        const convBody = await fetchJson<{ results: GA4PageConversion[] }>(
+          "/api/ga4/conversions",
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              siteUrl,
-              startDate: iso(start),
-              endDate: iso(today),
-              rowLimit: 200,
+              propertyId: partner.ga4PropertyId,
+              startDate,
+              endDate,
             }),
           },
-          "GSC report data",
+          "GA4 conversions",
         )
-        gscHistorical = reportBody.topQueries ?? []
+        ga4Conversions = convBody.results ?? []
+      } catch (err) {
+        // Signal is optional — a missing/empty array just means no boost fires.
+        console.warn(
+          "[keyword-research] GA4 conversions fetch failed, continuing without page-signal boost:",
+          err,
+        )
       }
-    } catch (err) {
-      console.warn("[keyword-research] GSC fetch failed, continuing:", err)
     }
 
     // Stage 2: DFS ideas + suggestions (parallel)
@@ -656,6 +728,7 @@ export default function KeywordResearchPage() {
       const body = await fetchJson<{
         clusters: KeywordCluster[]
         truncated?: number
+        conversionSignalActive?: boolean
       }>(
         "/api/claude/keywords",
         {
@@ -665,6 +738,8 @@ export default function KeywordResearchPage() {
             partner,
             rawKeywords: enriched,
             gscHistorical,
+            gscQueryPages,
+            ga4Conversions,
             maxKeywords,
             allowedLocations: locationLabels,
           }),
@@ -677,6 +752,7 @@ export default function KeywordResearchPage() {
         rows,
         clusters: body.clusters ?? [],
         truncated: body.truncated ?? 0,
+        conversionSignalActive: Boolean(body.conversionSignalActive),
       })
     } catch (err) {
       setPhase({
@@ -691,6 +767,7 @@ export default function KeywordResearchPage() {
     () => (phase.status === "done" ? phase.rows : []),
     [phase],
   )
+  const signalActive = phase.status === "done" && phase.conversionSignalActive
   const clusterNames = useMemo(() => {
     const names = new Set<string>()
     for (const r of rows) names.add(r.cluster)
@@ -728,11 +805,12 @@ export default function KeywordResearchPage() {
   const toggleSort = useCallback((key: SortKey) => {
     setSort((prev) => {
       if (prev.key !== key) {
-        const numeric =
+        const defaultDesc =
           key === "search_volume" ||
           key === "keyword_difficulty" ||
-          key === "fitScore"
-        return { key, direction: numeric ? "desc" : "asc" }
+          key === "fitScore" ||
+          key === "pageConversionSignal"
+        return { key, direction: defaultDesc ? "desc" : "asc" }
       }
       return { key, direction: prev.direction === "asc" ? "desc" : "asc" }
     })
@@ -835,7 +913,7 @@ export default function KeywordResearchPage() {
 
           {phase.status === "done" ? (
             <section className="space-y-3">
-              <ColumnLegend />
+              <ColumnLegend signalActive={signalActive} />
               <div className="flex flex-wrap items-center gap-3">
                 <div className="flex flex-col gap-1">
                   <span className="text-xs font-medium text-muted-foreground">
@@ -881,7 +959,9 @@ export default function KeywordResearchPage() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => downloadCsv(sorted, partner.name)}
+                    onClick={() =>
+                      downloadCsv(sorted, partner.name, signalActive)
+                    }
                     disabled={sorted.length === 0}
                   >
                     <DownloadIcon className="mr-2 size-4" />
@@ -946,13 +1026,22 @@ export default function KeywordResearchPage() {
                       >
                         Recommendation
                       </SortableHead>
+                      {signalActive ? (
+                        <SortableHead
+                          sortKey="pageConversionSignal"
+                          sort={sort}
+                          onToggle={toggleSort}
+                        >
+                          Page conversion signal
+                        </SortableHead>
+                      ) : null}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {sorted.length === 0 ? (
                       <TableRow>
                         <TableCell
-                          colSpan={7}
+                          colSpan={signalActive ? 8 : 7}
                           className="text-center text-sm text-muted-foreground"
                         >
                           No keywords match the current filters.
@@ -986,6 +1075,11 @@ export default function KeywordResearchPage() {
                           <TableCell>
                             <RecommendationBadge value={r.recommendation} />
                           </TableCell>
+                          {signalActive ? (
+                            <TableCell>
+                              <ConversionSignalCell row={r} />
+                            </TableCell>
+                          ) : null}
                         </TableRow>
                       ))
                     )}
@@ -1274,7 +1368,7 @@ function LocationAutocomplete({
  * value actually comes from. Helps the SEO engineer answer "why is this
  * keyword here?" without having to re-read the code.
  */
-function ColumnLegend() {
+function ColumnLegend({ signalActive }: { signalActive: boolean }) {
   return (
     <details className="group rounded-lg border bg-card p-0 text-sm">
       <summary className="cursor-pointer list-none px-4 py-2.5 text-xs font-medium text-muted-foreground hover:text-foreground">
@@ -1368,6 +1462,24 @@ function ColumnLegend() {
             inspection.
           </dd>
         </div>
+        {signalActive ? (
+          <div>
+            <dt className="font-medium text-foreground">
+              Page conversion signal
+            </dt>
+            <dd className="text-muted-foreground">
+              Shown only when the partner has a GA4 Property ID in Airtable and
+              the GA4 + GSC fetches both succeeded. A keyword is flagged as
+              <strong> High converter</strong> when its best-ranking GSC
+              landing page (last 90 days) is one of the partner&apos;s
+              top-converting pages in GA4 (last 90 days). Claude applies a
+              modest fit-score boost to these keywords in the prompt, and the
+              server reapplies the flag after Claude returns so the column
+              reflects the real page↔conversion match — not Claude&apos;s
+              self-report.
+            </dd>
+          </div>
+        ) : null}
       </dl>
     </details>
   )
@@ -1463,6 +1575,24 @@ function IntentLabel({ intent }: { intent: KeywordIntent }) {
   return (
     <span className="text-xs capitalize text-muted-foreground">{intent}</span>
   )
+}
+
+function ConversionSignalCell({ row }: { row: ScoredKeyword }) {
+  if (row.pageConversionSignal) {
+    return (
+      <Badge
+        variant="default"
+        className="bg-amber-500 text-white hover:bg-amber-500/90"
+        title={row.landingPage ? `Matches ${row.landingPage}` : undefined}
+      >
+        High converter
+      </Badge>
+    )
+  }
+  // When the signal is off for this row but active for the run, still show
+  // an empty-state marker so the column isn't just blank. An actual "—" is
+  // clearer than silent whitespace.
+  return <span className="text-xs text-muted-foreground">—</span>
 }
 
 function RecommendationBadge({ value }: { value: KeywordRecommendation }) {

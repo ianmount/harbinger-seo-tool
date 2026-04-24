@@ -44,10 +44,34 @@ const gscRowSchema = z
   })
   .passthrough()
 
+const gscQueryPageSchema = z
+  .object({
+    query: z.string(),
+    page: z.string(),
+    clicks: z.number(),
+    impressions: z.number(),
+    ctr: z.number(),
+    position: z.number(),
+  })
+  .passthrough()
+
+const ga4ConversionSchema = z.object({
+  landingPage: z.string(),
+  conversions: z.number(),
+  conversionRate: z.number(),
+})
+
 const bodySchema = z.object({
   partner: partnerSchema,
   rawKeywords: z.array(rawKeywordSchema),
   gscHistorical: z.array(gscRowSchema).default([]),
+  // Query→page mapping from GSC (same date range as gscHistorical). Used
+  // alongside ga4Conversions to compute the per-keyword
+  // pageConversionSignal. Optional — signal is off when either is absent.
+  gscQueryPages: z.array(gscQueryPageSchema).optional(),
+  // GA4 landing-page conversion data for the partner's property. Drives
+  // the high-converting-page boost in the scoring prompt.
+  ga4Conversions: z.array(ga4ConversionSchema).optional(),
   // Caller-controlled ceiling on how many keywords we feed to Claude (and,
   // since every scored keyword surfaces in the output, how many end up in
   // the results table). Hard-capped at MAX_KEYWORDS_HARD_LIMIT below to
@@ -113,10 +137,96 @@ function formatNumber(n: number | undefined): string {
   return n.toLocaleString("en-US", { maximumFractionDigits: 2 })
 }
 
+/**
+ * GSC pages come through as full URLs ("https://example.com/plumbing/");
+ * GA4 landingPage comes through as path-only ("/plumbing/"). Normalize both
+ * to a trailing-slashed path so they can be matched.
+ */
+function normalizePagePath(input: string): string {
+  if (!input) return ""
+  let path = input.trim()
+  try {
+    const u = new URL(path)
+    path = u.pathname + (u.search || "")
+  } catch {
+    // Not a full URL; assume it's already path-only.
+  }
+  if (!path.startsWith("/")) path = `/${path}`
+  return path
+}
+
+/**
+ * For each GSC query, pick the single landing page that received the most
+ * clicks (ties broken by impressions). This collapses the N:M query↔page
+ * matrix into a stable one-page-per-query map for signal matching.
+ */
+function bestPageByQuery(
+  rows: ReadonlyArray<{
+    query: string
+    page: string
+    clicks: number
+    impressions: number
+  }>,
+): Map<string, string> {
+  type Best = { page: string; clicks: number; impressions: number }
+  const best = new Map<string, Best>()
+  for (const row of rows) {
+    const key = row.query.trim().toLowerCase()
+    if (!key || !row.page) continue
+    const existing = best.get(key)
+    if (
+      !existing ||
+      row.clicks > existing.clicks ||
+      (row.clicks === existing.clicks && row.impressions > existing.impressions)
+    ) {
+      best.set(key, {
+        page: normalizePagePath(row.page),
+        clicks: row.clicks,
+        impressions: row.impressions,
+      })
+    }
+  }
+  const result = new Map<string, string>()
+  for (const [k, v] of best) result.set(k, v.page)
+  return result
+}
+
+/**
+ * A landing page counts as "high-converting" if it clears both a floor on
+ * raw conversions (so we don't flag pages with a single conversion from a
+ * single session) AND lands in the top tier of the partner's pages by
+ * conversion count. Returns a Set of normalized paths.
+ */
+function highConvertingPages(
+  conversions: ReadonlyArray<{ landingPage: string; conversions: number }>,
+): Set<string> {
+  const MIN_CONVERSIONS = 3
+  const eligible = conversions.filter((c) => c.conversions >= MIN_CONVERSIONS)
+  if (eligible.length === 0) return new Set()
+  // Sort desc and keep the top third (at least one page). This catches the
+  // obvious winners without over-rewarding pages that are barely above the
+  // floor — a round-about top-quartile proxy that works for short lists.
+  const sorted = eligible
+    .slice()
+    .sort((a, b) => b.conversions - a.conversions)
+  const cutoff = Math.max(1, Math.ceil(sorted.length / 3))
+  const pages = new Set<string>()
+  for (const row of sorted.slice(0, cutoff)) {
+    pages.add(normalizePagePath(row.landingPage))
+  }
+  return pages
+}
+
 function buildPrompt(
   body: ParsedBody,
   keywords: KeywordResult[],
   targetCount: number,
+  highConvertingKeywords: ReadonlySet<string>,
+  highConvertingPageList: ReadonlyArray<{
+    landingPage: string
+    conversions: number
+    conversionRate: number
+  }>,
 ): string {
   const { partner, gscHistorical } = body
 
@@ -165,6 +275,28 @@ function buildPrompt(
     }
   }
 
+  if (highConvertingPageList.length > 0) {
+    lines.push("")
+    lines.push(`# GA4 high-converting pages (last 90 days)`)
+    lines.push(
+      `The partner's GA4 property identifies these landing pages as high converters. Keywords whose best-ranking GSC page is one of these pages already drive business value on that page — give them a modest fit-score boost (roughly +5 to +10 points) when they otherwise pass the selection criteria.`,
+    )
+    lines.push(`| Landing page | Conversions | Conv. rate |`)
+    lines.push(`|---|---:|---:|`)
+    for (const p of highConvertingPageList) {
+      lines.push(
+        `| ${p.landingPage} | ${p.conversions} | ${(p.conversionRate * 100).toFixed(1)}% |`,
+      )
+    }
+    if (highConvertingKeywords.size > 0) {
+      lines.push("")
+      lines.push(
+        `Candidate keywords whose current GSC landing page is one of those high converters (the boost applies when you select them):`,
+      )
+      for (const kw of highConvertingKeywords) lines.push(`- ${kw}`)
+    }
+  }
+
   lines.push("")
   lines.push(
     `# Candidate keywords (${keywords.length} total — you select the best ${targetCount})`,
@@ -196,6 +328,11 @@ function buildPrompt(
   lines.push(
     `4. **Intent** — transactional and commercial keywords typically drive conversions for a service business. Informational keywords can still qualify when they support the funnel (how-to, cost, comparison), but hold them to a higher relevance bar.`,
   )
+  if (highConvertingPageList.length > 0) {
+    lines.push(
+      `5. **High-converting-page signal** — if a candidate keyword's current GSC landing page is listed in the "GA4 high-converting pages" section above, that page is already driving real conversions. Boost the fitScore by about +5 to +10 points (cap at 100) for those keywords, since they defend a working asset. Do not invent this signal for keywords that aren't in the list.`,
+    )
+  }
   lines.push("")
   lines.push(`## Output fields per selected keyword`)
   lines.push(
@@ -332,6 +469,9 @@ async function callClaudeForKeywords(
 function buildClusters(
   rawKeywords: KeywordResult[],
   scored: z.infer<typeof claudeResponseSchema>,
+  keywordToPage: ReadonlyMap<string, string>,
+  highConverterPages: ReadonlySet<string>,
+  signalActive: boolean,
 ): KeywordCluster[] {
   const rawByKeyword = new Map<string, KeywordResult>()
   for (const kw of rawKeywords) {
@@ -347,12 +487,21 @@ function buildClusters(
       // Claude occasionally paraphrases; drop unknowns rather than inventing metrics.
       continue
     }
+    const landingPage = keywordToPage.get(keyword.toLowerCase())
     const merged: ScoredKeyword = {
       ...raw,
       cluster,
       fitScore: Math.round(fitScore),
       intent,
       recommendation,
+      ...(signalActive
+        ? {
+            landingPage,
+            pageConversionSignal: landingPage
+              ? highConverterPages.has(landingPage)
+              : false,
+          }
+        : {}),
     }
     const list = clusterMap.get(cluster) ?? []
     list.push(merged)
@@ -417,7 +566,45 @@ export async function POST(request: Request) {
   const candidates = deduped.slice(0, MAX_INPUT_KEYWORDS)
   const candidatesDropped = deduped.length - candidates.length
 
-  const prompt = buildPrompt(parsed.data, candidates, targetCount)
+  // GA4 / GSC signal prep. The signal only activates when BOTH the GSC
+  // query→page mapping and the GA4 conversions-by-page data are present —
+  // either alone can't identify "the keyword's page is converting".
+  const gscQueryPages = parsed.data.gscQueryPages ?? []
+  const ga4Conversions = parsed.data.ga4Conversions ?? []
+  const signalActive = gscQueryPages.length > 0 && ga4Conversions.length > 0
+  const keywordToPage = signalActive
+    ? bestPageByQuery(gscQueryPages)
+    : new Map<string, string>()
+  const highConverterPages = signalActive
+    ? highConvertingPages(ga4Conversions)
+    : new Set<string>()
+
+  // Surface the candidate keywords whose current GSC page is a high converter
+  // so the prompt can name them explicitly. Claude applies the fit boost;
+  // the server re-applies the flag onto the returned tuples below so the UI
+  // column reflects reality (not Claude's self-report).
+  const highConvertingKeywords = new Set<string>()
+  if (signalActive) {
+    for (const kw of candidates) {
+      const page = keywordToPage.get(kw.keyword.toLowerCase())
+      if (page && highConverterPages.has(page)) {
+        highConvertingKeywords.add(kw.keyword)
+      }
+    }
+  }
+  const highConvertingPageList = signalActive
+    ? ga4Conversions
+        .filter((c) => highConverterPages.has(normalizePagePath(c.landingPage)))
+        .sort((a, b) => b.conversions - a.conversions)
+    : []
+
+  const prompt = buildPrompt(
+    parsed.data,
+    candidates,
+    targetCount,
+    highConvertingKeywords,
+    highConvertingPageList,
+  )
   try {
     let scored: z.infer<typeof claudeResponseSchema>
     try {
@@ -438,7 +625,13 @@ export async function POST(request: Request) {
       scored = { keywords: scored.keywords.slice(0, targetCount) }
     }
 
-    const clusters = buildClusters(candidates, scored)
+    const clusters = buildClusters(
+      candidates,
+      scored,
+      keywordToPage,
+      highConverterPages,
+      signalActive,
+    )
     return NextResponse.json({
       clusters,
       // `truncated` now means candidates we never showed Claude at all
@@ -448,6 +641,7 @@ export async function POST(request: Request) {
       candidatesShown: candidates.length,
       targetCount,
       selected: scored.keywords.length,
+      conversionSignalActive: signalActive,
     })
   } catch (error: unknown) {
     console.error("[api/claude/keywords] failed:", error)

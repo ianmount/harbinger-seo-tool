@@ -175,6 +175,7 @@ export default function ReportingPage() {
   // only ones whose hostname matches the partner's website.
   useEffect(() => {
     if (!partner) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSitesState({ status: "idle" })
       return
     }
@@ -214,6 +215,7 @@ export default function ReportingPage() {
   // changes (e.g., partner switch). User can still override via the Select.
   useEffect(() => {
     if (sitesState.status === "ready") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setChosenSiteUrl(sitesState.candidates[0]?.siteUrl ?? null)
     } else {
       setChosenSiteUrl(null)

@@ -91,6 +91,19 @@ export interface ScoredKeyword extends KeywordResult {
   fitScore: number
   intent: KeywordIntent
   recommendation: KeywordRecommendation
+  /**
+   * True when the keyword's best-matching GSC landing page is one of the
+   * partner's high-converting pages in GA4 (see lib/ga4.ts). Populated only
+   * when the partner has a GA4 property configured; undefined otherwise.
+   * Used by Claude as a modest fit-score boost and surfaced in the results
+   * table so the engineer can see why a keyword scored high.
+   */
+  pageConversionSignal?: boolean
+  /**
+   * The GSC landing page used to compute pageConversionSignal — useful for
+   * debugging why a signal did or didn't fire. Path-only (no scheme/host).
+   */
+  landingPage?: string
 }
 
 export interface KeywordCluster {
