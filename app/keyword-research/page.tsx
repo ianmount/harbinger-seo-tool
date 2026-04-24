@@ -69,7 +69,11 @@ interface SortState {
 }
 
 const FILTER_ALL = "__all__"
-const MAX_SEEDS = 6
+// Safety ceiling on seeds per run. Each seed triggers two DataForSEO calls
+// (ideas + suggestions), so this caps total DFS cost per run. The default
+// seed generator surfaces *every* partner service (no hidden truncation);
+// this only kicks in for pathologically long Airtable Services fields.
+const MAX_SEEDS = 50
 const DEFAULT_MAX_KEYWORDS = 300
 // Keep in sync with MAX_OUTPUT_KEYWORDS in /api/claude/keywords/route.ts.
 // Past this the compact-tuple output risks truncating against Claude's
@@ -141,6 +145,10 @@ function generateDefaultSeeds(
   partner: Partner,
   selectedLocation: DfsLabsLocation | null,
 ): string[] {
+  // Every cleaned service name becomes a seed. No hidden truncation — if
+  // the partner lists 15 services we generate 15 seeds (×2 variants when
+  // we have a city); the MAX_SEEDS ceiling in the parent run-handler is
+  // the only backstop against runaway Airtable fields.
   const services = partner.services
     .split(/[\n,;]/)
     .map(cleanServiceName)
@@ -153,7 +161,6 @@ function generateDefaultSeeds(
       if (SERVICE_HEADER_NOISE.has(s.toLowerCase())) return false
       return true
     })
-    .slice(0, 3)
 
   // Prefer the explicitly picked location's city. Falling back to parsing
   // partner.serviceAreas is risky — that field often contains addresses,
@@ -779,10 +786,13 @@ export default function KeywordResearchPage() {
                 disabled={running}
               />
               <p className="text-xs text-muted-foreground">
-                Comma or newline separated. Capped at {MAX_SEEDS} seeds per run to
-                keep DataForSEO costs in check.{" "}
+                Comma or newline separated. Defaults include every partner
+                service (from Airtable) × two location variants (<code>in
+                &lt;city&gt;</code> and <code>near me</code>). Safety cap at{" "}
+                {MAX_SEEDS} seeds per run — each seed costs two DataForSEO
+                calls. {" "}
                 {effectiveSeeds.length > 0
-                  ? `Using: ${effectiveSeeds.slice(0, MAX_SEEDS).join(", ")}`
+                  ? `Using (${Math.min(effectiveSeeds.length, MAX_SEEDS)}): ${effectiveSeeds.slice(0, MAX_SEEDS).join(", ")}`
                   : "No seeds yet."}
               </p>
             </div>
