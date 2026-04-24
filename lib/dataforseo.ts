@@ -1,11 +1,15 @@
 import "server-only"
 import { z } from "zod"
+import { recordDataForSEOCost } from "@/lib/audit-cost"
 import { requireEnv } from "@/lib/env"
 import type {
+  BacklinkReport,
   CompetitionLevel,
   DfsLabsLocation,
   DfsLocation,
+  DomainRankOverview,
   KeywordResult,
+  ReferringDomainSample,
 } from "@/lib/types"
 
 const DFS_BASE = "https://api.dataforseo.com"
@@ -114,8 +118,10 @@ export async function dfsRequest<T = DfsEnvelope>(
   }
   const envelope = parsed.data
 
+  const envelopeCost = envelope.cost ?? 0
+  recordDataForSEOCost(envelopeCost)
   console.log(
-    `[dataforseo] endpoint=${endpoint} dfs_status=${envelope.status_code} cost=$${(envelope.cost ?? 0).toFixed(4)} tasks=${envelope.tasks.length}`,
+    `[dataforseo] endpoint=${endpoint} dfs_status=${envelope.status_code} cost=$${envelopeCost.toFixed(4)} tasks=${envelope.tasks.length}`,
   )
 
   if (envelope.status_code !== 20000) {
@@ -409,4 +415,364 @@ export async function listLabsLocations(
     `[dataforseo] cached ${locations.length} Google Ads locations for ${country}`,
   )
   return locations
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Audit tab wrappers.
+//
+// These five functions power the SEO Audit pipeline. They're grouped at the
+// bottom so the existing Keyword Research imports don't need to change.
+//
+// Cost notes (approximate, verify against DataForSEO's current price list):
+//   - domain_rank_overview: ~$0.0001/call
+//   - ranked_keywords:       ~$0.01/call (up to 100 rows)
+//   - serp live:             ~$0.002/call
+//   - backlinks/summary:     ~$0.02/call
+//   - backlinks/referring_domains: ~$0.02/call (up to 100 rows)
+// A full audit with 3 markets + 4 competitors runs ~$0.40 in DataForSEO.
+
+function stripDomain(domain: string): string {
+  return domain
+    .trim()
+    .replace(/^https?:\/\//i, "")
+    .replace(/\/+$/, "")
+    .toLowerCase()
+}
+
+const domainRankItemSchema = z
+  .object({
+    metrics: z
+      .object({
+        organic: z
+          .object({
+            count: z.number().nullable().optional(),
+            etv: z.number().nullable().optional(),
+            estimated_paid_traffic_cost: z.number().nullable().optional(),
+          })
+          .passthrough()
+          .nullable()
+          .optional(),
+        paid: z
+          .object({
+            count: z.number().nullable().optional(),
+            etv: z.number().nullable().optional(),
+          })
+          .passthrough()
+          .nullable()
+          .optional(),
+      })
+      .passthrough()
+      .optional(),
+    location_code: z.number().optional(),
+    location_name: z.string().nullable().optional(),
+  })
+  .passthrough()
+
+/**
+ * /v3/dataforseo_labs/google/domain_rank_overview/live
+ *
+ * Returns visibility totals (organic keywords, estimated traffic, estimated
+ * traffic cost) for a domain in a given Google Ads location. Used for the
+ * competitive comparison table in the audit.
+ */
+export async function domainRankOverview(
+  domain: string,
+  location: DfsLocation,
+): Promise<DomainRankOverview> {
+  const target = stripDomain(domain)
+  const envelope = await dfsRequest(
+    "/v3/dataforseo_labs/google/domain_rank_overview/live",
+    [
+      {
+        target,
+        ...locationAndLanguageParams(location),
+      },
+    ],
+  )
+  const items = extractLabsItems(envelope)
+  const first = items[0] ?? null
+  const parsed = domainRankItemSchema.safeParse(first ?? {})
+  const item = parsed.success ? parsed.data : {}
+  const locationCode =
+    "code" in location
+      ? location.code
+      : (item.location_code ?? 0)
+  const locationName = item.location_name ?? ("name" in location ? location.name : "")
+  return {
+    domain: target,
+    locationCode,
+    locationName: locationName ?? "",
+    organicKeywords: item.metrics?.organic?.count ?? 0,
+    organicTraffic: item.metrics?.organic?.etv ?? 0,
+    organicTrafficCost:
+      item.metrics?.organic?.estimated_paid_traffic_cost ?? 0,
+    paidKeywords: item.metrics?.paid?.count ?? 0,
+    paidTraffic: item.metrics?.paid?.etv ?? 0,
+  }
+}
+
+const rankedKeywordItemSchema = z
+  .object({
+    keyword_data: z
+      .object({
+        keyword: z.string(),
+        keyword_info: z
+          .object({
+            search_volume: z.number().nullable().optional(),
+          })
+          .passthrough()
+          .nullable()
+          .optional(),
+      })
+      .passthrough(),
+    ranked_serp_element: z
+      .object({
+        serp_item: z
+          .object({
+            rank_absolute: z.number().nullable().optional(),
+            rank_group: z.number().nullable().optional(),
+            etv: z.number().nullable().optional(),
+          })
+          .passthrough()
+          .nullable()
+          .optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+  })
+  .passthrough()
+
+export interface RankedKeyword {
+  keyword: string
+  position: number
+  searchVolume: number
+  estimatedTraffic: number
+}
+
+/**
+ * /v3/dataforseo_labs/google/ranked_keywords/live
+ *
+ * Pulls the top N keywords a domain ranks for in a given location. Used by
+ * the audit's competitive comparison to surface the 3-5 highest-traffic
+ * keywords per domain × market cell.
+ */
+export async function rankedKeywords(
+  domain: string,
+  location: DfsLocation,
+  opts: { limit?: number } = {},
+): Promise<RankedKeyword[]> {
+  const target = stripDomain(domain)
+  const envelope = await dfsRequest(
+    "/v3/dataforseo_labs/google/ranked_keywords/live",
+    [
+      {
+        target,
+        ...locationAndLanguageParams(location),
+        limit: opts.limit ?? 100,
+        order_by: ["ranked_serp_element.serp_item.etv,desc"],
+      },
+    ],
+  )
+  const items = extractLabsItems(envelope)
+  const out: RankedKeyword[] = []
+  for (const raw of items) {
+    const parsed = rankedKeywordItemSchema.safeParse(raw)
+    if (!parsed.success) continue
+    const kw = parsed.data
+    const serp = kw.ranked_serp_element?.serp_item
+    if (!serp) continue
+    const position = serp.rank_absolute ?? serp.rank_group ?? 0
+    if (!position) continue
+    out.push({
+      keyword: kw.keyword_data.keyword,
+      position,
+      searchVolume: kw.keyword_data.keyword_info?.search_volume ?? 0,
+      estimatedTraffic: serp.etv ?? 0,
+    })
+  }
+  return out
+}
+
+const serpItemSchema = z
+  .object({
+    type: z.string().optional(),
+    domain: z.string().nullable().optional(),
+    rank_absolute: z.number().nullable().optional(),
+  })
+  .passthrough()
+
+/**
+ * /v3/serp/google/organic/live/advanced
+ *
+ * Runs a single SERP query and returns the top 10 organic result domains.
+ * Used when the MD doesn't supply competitors — we take the top 3-5 seed
+ * queries for the prospect's services, run each in each target market, and
+ * aggregate the most-recurring domains as proposed competitors.
+ */
+export async function serpCompetitors(
+  keyword: string,
+  location: DfsLocation,
+  opts: { depth?: number } = {},
+): Promise<string[]> {
+  const envelope = await dfsRequest(
+    "/v3/serp/google/organic/live/advanced",
+    [
+      {
+        keyword,
+        ...locationAndLanguageParams(location),
+        depth: opts.depth ?? 10,
+      },
+    ],
+  )
+  const firstTask = envelope.tasks[0]
+  const result = firstTask?.result?.[0] as { items?: unknown[] } | undefined
+  const items = result?.items ?? []
+  const domains: string[] = []
+  for (const raw of items) {
+    const parsed = serpItemSchema.safeParse(raw)
+    if (!parsed.success) continue
+    if (parsed.data.type !== "organic") continue
+    const domain = parsed.data.domain
+    if (domain) domains.push(domain.toLowerCase())
+  }
+  return domains
+}
+
+const backlinksSummaryItemSchema = z
+  .object({
+    target: z.string().optional(),
+    backlinks: z.number().nullable().optional(),
+    referring_domains: z.number().nullable().optional(),
+    referring_main_domains: z.number().nullable().optional(),
+    backlinks_spam_score: z.number().nullable().optional(),
+    rank: z.number().nullable().optional(),
+    broken_backlinks: z.number().nullable().optional(),
+    broken_pages: z.number().nullable().optional(),
+  })
+  .passthrough()
+
+export interface BacklinkSummary {
+  domain: string
+  totalBacklinks: number
+  referringDomains: number
+  averageSpamScore: number
+  rank: number
+  brokenBacklinks: number
+  brokenPages: number
+}
+
+/**
+ * /v3/backlinks/summary/live
+ *
+ * Top-level backlink counts and the domain-wide average spam score. Cheap
+ * single-call summary; we pair it with referring_domains below for concrete
+ * spammy-domain examples in the audit.
+ */
+export async function backlinksSummary(
+  domain: string,
+): Promise<BacklinkSummary> {
+  const target = stripDomain(domain)
+  const envelope = await dfsRequest("/v3/backlinks/summary/live", [
+    {
+      target,
+      internal_list_limit: 10,
+      backlinks_status_type: "live",
+    },
+  ])
+  const firstTask = envelope.tasks[0]
+  const rawResult = firstTask?.result?.[0]
+  const parsed = backlinksSummaryItemSchema.safeParse(rawResult ?? {})
+  const item = parsed.success ? parsed.data : {}
+  return {
+    domain: target,
+    totalBacklinks: item.backlinks ?? 0,
+    referringDomains:
+      item.referring_main_domains ?? item.referring_domains ?? 0,
+    averageSpamScore: item.backlinks_spam_score ?? 0,
+    rank: item.rank ?? 0,
+    brokenBacklinks: item.broken_backlinks ?? 0,
+    brokenPages: item.broken_pages ?? 0,
+  }
+}
+
+const referringDomainItemSchema = z
+  .object({
+    domain: z.string(),
+    backlinks_spam_score: z.number().nullable().optional(),
+    referring_pages: z.number().nullable().optional(),
+    rank: z.number().nullable().optional(),
+    first_seen: z.string().nullable().optional(),
+    lost_date: z.string().nullable().optional(),
+    last_seen: z.string().nullable().optional(),
+  })
+  .passthrough()
+
+/**
+ * /v3/backlinks/referring_domains/live
+ *
+ * Fetches up to `limit` referring domains with their per-domain spam scores.
+ * The audit uses this to (a) compute the average spam score, (b) count
+ * high-spam domains (>= 50), and (c) surface concrete spammy-domain examples
+ * in the PDF — the prompt requires 3-5 specific domain names, not "some
+ * low-quality backlinks."
+ *
+ * Returns a BacklinkReport by combining the summary data + sampled examples.
+ */
+export async function referringDomainsWithSpamScore(
+  domain: string,
+  opts: { limit?: number } = {},
+): Promise<BacklinkReport> {
+  const target = stripDomain(domain)
+  const limit = opts.limit ?? 500
+
+  const [summary, envelope] = await Promise.all([
+    backlinksSummary(target),
+    dfsRequest("/v3/backlinks/referring_domains/live", [
+      {
+        target,
+        limit,
+        backlinks_status_type: "live",
+        order_by: ["backlinks_spam_score,desc"],
+      },
+    ]),
+  ])
+
+  const firstTask = envelope.tasks[0]
+  const raw = firstTask?.result?.[0] as { items?: unknown[] } | undefined
+  const items = raw?.items ?? []
+
+  const samples: ReferringDomainSample[] = []
+  for (const rawItem of items) {
+    const parsed = referringDomainItemSchema.safeParse(rawItem)
+    if (!parsed.success) continue
+    samples.push({
+      domain: parsed.data.domain,
+      spamScore: parsed.data.backlinks_spam_score ?? 0,
+      referringPages: parsed.data.referring_pages ?? 0,
+      rank: parsed.data.rank ?? 0,
+      firstSeen: parsed.data.first_seen ?? undefined,
+      lastSeen: parsed.data.last_seen ?? undefined,
+    })
+  }
+
+  const highSpamSamples = samples
+    .filter((s) => s.spamScore >= 50)
+    .sort((a, b) => b.spamScore - a.spamScore)
+  const highSpamCount = highSpamSamples.length
+  const highSpamExamples = highSpamSamples.slice(0, 10)
+
+  const topAuthorityExamples = [...samples]
+    .sort((a, b) => b.rank - a.rank)
+    .slice(0, 10)
+
+  return {
+    domain: target,
+    totalBacklinks: summary.totalBacklinks,
+    referringDomains: summary.referringDomains,
+    averageSpamScore: summary.averageSpamScore,
+    highSpamCount,
+    highSpamExamples,
+    topAuthorityExamples,
+  }
 }

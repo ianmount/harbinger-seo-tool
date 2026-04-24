@@ -228,3 +228,285 @@ export interface GA4PageConversion {
   conversions: number
   conversionRate: number
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Audit tab types.
+//
+// A Prospect is the pre-sales counterpart to Partner: an in-memory record
+// representing a potential partner the MD is pitching. Unlike Partner it is
+// NOT persisted to Airtable — it lives only for the duration of one audit
+// request. Fields intentionally mirror the subset of Partner the audit
+// pipeline needs, but naming makes the distinction clear at call sites.
+//
+// The audit pipeline produces a series of typed intermediate results
+// (CrawlReport → CompetitiveReport → BacklinkReport) that feed the Claude
+// synthesis step and ultimately the PDF. Each step's output is a serializable
+// object so the Next route handlers can return them unchanged to the client,
+// which re-posts the aggregate to the Claude route.
+
+/** A single city/state the prospect wants to rank in. */
+export interface TargetMarket {
+  city: string
+  state: string
+}
+
+/**
+ * The prospect being audited. Entered manually by the MD on the Audit tab —
+ * not looked up from Airtable.
+ *
+ * `gscSiteUrl` and `ga4PropertyId` are optional: when set, the audit pulls
+ * first-party GSC/GA4 data (the SEO Ops Google account must have access).
+ * When unset, the audit falls back to DataForSEO-only data and the PDF is
+ * clearly marked as a "limited audit" so the MD sees the data gap.
+ */
+export interface Prospect {
+  /** Bare domain ("example.com") — no scheme, no trailing slash. */
+  domain: string
+  targetMarkets: TargetMarket[]
+  /** 0–5 competitor domains. Empty array means "have Claude propose them." */
+  competitors: string[]
+  gscSiteUrl?: string
+  ga4PropertyId?: string
+  /** Used in the PDF cover / Claude synthesis to personalize. */
+  contactName?: string
+}
+
+// ── Crawler outputs ────────────────────────────────────────────────────────
+
+/** Per-URL result from the cheerio crawl. */
+export interface CrawledPage {
+  url: string
+  finalUrl: string
+  status: number
+  /** True if the HTTP chain included at least one redirect. */
+  redirected: boolean
+  title: string | null
+  metaDescription: string | null
+  metaRobots: string | null
+  canonical: string | null
+  h1s: string[]
+  h2Count: number
+  /** JSON-LD schema blocks parsed from <script type="application/ld+json">. */
+  schemaTypes: string[]
+  /** <img> tags total vs. ones with non-empty alt. */
+  imagesTotal: number
+  imagesWithAlt: number
+  internalLinks: number
+  wordCount: number
+  /**
+   * True when the page appears to be a client-rendered SPA shell (empty
+   * body text + React/Next/Vue root div). Surfaced as an audit finding
+   * because Googlebot's initial render may see nothing.
+   */
+  spaShellDetected: boolean
+  /** Populated when the fetch errored (non-HTTP failure, parse failure). */
+  error?: string
+}
+
+/**
+ * Aggregate findings across the whole crawl. Groups are keyed by the
+ * duplicate value (title / description string) and list the offending URLs.
+ */
+export interface CrawlReport {
+  domain: string
+  sitemapUrls: string[]
+  /** URLs actually fetched (may be a subset of sitemap if capped). */
+  crawledCount: number
+  /** Max pages the crawl was allowed to fetch. */
+  maxPages: number
+  pages: CrawledPage[]
+  nonOkPages: { url: string; status: number }[]
+  duplicateTitles: { title: string; urls: string[] }[]
+  duplicateDescriptions: { description: string; urls: string[] }[]
+  missingCanonicals: string[]
+  missingTitles: string[]
+  missingDescriptions: string[]
+  thinContentPages: { url: string; wordCount: number }[]
+  spaShellPages: string[]
+  /** Unique schema.org types seen across the site. */
+  schemaTypesPresent: string[]
+  /** Standard LocalBusiness / Service / Review schemas missing everywhere. */
+  schemaTypesRecommended: string[]
+  imageAltCoveragePercent: number
+  crawlDurationMs: number
+}
+
+// ── DataForSEO extended types for audit ────────────────────────────────────
+
+export interface DomainRankOverview {
+  domain: string
+  locationCode: number
+  locationName: string
+  organicKeywords: number
+  organicTraffic: number
+  /** Estimated monthly traffic cost (USD). */
+  organicTrafficCost: number
+  paidKeywords: number
+  paidTraffic: number
+}
+
+/** One row of competitive comparison: domain × target market. */
+export interface CompetitiveRow {
+  domain: string
+  isProspect: boolean
+  markets: {
+    city: string
+    state: string
+    locationCode: number
+    organicKeywords: number
+    organicTraffic: number
+    organicTrafficCost: number
+    /** Top 3 ranked keywords for this domain in this market, by traffic. */
+    topKeywords: { keyword: string; position: number; searchVolume: number }[]
+  }[]
+}
+
+export interface CompetitiveReport {
+  prospectDomain: string
+  markets: TargetMarket[]
+  rows: CompetitiveRow[]
+  /** True when Claude auto-suggested competitors (MD left the field blank). */
+  competitorsAutoSuggested: boolean
+}
+
+export interface ReferringDomainSample {
+  domain: string
+  /** DataForSEO backlink_spam_score 0–100; higher = spammier. */
+  spamScore: number
+  referringPages: number
+  rank: number
+  firstSeen?: string
+  lastSeen?: string
+}
+
+export interface BacklinkReport {
+  domain: string
+  totalBacklinks: number
+  referringDomains: number
+  /** Average spam score across the sample. */
+  averageSpamScore: number
+  /** Count of referring domains with spam_score >= 50. */
+  highSpamCount: number
+  /** Up to 10 concrete spammy domain examples sorted by spam score desc. */
+  highSpamExamples: ReferringDomainSample[]
+  /** Up to 10 highest-authority referring domains for context. */
+  topAuthorityExamples: ReferringDomainSample[]
+}
+
+// ── GSC / GA4 slices the audit passes to Claude ───────────────────────────
+
+export interface AuditGscSlice {
+  siteUrl: string
+  dateRange: { startDate: string; endDate: string }
+  totalClicks: number
+  totalImpressions: number
+  topQueries: GSCTopQueryRow[]
+  topPages: GSCTopPageRow[]
+}
+
+/**
+ * Q-over-Q comparison block for the audit. `current` is the most recently
+ * completed quarter; `prior` is the same quarter a year earlier. Prior data
+ * is optional because some partners are too new.
+ */
+export interface AuditGa4Slice {
+  current: GA4SeoReport
+  prior?: GA4SeoReport
+}
+
+// ── Claude synthesis output (what the PDF renders) ────────────────────────
+
+/**
+ * Structured audit output Claude produces. Deliberately rigid: the PDF
+ * template binds to these exact fields, and the "max 7 findings" hard
+ * constraint is enforced in the prompt (anything beyond 7 is pushed into
+ * `appendix_issues` as one-liners).
+ */
+export interface AuditFinding {
+  /** 1-indexed — Claude uses these numbers in the roadmap cross-references. */
+  number: number
+  title: string
+  /** 1–2 sentence body. Must cite a specific URL, count, or percentage. */
+  detail: string
+  /** Single bolded number that makes the finding concrete. */
+  headlineMetric: string
+  /** Optional business-impact translation (sessions → leads → revenue). */
+  businessImpact?: string
+}
+
+export interface AuditRoadmapItem {
+  /** Month 1 / Month 2 / Month 3. */
+  phase: "Month 1" | "Month 2" | "Month 3"
+  title: string
+  /** Must reference findings by number, e.g. "Resolves Finding #3". */
+  description: string
+  findingRefs: number[]
+}
+
+export interface AuditTrafficAnalysis {
+  summary: string
+  sessionsCurrent: number
+  sessionsPrior: number
+  sessionsDeltaPct: number
+  conversionsCurrent: number
+  conversionsPrior: number
+  conversionsDeltaPct: number
+  /** The "good news buried in bad news" (or vice-versa) signal, if any. */
+  nuance?: string
+  topPagesLost: { page: string; sessionsLost: number; deltaPct: number }[]
+}
+
+export interface AuditCompetitiveTable {
+  markets: TargetMarket[]
+  rows: {
+    domain: string
+    isProspect: boolean
+    perMarket: {
+      city: string
+      state: string
+      organicKeywords: number
+      organicTraffic: number
+    }[]
+  }[]
+  /** 1–2 sentence read of the table. Must name a competitor by domain. */
+  narrative: string
+}
+
+export interface AuditTechnicalFinding {
+  title: string
+  /** Concrete URL or count. */
+  evidence: string
+  businessImpact: string
+}
+
+export interface AuditBacklinkRisk {
+  summary: string
+  averageSpamScore: number
+  highSpamCount: number
+  /** Exact domains to cite in the PDF. */
+  spamExamples: string[]
+}
+
+export interface AuditSynthesis {
+  prospectDomain: string
+  prospectName?: string
+  generatedAt: string
+  executiveSummary: string
+  keyFindings: AuditFinding[]
+  appendixIssues: string[]
+  trafficAnalysis?: AuditTrafficAnalysis
+  keywordVisibility: AuditCompetitiveTable
+  topPagesToRecover?: { page: string; reasoning: string }[]
+  technicalFindings: AuditTechnicalFinding[]
+  backlinkRisk: AuditBacklinkRisk
+  roadmap: AuditRoadmapItem[]
+  dataSources: {
+    crawlPagesAnalyzed: number
+    gscIncluded: boolean
+    ga4Included: boolean
+    competitorsAutoSuggested: boolean
+  }
+  /** Populated by the PDF route before upload, used for the footer note. */
+  costUsd?: number
+  durationSeconds?: number
+}

@@ -1,5 +1,6 @@
 import "server-only"
 import Anthropic from "@anthropic-ai/sdk"
+import { recordClaudeCost } from "@/lib/audit-cost"
 import { requireEnv } from "@/lib/env"
 
 export const DEFAULT_MODEL = "claude-opus-4-7"
@@ -61,6 +62,7 @@ export async function callClaude(
   }
 
   const { input_tokens, output_tokens } = response.usage
+  recordClaudeCost({ inputTokens: input_tokens, outputTokens: output_tokens })
   console.log(
     `[claude] model=${model} input_tokens=${input_tokens} output_tokens=${output_tokens} stop_reason=${response.stop_reason}`,
   )

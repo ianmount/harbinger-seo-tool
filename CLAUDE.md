@@ -103,3 +103,42 @@ Five tabs, each wrapping one workflow:
 
 ## TODO (deferred work)
 - **Prompt 8 (Keyword Research tab): Airtable → DataForSEO location format helper.** `Partner.serviceAreas` comes from Airtable as free-text "City, ST" or just "City" (see real data: "Greensboro and Winston Salem, North Carolina", "Peachtree City, GA", "Atlanta, Georgia"). DataForSEO's canonical format is `"City,FullStateName,United States"` (commas, no spaces). Add a helper in `lib/dataforseo.ts` (or `lib/locations.ts`) that takes a freeform string and returns the canonical form. Sufficient for MVP: a static US state abbrev → full name map (`{ GA: "Georgia", ... }`) plus a regex to extract "City, ST" from the first line of the field. If the parser can't match, fall back to the raw string and let DataForSEO surface the error — do not silently swap to a default location.
+
+## Audit tab — in-progress state (branch `claude/add-seo-audit-tab-w4g9i`)
+
+Pre-sales SEO audit tab that produces a polished PDF for a prospective partner. Subject is a `Prospect` (in-memory, not in Airtable), distinct from `Partner`. GSC/GA4 are optional per prospect; falls back to DataForSEO-only when absent. Real site crawl via cheerio + fetch (no headless browser — SPA shells are flagged as a finding, not re-fetched). Max 50 pages, 5 concurrent, 8s/page timeout. Requires Vercel Pro for the 300s function limit.
+
+### Four up-front decisions (confirmed with user)
+- **Crawler:** `cheerio` + native `fetch` — no puppeteer/playwright. SPA shells flagged, not re-rendered.
+- **PDF library:** `@react-pdf/renderer` — pure JS, no Chrome dep.
+- **PDF storage:** Vercel Blob (public-via-unguessable-slug, ≥16 chars entropy). Requires `BLOB_READ_WRITE_TOKEN` env var.
+- **Vercel plan:** Pro, 300s max function duration.
+
+### Additional constraints
+- Log actual DataForSEO + Claude cost per audit to server console. Surface total cost + duration in the PDF footer ("Audit generated in X minutes using verified first-party data") so the user can validate the ~$0.85-$1.00/audit estimate during pilot.
+- Audit synthesis uses **`claude-sonnet-4-6`** (not Opus 4.7). Opus was hitting stream-idle timeouts on the 30-40k-token audit payload; Sonnet streams faster and is sufficient for structured JSON output. If finding quality regresses, swap back to Opus with a different workaround (shorter prompt, chunked synthesis).
+- Hard constraint: Claude produces EXACTLY 5-7 findings. Extras go into `appendixIssues` as one-liners. Validated server-side — route returns 502 if the count is wrong.
+- Every finding must cite a specific URL/count/percentage from the data. Generic claims forbidden.
+- At least one finding must name a competitor domain.
+- Backlink risk must list 3-5 actual spam domain strings from the data.
+- Business-impact framing: if GA4 conversions are configured, translate traffic findings to leads/revenue. If not, acknowledge the gap.
+- 90-day roadmap must reference findings by number ("Resolves Finding #3").
+
+### Implementation status
+- **Completed:**
+  - `lib/types.ts` — `Prospect`, `TargetMarket`, `CrawledPage`, `CrawlReport`, `DomainRankOverview`, `CompetitiveRow`, `CompetitiveReport`, `ReferringDomainSample`, `BacklinkReport`, `AuditGscSlice`, `AuditGa4Slice`, `AuditFinding`, `AuditSynthesis`, etc.
+  - `lib/crawler.ts` — sitemap discovery (robots.txt + `/sitemap.xml` + `/sitemap_index.xml`), mobile UA, nested sitemap-index support, 8s/page timeout, prioritized URL selection (home + service pages over blog archives), SPA-shell detection via `#root`/`#__next` + empty body.
+  - `lib/dataforseo.ts` — added `domainRankOverview`, `rankedKeywords`, `serpCompetitors`, `backlinksSummary`, `referringDomainsWithSpamScore`. Competitive rollup runs at **state granularity** (not city) because Labs endpoints reject city-level location names — PDF still labels each row with the original city.
+  - `lib/audit-cost.ts` — per-audit cost accumulator using `AsyncLocalStorage`. `lib/claude.ts` + `lib/dataforseo.ts` report into it via `recordClaudeCost` / `recordDataForSEOCost`. Route wraps pipeline with `withAuditCost(...)`.
+  - `app/api/audit/crawl/route.ts` — POST, `maxDuration=300`. Delegates to `crawlSite`.
+  - `app/api/audit/competitive/route.ts` — POST, `maxDuration=300`. Optional auto-suggestion via `proposeCompetitors()` when `competitors: []`.
+  - `app/api/audit/backlinks/route.ts` — POST, `maxDuration=60`. Delegates to `referringDomainsWithSpamScore`.
+  - `app/api/claude/audit/route.ts` — POST, `maxDuration=300`. Uses `claude-sonnet-4-6`. Builds prompt, parses JSON, validates 5-7 findings invariant, returns `{ synthesis }`.
+- **Still to do on this branch:**
+  - `lib/audit-pdf.ts` — React-PDF document component, navy + orange Inter-alike, pages: cover, exec summary, traffic analysis (if GA4), competitive table (money shot), technical findings, backlink risk, 90-day roadmap. Footer shows generation time + cost note.
+  - `app/api/audit/pdf/route.ts` — orchestrator: calls crawl → competitive → backlinks → optional GSC/GA4 → Claude synthesis → render PDF → upload to Vercel Blob. Returns `{ url, synthesis, costUsd, durationSeconds }`. Wraps everything in `withAuditCost`.
+  - `app/audit/page.tsx` — form (domain, markets, competitors, optional GSC/GA4 IDs), multi-stage progress indicator, PDF preview + download + copy-link.
+  - `components/TabNav.tsx` — add `/audit` as **first** tab.
+  - `lib/env.ts` + `.env.example` — add `BLOB_READ_WRITE_TOKEN` (optional).
+  - Test build + push.
+- **User owes when we get to Blob step:** create a Blob store in Vercel dashboard (Storage → Create → Blob), name it `audit-reports`, paste the `BLOB_READ_WRITE_TOKEN` into Vercel env vars (Settings → Environment Variables). I will spell out the exact steps when we hit that point.
