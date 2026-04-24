@@ -83,35 +83,56 @@ function splitCities(cityPart: string): string[] {
     .filter((s) => s.length > 0)
 }
 
+function resolveStateName(raw: string): string | null {
+  const stateRaw = raw.replace(/,\s*(united states|usa|us)\s*\.?$/i, "").trim()
+  if (/^[A-Za-z]{2}$/.test(stateRaw)) {
+    return US_STATE_ABBREV[stateRaw.toUpperCase()] ?? null
+  }
+  return US_STATE_FROM_NAME.get(stateRaw.toLowerCase()) ?? null
+}
+
 /**
- * Canonical DataForSEO location string, or the raw input if parsing fails.
- * Uses only the first listed city ("Greensboro and Winston Salem, NC" →
- * "Greensboro,North Carolina,United States") since DFS location_name must
- * resolve to a single place.
+ * DataForSEO location candidates ordered from most to least specific.
+ *
+ * When parsing succeeds, returns [city-state-country, state-country,
+ * "United States"]. Callers should try them in order and fall back on
+ * 40501 "Invalid Field: location_name" — many smaller US cities are not
+ * in DFS's location taxonomy, and falling back to the state is the
+ * correct behavior for local-SEO keyword research.
+ *
+ * When parsing fails, returns [raw] so DataForSEO surfaces the underlying
+ * error rather than silently swapping to a default (per CLAUDE.md).
  */
-export function parseLocation(raw: string): string {
+export function parseLocationCandidates(raw: string): string[] {
   const line = firstLine(raw)
-  if (!line) return raw
+  if (!line) return [raw]
 
   const commaIdx = line.indexOf(",")
-  if (commaIdx <= 0) return raw
+  if (commaIdx <= 0) return [raw]
 
   const cityPart = line.slice(0, commaIdx).trim()
-  let stateRaw = line.slice(commaIdx + 1).trim()
-  stateRaw = stateRaw.replace(/,\s*(united states|usa|us)\s*\.?$/i, "").trim()
+  const stateRaw = line.slice(commaIdx + 1).trim()
+
+  const stateName = resolveStateName(stateRaw)
+  if (!stateName) return [raw]
 
   const cities = splitCities(cityPart)
   const primaryCity = cities[0]
-  if (!primaryCity) return raw
-
-  if (/^[A-Za-z]{2}$/.test(stateRaw)) {
-    const full = US_STATE_ABBREV[stateRaw.toUpperCase()]
-    if (full) return `${primaryCity},${full},United States`
+  const candidates: string[] = []
+  if (primaryCity) {
+    candidates.push(`${primaryCity},${stateName},United States`)
   }
-  const fromName = US_STATE_FROM_NAME.get(stateRaw.toLowerCase())
-  if (fromName) return `${primaryCity},${fromName},United States`
+  candidates.push(`${stateName},United States`)
+  candidates.push("United States")
+  return candidates
+}
 
-  return raw
+/**
+ * Convenience wrapper for UIs that only need the most specific string to
+ * display. Returns the top candidate from parseLocationCandidates.
+ */
+export function parseLocation(raw: string): string {
+  return parseLocationCandidates(raw)[0] ?? raw
 }
 
 /** City names for seed-keyword generation. */

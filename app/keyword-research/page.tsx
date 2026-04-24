@@ -23,7 +23,10 @@ import {
 } from "@/components/ui/table"
 import { useSelectedPartner } from "@/lib/use-selected-partner"
 import { findBestGscSite } from "@/lib/gsc-site-match"
-import { parseLocation, parseLocationCities } from "@/lib/locations"
+import {
+  parseLocationCandidates,
+  parseLocationCities,
+} from "@/lib/locations"
 import { cn } from "@/lib/utils"
 import type {
   GSCSiteInfo,
@@ -238,14 +241,17 @@ export default function KeywordResearchPage() {
     [partner],
   )
 
-  const dfsLocation = useMemo(
-    () => (partner ? parseLocation(partner.serviceAreas) : ""),
+  const locationCandidates = useMemo(
+    () => (partner ? parseLocationCandidates(partner.serviceAreas) : []),
     [partner],
   )
 
   const locationParsedSuccessfully = useMemo(
-    () => !!partner && dfsLocation !== partner.serviceAreas,
-    [partner, dfsLocation],
+    () =>
+      !!partner &&
+      locationCandidates.length > 0 &&
+      locationCandidates[0] !== partner.serviceAreas,
+    [partner, locationCandidates],
   )
 
   const effectiveSeeds = useMemo(() => {
@@ -267,7 +273,7 @@ export default function KeywordResearchPage() {
       return
     }
 
-    const location = dfsLocation
+    const location = locationCandidates
 
     // Stage 1: GSC (non-fatal — continue without historical if it fails)
     setPhase({ status: "running", stage: "gsc" })
@@ -461,7 +467,7 @@ export default function KeywordResearchPage() {
           err instanceof Error ? err.message : "Claude clustering failed",
       })
     }
-  }, [partner, effectiveSeeds, dfsLocation])
+  }, [partner, effectiveSeeds, locationCandidates])
 
   const rows = useMemo<ScoredKeyword[]>(
     () => (phase.status === "done" ? phase.rows : []),
@@ -538,7 +544,7 @@ export default function KeywordResearchPage() {
         <>
           <PartnerSummary
             partner={partner}
-            dfsLocation={dfsLocation}
+            locationCandidates={locationCandidates}
             locationParsedSuccessfully={locationParsedSuccessfully}
           />
 
@@ -747,11 +753,11 @@ export default function KeywordResearchPage() {
 
 function PartnerSummary({
   partner,
-  dfsLocation,
+  locationCandidates,
   locationParsedSuccessfully,
 }: {
   partner: Partner
-  dfsLocation: string
+  locationCandidates: string[]
   locationParsedSuccessfully: boolean
 }) {
   return (
@@ -771,10 +777,26 @@ function PartnerSummary({
         </p>
         <p className="mt-1 text-xs text-muted-foreground">
           DataForSEO location:{" "}
-          <code className="font-mono">{dfsLocation}</code>
+          {locationCandidates.length > 0 ? (
+            <code className="font-mono">{locationCandidates[0]}</code>
+          ) : (
+            <span className="text-destructive">unparsed</span>
+          )}
+          {locationCandidates.length > 1 ? (
+            <span className="ml-2">
+              (fallback:{" "}
+              {locationCandidates.slice(1).map((c, i) => (
+                <span key={c}>
+                  {i > 0 ? " → " : ""}
+                  <code className="font-mono">{c}</code>
+                </span>
+              ))}
+              )
+            </span>
+          ) : null}
           {!locationParsedSuccessfully ? (
             <span className="ml-2 text-destructive">
-              (couldn&apos;t parse — DataForSEO may reject this)
+              (couldn&apos;t parse — DataForSEO will surface the error)
             </span>
           ) : null}
         </p>
