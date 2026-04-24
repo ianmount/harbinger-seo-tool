@@ -3,7 +3,18 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ─────────────────────────────────────────────────────────────────────
+   Harbinger design tokens.
+
+   Derived from design/DESIGN_NOTES.md (v1.0, "harbinger_clarity").
+   Navy chrome, cream paper, red accent, serif italics + sans bolds.
+   Shadcn slots (`--primary`, `--secondary`, …) are remapped to the
+   Harbinger palette so existing components auto-inherit the new look;
+   Harbinger-specific slots (brand, ink, status, line) are additive.
+   ───────────────────────────────────────────────────────────────── */
+
 @theme inline {
+  /* Shadcn slots → Tailwind color utilities */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -35,81 +46,140 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Harbinger brand palette (additive) */
+  --color-brand-navy: #03293a;
+  --color-brand-navy-700: #0b3346;
+  --color-brand-navy-600: #174156;
+  --color-brand-red: #ff1e00;
+  --color-brand-red-700: #d41800;
+  --color-brand-cream: #f6f1ea;
+  --color-brand-sand: #ede4d6;
+  --color-brand-paper: #faf7f2;
+
+  /* Ink scale */
+  --color-ink-1: #03293a;
+  --color-ink-2: rgba(3, 41, 58, 0.74);
+  --color-ink-3: rgba(3, 41, 58, 0.52);
+
+  /* Warm lines */
+  --color-line: #e5ded2;
+  --color-line-strong: #cfc6b6;
+
+  /* Status palette (semantic; distinct from brand red) */
+  --color-success: #1a8f5a;
+  --color-success-light: #dcefe2;
+  --color-success-dark: #0f5e3a;
+  --color-warning: #c77c00;
+  --color-warning-light: #f7e9cc;
+  --color-warning-dark: #7a4c00;
+  --color-danger: #c31b00;
+  --color-danger-light: #f7d9d1;
+  --color-danger-dark: #7e1200;
+  --color-info: #174156;
+  --color-info-light: #d5e3ec;
+  --color-info-dark: #0b3346;
+
+  /* Radii: --radius=0.625rem yields button=md=8, input=lg=10, card=xl=14 */
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+
+  /* Fonts. Loaded in app/layout.tsx via next/font/google and exposed
+     as --font-montserrat / --font-source-serif. Tailwind utilities
+     `font-sans` and `font-serif` map to those CSS vars. */
+  --font-sans: var(--font-montserrat), "Gotham", system-ui, sans-serif;
+  --font-serif: var(--font-source-serif), "Source Serif Pro", Georgia, serif;
+
+  /* Editorial box shadows */
+  --shadow-sm: 0 1px 2px rgba(3, 41, 58, 0.04), 0 2px 6px rgba(3, 41, 58, 0.04);
+  --shadow-card: 0 1px 0 rgba(3, 41, 58, 0.04), 0 1px 3px rgba(3, 41, 58, 0.06);
+  --shadow-card-hover: 0 4px 12px -2px rgba(3, 41, 58, 0.1), 0 2px 4px -2px rgba(3, 41, 58, 0.06);
+  --shadow-elev: 0 2px 6px rgba(3, 41, 58, 0.06), 0 8px 24px -8px rgba(3, 41, 58, 0.12);
+  --shadow-overlay: 0 12px 32px -12px rgba(3, 41, 58, 0.18);
+
+  /* Tracking scale (editorial cadence) */
+  --tracking-eyebrow: 0.22em;
+  --tracking-label: 0.18em;
+  --tracking-section: 0.24em;
 }
 
 :root {
+  /* Radius base — yields 14px card / 10px input / 8px button / 6px sm */
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.129 0.042 264.695);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.129 0.042 264.695);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.129 0.042 264.695);
-  --primary: oklch(0.208 0.042 265.755);
-  --primary-foreground: oklch(0.984 0.003 247.858);
-  --secondary: oklch(0.968 0.007 247.896);
-  --secondary-foreground: oklch(0.208 0.042 265.755);
-  --muted: oklch(0.968 0.007 247.896);
-  --muted-foreground: oklch(0.554 0.046 257.417);
-  --accent: oklch(0.968 0.007 247.896);
-  --accent-foreground: oklch(0.208 0.042 265.755);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.929 0.013 255.508);
-  --input: oklch(0.929 0.013 255.508);
-  --ring: oklch(0.704 0.04 256.788);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.984 0.003 247.858);
-  --sidebar-foreground: oklch(0.129 0.042 264.695);
-  --sidebar-primary: oklch(0.208 0.042 265.755);
-  --sidebar-primary-foreground: oklch(0.984 0.003 247.858);
-  --sidebar-accent: oklch(0.968 0.007 247.896);
-  --sidebar-accent-foreground: oklch(0.208 0.042 265.755);
-  --sidebar-border: oklch(0.929 0.013 255.508);
-  --sidebar-ring: oklch(0.704 0.04 256.788);
+
+  /* Shadcn slots mapped to Harbinger palette */
+  --background: #faf7f2; /* paper */
+  --foreground: #03293a; /* ink-1 */
+  --card: #ffffff;
+  --card-foreground: #03293a;
+  --popover: #ffffff;
+  --popover-foreground: #03293a;
+  --primary: #03293a; /* navy — primary CTAs */
+  --primary-foreground: #f6f1ea; /* cream */
+  --secondary: #ede4d6; /* sand — muted surface */
+  --secondary-foreground: #03293a;
+  --muted: #f6f1ea; /* cream */
+  --muted-foreground: rgba(3, 41, 58, 0.52); /* ink-3 */
+  --accent: #ede4d6; /* sand — hover tints */
+  --accent-foreground: #03293a;
+  --destructive: #c31b00; /* status danger, NOT brand red */
+  --border: #e5ded2; /* warm line */
+  --input: #e5ded2;
+  --ring: #ff1e00; /* brand red — focus rings (the one place red fills) */
+
+  /* Chart palette — navy family + warm accents */
+  --chart-1: #03293a;
+  --chart-2: #174156;
+  --chart-3: #c77c00;
+  --chart-4: #1a8f5a;
+  --chart-5: #ff1e00;
+
+  /* Sidebar chrome — navy field, cream text, red active indicator */
+  --sidebar: #03293a;
+  --sidebar-foreground: rgba(246, 241, 234, 0.78);
+  --sidebar-primary: #ff1e00;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgba(255, 30, 0, 0.14);
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: rgba(246, 241, 234, 0.1);
+  --sidebar-ring: #ff1e00;
 }
 
 .dark {
-  --background: oklch(0.129 0.042 264.695);
-  --foreground: oklch(0.984 0.003 247.858);
-  --card: oklch(0.208 0.042 265.755);
-  --card-foreground: oklch(0.984 0.003 247.858);
-  --popover: oklch(0.208 0.042 265.755);
-  --popover-foreground: oklch(0.984 0.003 247.858);
-  --primary: oklch(0.929 0.013 255.508);
-  --primary-foreground: oklch(0.208 0.042 265.755);
-  --secondary: oklch(0.279 0.041 260.031);
-  --secondary-foreground: oklch(0.984 0.003 247.858);
-  --muted: oklch(0.279 0.041 260.031);
-  --muted-foreground: oklch(0.704 0.04 256.788);
-  --accent: oklch(0.279 0.041 260.031);
-  --accent-foreground: oklch(0.984 0.003 247.858);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.551 0.027 264.364);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.208 0.042 265.755);
-  --sidebar-foreground: oklch(0.984 0.003 247.858);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.984 0.003 247.858);
-  --sidebar-accent: oklch(0.279 0.041 260.031);
-  --sidebar-accent-foreground: oklch(0.984 0.003 247.858);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.551 0.027 264.364);
+  /* Dark = navy-black, never pitch black */
+  --background: #0b1820;
+  --foreground: #f6f1ea;
+  --card: #0b3346;
+  --card-foreground: #f6f1ea;
+  --popover: #0b3346;
+  --popover-foreground: #f6f1ea;
+  --primary: #f6f1ea;
+  --primary-foreground: #03293a;
+  --secondary: #174156;
+  --secondary-foreground: #f6f1ea;
+  --muted: #174156;
+  --muted-foreground: rgba(246, 241, 234, 0.64);
+  --accent: #174156;
+  --accent-foreground: #f6f1ea;
+  --destructive: #ff5a42;
+  --border: rgba(246, 241, 234, 0.1);
+  --input: rgba(246, 241, 234, 0.15);
+  --ring: #ff1e00;
+  --chart-1: #ff1e00;
+  --chart-2: #1a8f5a;
+  --chart-3: #c77c00;
+  --chart-4: #d5e3ec;
+  --chart-5: #f6f1ea;
+  --sidebar: #03293a;
+  --sidebar-foreground: rgba(246, 241, 234, 0.78);
+  --sidebar-primary: #ff1e00;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgba(255, 30, 0, 0.14);
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: rgba(246, 241, 234, 0.1);
+  --sidebar-ring: #ff1e00;
 }
 
 @layer base {
@@ -117,6 +187,39 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground font-serif;
+    font-feature-settings: "ss01", "ss02";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  /* Headings default to the sans stack (Montserrat). Individual callsites
+     can override to italic serif for the "editorial" hero treatment. */
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: var(--font-sans);
+  }
+  /* Tabular numerals everywhere a number lives, per brief. Opt-in via
+     `.tabular-nums` class on number cells / KPIs. */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /* Eyebrow kicker — "OVERVIEW / Q2 2026" style label above a headline. */
+  .eyebrow {
+    font-family: var(--font-sans);
+    font-weight: 800;
+    font-size: 11px;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+    color: var(--color-ink-3);
+  }
+  .eyebrow-red {
+    color: var(--color-brand-red);
   }
 }
