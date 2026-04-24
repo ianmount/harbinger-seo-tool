@@ -5,6 +5,7 @@ import type { DateRange } from "react-day-picker"
 import { marked } from "marked"
 import ReactMarkdown from "react-markdown"
 import { CalendarIcon, DownloadIcon } from "lucide-react"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Calendar } from "@/components/ui/calendar"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -19,6 +20,7 @@ import { useSelectedPartner } from "@/lib/use-selected-partner"
 import { findGscSiteCandidates } from "@/lib/gsc-site-match"
 import { cn } from "@/lib/utils"
 import type {
+  GA4SeoReport,
   GSCDailyRow,
   GSCSiteInfo,
   GSCTopPageRow,
@@ -28,8 +30,15 @@ import type {
 type Phase =
   | { status: "idle" }
   | { status: "fetching-gsc" }
+  | { status: "fetching-ga4" }
   | { status: "generating" }
-  | { status: "done"; report: string; partnerName: string; range: DateRange }
+  | {
+      status: "done"
+      report: string
+      partnerName: string
+      range: DateRange
+      ga4Included: boolean
+    }
   | { status: "error"; message: string }
 
 type SitesState =
@@ -42,6 +51,24 @@ interface GscReportData {
   topQueries: GSCTopQueryRow[]
   topPages: GSCTopPageRow[]
   dailyClicks: GSCDailyRow[]
+}
+
+/**
+ * Given an inclusive date range [start, end], return the immediately-prior
+ * range of the same length. Example: Apr 1 → Apr 30 ⇒ Mar 2 → Mar 31.
+ */
+function priorPeriod(startDate: string, endDate: string): { startDate: string; endDate: string } {
+  const start = new Date(`${startDate}T00:00:00`)
+  const end = new Date(`${endDate}T00:00:00`)
+  const days = Math.round((end.getTime() - start.getTime()) / 86_400_000) + 1
+  const priorEnd = new Date(start)
+  priorEnd.setDate(priorEnd.getDate() - 1)
+  const priorStart = new Date(priorEnd)
+  priorStart.setDate(priorStart.getDate() - (days - 1))
+  return {
+    startDate: iso(priorStart),
+    endDate: iso(priorEnd),
+  }
 }
 
 function iso(d: Date): string {
@@ -199,9 +226,9 @@ export default function ReportingPage() {
       !!range?.from &&
       !!range?.to &&
       !!chosenSiteUrl &&
-      (phase.status === "idle" ||
-        phase.status === "done" ||
-        phase.status === "error"),
+      phase.status !== "fetching-gsc" &&
+      phase.status !== "fetching-ga4" &&
+      phase.status !== "generating",
     [partner, range, chosenSiteUrl, phase.status],
   )
 
@@ -259,6 +286,67 @@ export default function ReportingPage() {
       return
     }
 
+    // GA4 is additive. If the partner has a ga4PropertyId we fetch current +
+    // prior period so Claude can call out trends; if the fetch fails we log
+    // and fall through to a GSC-only report rather than blocking on it.
+    let ga4Data: GA4SeoReport | undefined
+    let ga4PriorData: GA4SeoReport | undefined
+    if (partner.ga4PropertyId) {
+      setPhase({ status: "fetching-ga4" })
+      try {
+        const current = await fetch("/api/ga4/report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            propertyId: partner.ga4PropertyId,
+            startDate,
+            endDate,
+          }),
+        })
+        const currentBody = (await current.json().catch(() => ({}))) as
+          | GA4SeoReport
+          | { error?: string; code?: string }
+        if (!current.ok || !("propertyId" in currentBody)) {
+          throw new Error(
+            ("error" in currentBody && currentBody.error) ||
+              `GA4 request failed (${current.status})`,
+          )
+        }
+        ga4Data = currentBody
+
+        // Best-effort prior period. A failure here is not fatal.
+        const prior = priorPeriod(startDate, endDate)
+        try {
+          const priorResp = await fetch("/api/ga4/report", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              propertyId: partner.ga4PropertyId,
+              startDate: prior.startDate,
+              endDate: prior.endDate,
+            }),
+          })
+          const priorBody = (await priorResp.json().catch(() => ({}))) as
+            | GA4SeoReport
+            | { error?: string }
+          if (priorResp.ok && "propertyId" in priorBody) {
+            ga4PriorData = priorBody
+          }
+        } catch (priorErr) {
+          console.warn(
+            "[reporting] GA4 prior-period fetch failed, continuing without trend:",
+            priorErr,
+          )
+        }
+      } catch (err: unknown) {
+        // Non-fatal: downgrade to a GSC-only report but surface the reason.
+        console.warn(
+          "[reporting] GA4 fetch failed, generating GSC-only report:",
+          err,
+        )
+      }
+    }
+
     setPhase({ status: "generating" })
     try {
       const response = await fetch("/api/claude/report", {
@@ -267,6 +355,8 @@ export default function ReportingPage() {
         body: JSON.stringify({
           partner,
           gscData,
+          ga4Data,
+          ga4PriorData,
           dateRange: { start: startDate, end: endDate },
         }),
       })
@@ -284,6 +374,7 @@ export default function ReportingPage() {
         report: body.report,
         partnerName: partner.name,
         range: { from: range.from, to: range.to },
+        ga4Included: Boolean(ga4Data),
       })
     } catch (err: unknown) {
       setPhase({
@@ -358,17 +449,18 @@ export default function ReportingPage() {
               />
             </div>
 
-            <Button
-              onClick={handleGenerate}
-              disabled={!canGenerate}
-              className="ml-auto"
-            >
-              {phase.status === "fetching-gsc"
-                ? "Pulling GSC data…"
-                : phase.status === "generating"
-                  ? "Generating report…"
-                  : "Generate Report"}
-            </Button>
+            <div className="ml-auto flex items-center gap-3">
+              <Ga4Badge partner={partner} />
+              <Button onClick={handleGenerate} disabled={!canGenerate}>
+                {phase.status === "fetching-gsc"
+                  ? "Pulling GSC data…"
+                  : phase.status === "fetching-ga4"
+                    ? "Pulling GA4 data…"
+                    : phase.status === "generating"
+                      ? "Generating report…"
+                      : "Generate Report"}
+              </Button>
+            </div>
           </section>
 
           <Status phase={phase} />
@@ -455,6 +547,13 @@ function Status({ phase }: { phase: Phase }) {
       </p>
     )
   }
+  if (phase.status === "fetching-ga4") {
+    return (
+      <p className="text-sm text-muted-foreground" aria-live="polite">
+        Pulling GA4 data…
+      </p>
+    )
+  }
   if (phase.status === "generating") {
     return (
       <p className="text-sm text-muted-foreground" aria-live="polite">
@@ -473,6 +572,25 @@ function Status({ phase }: { phase: Phase }) {
     )
   }
   return null
+}
+
+function Ga4Badge({ partner }: { partner: { ga4PropertyId?: string } }) {
+  if (partner.ga4PropertyId) {
+    return (
+      <Badge variant="secondary" className="whitespace-nowrap">
+        GA4 · {partner.ga4PropertyId.replace(/^properties\//, "")}
+      </Badge>
+    )
+  }
+  return (
+    <Badge
+      variant="outline"
+      className="whitespace-nowrap text-muted-foreground"
+      title="Partner has no GA4 Property ID in Airtable — report will use GSC data only."
+    >
+      GA4 not configured
+    </Badge>
+  )
 }
 
 function ReportView({
