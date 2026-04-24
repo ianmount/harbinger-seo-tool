@@ -52,34 +52,44 @@ const bodySchema = z.object({
 
 type ParsedBody = z.infer<typeof bodySchema>
 
-// Claude's structured output. We ask it to classify each input keyword (by
-// exact-match on the keyword string), then join back to the original
-// KeywordResult server-side so we keep all DFS metrics intact and save tokens.
-const claudeKeywordSchema = z.object({
-  keyword: z.string(),
-  cluster: z.string(),
-  fitScore: z.number().min(0).max(100),
-  intent: z.enum([
-    "informational",
-    "commercial",
-    "transactional",
-    "navigational",
-  ]),
-  recommendation: z.enum(["target", "monitor", "skip"]),
-})
+// Claude's structured output. We use a compact tuple format
+// `[keyword, cluster, fitScore, intent, recommendation]` to keep the
+// per-keyword token cost as low as possible — a full object with field
+// names runs ~80 tokens per keyword which hits max_tokens around 200
+// keywords; the tuple runs ~15 tokens per keyword which comfortably
+// handles 300+. Server-side we join the tuples back against the raw
+// keyword list so we still keep all DFS metrics intact.
+const intentEnum = z.enum([
+  "informational",
+  "commercial",
+  "transactional",
+  "navigational",
+])
+const recommendationEnum = z.enum(["target", "monitor", "skip"])
+
+const claudeKeywordTupleSchema = z.tuple([
+  z.string(), // keyword (verbatim input)
+  z.string(), // cluster name
+  z.number().min(0).max(100), // fitScore
+  intentEnum, // intent
+  recommendationEnum, // recommendation
+])
 
 const claudeResponseSchema = z.object({
-  keywords: z.array(claudeKeywordSchema),
+  keywords: z.array(claudeKeywordTupleSchema),
 })
 
-// Token-budget guard. 500 keywords × ~40 tokens in + ~80 tokens out per
-// keyword is already pushing the context envelope. In practice, the keyword
-// list is already deduped upstream; this is a last safety net.
-const MAX_KEYWORDS_TO_SCORE = 500
-const CLAUDE_MAX_TOKENS = 16384
+type ClaudeKeywordTuple = z.infer<typeof claudeKeywordTupleSchema>
+
+// Token-budget guard. 300 keywords × ~15 compact-output tokens ≈ 4.5k
+// output tokens, well inside CLAUDE_MAX_TOKENS. The prompt itself caps
+// around 15k input tokens at this count. If we ever need to go beyond
+// 300, split into multiple Claude calls and merge clusters.
+const MAX_KEYWORDS_TO_SCORE = 300
+const CLAUDE_MAX_TOKENS = 32000
 
 const SYSTEM_PROMPT =
-  "You are an SEO strategist grouping keywords into topical clusters for a local service business. Be decisive: every keyword must get a cluster, a fit score, an intent, and a recommendation. Reply with a single JSON object — no markdown fences, no commentary."
+  "You are an SEO strategist grouping keywords into topical clusters for a local service business. Be decisive: every keyword gets a cluster, a fit score, an intent, and a recommendation. Reply with a single JSON object — no markdown fences, no commentary."
 
 function formatNumber(n: number | undefined): string {
   if (n == null) return "—"
@@ -157,23 +167,22 @@ function buildPrompt(body: ParsedBody, keywords: KeywordResult[]): string {
   lines.push("")
   lines.push(`# Output format`)
   lines.push(
-    `Output exactly one JSON object matching this schema. No prose, no markdown fences. The "keyword" field in each entry must match an input keyword verbatim.`,
+    `Output exactly one JSON object. No prose, no markdown fences. Each keyword is a 5-element array in this exact order: [keyword (verbatim from input), cluster name, fitScore 0-100, intent, recommendation]. Intent is one of "informational"/"commercial"/"transactional"/"navigational". Recommendation is one of "target"/"monitor"/"skip".`,
   )
   lines.push("```")
   lines.push(`{`)
   lines.push(`  "keywords": [`)
-  lines.push(`    {`)
-  lines.push(`      "keyword": "string (exact match from input)",`)
-  lines.push(`      "cluster": "string",`)
-  lines.push(`      "fitScore": 0-100,`)
-  lines.push(`      "intent": "informational | commercial | transactional | navigational",`)
-  lines.push(`      "recommendation": "target | monitor | skip"`)
-  lines.push(`    }`)
+  lines.push(
+    `    ["plumber near me", "Local Demand", 88, "transactional", "target"],`,
+  )
+  lines.push(
+    `    ["how often to service water heater", "Info & Guides", 42, "informational", "monitor"]`,
+  )
   lines.push(`  ]`)
   lines.push(`}`)
   lines.push("```")
   lines.push(
-    `Every one of the ${keywords.length} input keywords must appear exactly once in the "keywords" array.`,
+    `Every one of the ${keywords.length} input keywords must appear exactly once as the first element of a tuple. Keep strings on one line; do not insert line breaks inside a tuple.`,
   )
 
   return lines.join("\n")
@@ -193,6 +202,45 @@ function extractJsonObject(text: string): string {
   return stripped.slice(first, last + 1)
 }
 
+/**
+ * When Claude hits max_tokens mid-generation, the JSON array is cut off
+ * partway through a tuple. Walk the text to find the last *complete* tuple
+ * (i.e., the last `]` that closed an inner array while we were still inside
+ * the outer `keywords` array) and close the wrapper with `]}`. Returns the
+ * healed text, or the original if no healable prefix was found.
+ */
+function healTruncatedJson(text: string): string {
+  let depth = 0
+  let lastGoodTupleEnd = -1
+  let inString = false
+  let escape = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (escape) {
+      escape = false
+      continue
+    }
+    if (c === "\\") {
+      escape = true
+      continue
+    }
+    if (c === '"') {
+      inString = !inString
+      continue
+    }
+    if (inString) continue
+    if (c === "[") depth++
+    else if (c === "]") {
+      depth--
+      // depth 1 inside the object's outer `keywords` array means we just
+      // closed an inner tuple. Remember that as a safe cut-off point.
+      if (depth === 1) lastGoodTupleEnd = i
+    }
+  }
+  if (lastGoodTupleEnd < 0) return text
+  return `${text.slice(0, lastGoodTupleEnd + 1)}]}`
+}
+
 async function callClaudeForKeywords(
   prompt: string,
 ): Promise<z.infer<typeof claudeResponseSchema>> {
@@ -205,9 +253,25 @@ async function callClaudeForKeywords(
   try {
     parsed = JSON.parse(jsonText)
   } catch (err) {
-    throw new Error(
-      `Claude did not return valid JSON: ${err instanceof Error ? err.message : "unknown"}`,
-    )
+    // Claude may have hit max_tokens and left the array unclosed. Try
+    // healing before giving up — losing some tail keywords is better
+    // than failing the whole run.
+    const healed = healTruncatedJson(jsonText)
+    if (healed === jsonText) {
+      throw new Error(
+        `Claude did not return valid JSON: ${err instanceof Error ? err.message : "unknown"}`,
+      )
+    }
+    try {
+      parsed = JSON.parse(healed)
+      console.warn(
+        "[api/claude/keywords] healed truncated JSON; some tail keywords dropped",
+      )
+    } catch (healErr) {
+      throw new Error(
+        `Claude did not return valid JSON and could not be healed: ${healErr instanceof Error ? healErr.message : "unknown"}`,
+      )
+    }
   }
   const result = claudeResponseSchema.safeParse(parsed)
   if (!result.success) {
@@ -229,21 +293,23 @@ function buildClusters(
 
   const clusterMap = new Map<string, ScoredKeyword[]>()
   for (const entry of scored.keywords) {
-    const raw = rawByKeyword.get(entry.keyword.toLowerCase())
+    const [keyword, cluster, fitScore, intent, recommendation] =
+      entry as ClaudeKeywordTuple
+    const raw = rawByKeyword.get(keyword.toLowerCase())
     if (!raw) {
       // Claude occasionally paraphrases; drop unknowns rather than inventing metrics.
       continue
     }
     const merged: ScoredKeyword = {
       ...raw,
-      cluster: entry.cluster,
-      fitScore: Math.round(entry.fitScore),
-      intent: entry.intent,
-      recommendation: entry.recommendation,
+      cluster,
+      fitScore: Math.round(fitScore),
+      intent,
+      recommendation,
     }
-    const list = clusterMap.get(entry.cluster) ?? []
+    const list = clusterMap.get(cluster) ?? []
     list.push(merged)
-    clusterMap.set(entry.cluster, list)
+    clusterMap.set(cluster, list)
   }
 
   return Array.from(clusterMap.entries())
