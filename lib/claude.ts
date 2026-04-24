@@ -36,14 +36,20 @@ export async function callClaude(
   const maxTokens = opts.maxTokens ?? DEFAULT_MAX_TOKENS
   const client = getClient()
 
+  // Always stream. The Anthropic SDK enforces streaming for operations that
+  // may take longer than 10 minutes (long input, long output, or high
+  // max_tokens). Clustering 300 keywords with max_tokens=32000 consistently
+  // trips this guard on non-streamed calls. We don't need the incremental
+  // events — finalMessage() awaits the full response.
   let response: Anthropic.Message
   try {
-    response = await client.messages.create({
+    const stream = client.messages.stream({
       model,
       max_tokens: maxTokens,
       system: opts.system,
       messages: [{ role: "user", content: prompt }],
     })
+    response = await stream.finalMessage()
   } catch (error: unknown) {
     if (error instanceof Anthropic.APIError) {
       throw new ClaudeApiError(
@@ -56,7 +62,7 @@ export async function callClaude(
 
   const { input_tokens, output_tokens } = response.usage
   console.log(
-    `[claude] model=${model} input_tokens=${input_tokens} output_tokens=${output_tokens}`,
+    `[claude] model=${model} input_tokens=${input_tokens} output_tokens=${output_tokens} stop_reason=${response.stop_reason}`,
   )
 
   const textBlocks = response.content.filter(
