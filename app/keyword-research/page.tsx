@@ -313,8 +313,9 @@ export default function KeywordResearchPage() {
     key: "fitScore",
     direction: "desc",
   })
-  const [selectedLocation, setSelectedLocation] =
-    useState<DfsLabsLocation | null>(null)
+  const [selectedLocations, setSelectedLocations] = useState<
+    DfsLabsLocation[]
+  >([])
   const [maxKeywordsInput, setMaxKeywordsInput] = useState<string>(
     String(DEFAULT_MAX_KEYWORDS),
   )
@@ -327,13 +328,31 @@ export default function KeywordResearchPage() {
     setClusterFilter(FILTER_ALL)
     setRecFilter(FILTER_ALL)
     setSeedsText("")
-    setSelectedLocation(null)
+    setSelectedLocations([])
     setMaxKeywordsInput(String(DEFAULT_MAX_KEYWORDS))
   }, [partner?.id])
 
+  const addLocation = useCallback((loc: DfsLabsLocation) => {
+    setSelectedLocations((prev) =>
+      prev.some((l) => l.location_code === loc.location_code)
+        ? prev
+        : [...prev, loc],
+    )
+  }, [])
+
+  const removeLocation = useCallback((code: number) => {
+    setSelectedLocations((prev) =>
+      prev.filter((l) => l.location_code !== code),
+    )
+  }, [])
+
+  // First selected location drives city-based seed generation. The full
+  // list is used to aggregate volume and to scope Claude's selection.
+  const primaryLocation = selectedLocations[0] ?? null
+
   const defaultSeeds = useMemo(
-    () => (partner ? generateDefaultSeeds(partner, selectedLocation) : []),
-    [partner, selectedLocation],
+    () => (partner ? generateDefaultSeeds(partner, primaryLocation) : []),
+    [partner, primaryLocation],
   )
 
   const initialLocationQuery = useMemo(
@@ -364,16 +383,20 @@ export default function KeywordResearchPage() {
       Number.isFinite(parsedMax) && parsedMax > 0
         ? Math.min(parsedMax, MAX_KEYWORDS_CEILING)
         : DEFAULT_MAX_KEYWORDS
-    if (!selectedLocation) {
+    if (selectedLocations.length === 0) {
       setPhase({
         status: "error",
         message:
-          "Pick a location from the search dropdown before running research.",
+          "Add at least one location from the search dropdown before running research.",
       })
       return
     }
 
-    const locationCode = selectedLocation.location_code
+    // Labs-level calls (ideas/suggestions/difficulty) run at US country level
+    // regardless; Google Ads search_volume fans out across all selected
+    // locations and volumes are summed per keyword downstream.
+    const locationLabels = selectedLocations.map((l) => l.location_name)
+    const primaryLocationCode = selectedLocations[0].location_code
 
     // Stage 1: GSC (non-fatal — continue without historical if it fails)
     setPhase({ status: "running", stage: "gsc" })
@@ -429,7 +452,7 @@ export default function KeywordResearchPage() {
               body: JSON.stringify({
                 mode: "ideas",
                 seed,
-                locationCode,
+                locationCode: primaryLocationCode,
                 limit: 50,
               }),
             },
@@ -445,7 +468,7 @@ export default function KeywordResearchPage() {
               body: JSON.stringify({
                 mode: "suggestions",
                 seed,
-                locationCode,
+                locationCode: primaryLocationCode,
                 limit: 50,
               }),
             },
@@ -504,7 +527,7 @@ export default function KeywordResearchPage() {
           body: JSON.stringify({
             mode: "difficulty",
             keywords: keywordList,
-            locationCode,
+            locationCode: primaryLocationCode,
           }),
         },
         "DataForSEO difficulty",
@@ -532,44 +555,80 @@ export default function KeywordResearchPage() {
 
     // Stage 4: Local volume enrichment. Labs' keyword_ideas/suggestions only
     // give country-level volume; we overlay city-level volume from Google
-    // Ads search_volume so the user actually sees local demand.
-    const isCityLevel =
-      selectedLocation.location_type !== "Country" &&
-      selectedLocation.location_type !== undefined
-    if (isCityLevel) {
+    // Ads search_volume so the user actually sees local demand. When the
+    // user picked multiple locations, we fan out in parallel and sum the
+    // per-keyword volumes — that's the total addressable demand across the
+    // partner's service footprint. CPC/competition come from the first
+    // location that has a value.
+    const cityLevelLocations = selectedLocations.filter(
+      (l) => l.location_type !== "Country",
+    )
+    if (cityLevelLocations.length > 0) {
       setPhase({
         status: "running",
         stage: "dfs-local-volume",
-        note: `${enriched.length} keywords @ ${selectedLocation.location_name}`,
+        note: `${enriched.length} keywords × ${cityLevelLocations.length} location${
+          cityLevelLocations.length === 1 ? "" : "s"
+        }`,
       })
       try {
         const keywordList = enriched.map((r) => r.keyword).slice(0, 1000)
-        const volBody = await fetchJson<{ results: KeywordResult[] }>(
-          "/api/dataforseo/keywords",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              mode: "volume",
-              keywords: keywordList,
-              locationCode,
-            }),
-          },
-          "DataForSEO local search volume",
+        const volResponses = await Promise.all(
+          cityLevelLocations.map((loc) =>
+            fetchJson<{ results: KeywordResult[] }>(
+              "/api/dataforseo/keywords",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  mode: "volume",
+                  keywords: keywordList,
+                  locationCode: loc.location_code,
+                }),
+              },
+              `DataForSEO local search volume for ${loc.location_name}`,
+            ),
+          ),
         )
-        const volByKw = new Map(
-          (volBody.results ?? []).map((r) => [r.keyword.toLowerCase(), r]),
-        )
+
+        type LocalAgg = {
+          volumeSum: number
+          hasVolume: boolean
+          cpc?: number
+          competition?: number
+          competition_level?: KeywordResult["competition_level"]
+        }
+        const aggByKw = new Map<string, LocalAgg>()
+        for (const resp of volResponses) {
+          for (const r of resp.results ?? []) {
+            const key = r.keyword.trim().toLowerCase()
+            if (!key) continue
+            const agg = aggByKw.get(key) ?? {
+              volumeSum: 0,
+              hasVolume: false,
+            }
+            if (r.search_volume != null) {
+              agg.volumeSum += r.search_volume
+              agg.hasVolume = true
+            }
+            if (agg.cpc == null && r.cpc != null) agg.cpc = r.cpc
+            if (agg.competition == null && r.competition != null)
+              agg.competition = r.competition
+            if (!agg.competition_level && r.competition_level)
+              agg.competition_level = r.competition_level
+            aggByKw.set(key, agg)
+          }
+        }
+
         enriched = enriched.map((r) => {
-          const v = volByKw.get(r.keyword.toLowerCase())
-          if (!v) return r
-          // Prefer local volume when present; fall back to country volume.
+          const agg = aggByKw.get(r.keyword.toLowerCase())
+          if (!agg) return r
           return {
             ...r,
-            search_volume: v.search_volume ?? r.search_volume,
-            cpc: v.cpc ?? r.cpc,
-            competition: v.competition ?? r.competition,
-            competition_level: v.competition_level ?? r.competition_level,
+            search_volume: agg.hasVolume ? agg.volumeSum : r.search_volume,
+            cpc: agg.cpc ?? r.cpc,
+            competition: agg.competition ?? r.competition,
+            competition_level: agg.competition_level ?? r.competition_level,
           }
         })
       } catch (err) {
@@ -600,6 +659,7 @@ export default function KeywordResearchPage() {
             rawKeywords: enriched,
             gscHistorical,
             maxKeywords,
+            allowedLocations: locationLabels,
           }),
         },
         "Claude clustering",
@@ -618,7 +678,7 @@ export default function KeywordResearchPage() {
           err instanceof Error ? err.message : "Claude clustering failed",
       })
     }
-  }, [partner, effectiveSeeds, selectedLocation, maxKeywordsInput])
+  }, [partner, effectiveSeeds, selectedLocations, maxKeywordsInput])
 
   const rows = useMemo<ScoredKeyword[]>(
     () => (phase.status === "done" ? phase.rows : []),
@@ -697,8 +757,9 @@ export default function KeywordResearchPage() {
 
           <LocationAutocomplete
             initialQuery={initialLocationQuery}
-            selected={selectedLocation}
-            onSelect={setSelectedLocation}
+            selected={selectedLocations}
+            onAdd={addLocation}
+            onRemove={removeLocation}
             disabled={running}
           />
 
@@ -952,12 +1013,14 @@ function PartnerSummary({ partner }: { partner: Partner }) {
 function LocationAutocomplete({
   initialQuery,
   selected,
-  onSelect,
+  onAdd,
+  onRemove,
   disabled,
 }: {
   initialQuery: string
-  selected: DfsLabsLocation | null
-  onSelect: (loc: DfsLabsLocation | null) => void
+  selected: DfsLabsLocation[]
+  onAdd: (loc: DfsLabsLocation) => void
+  onRemove: (code: number) => void
   disabled?: boolean
 }) {
   const [query, setQuery] = useState(initialQuery)
@@ -966,6 +1029,11 @@ function LocationAutocomplete({
   const [fetchError, setFetchError] = useState<string | null>(null)
   const [open, setOpen] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
+
+  const selectedCodes = useMemo(
+    () => new Set(selected.map((l) => l.location_code)),
+    [selected],
+  )
 
   // When the partner changes we want the initial query to re-seed the input.
   useEffect(() => {
@@ -1020,8 +1088,15 @@ function LocationAutocomplete({
   }, [query])
 
   const handleSelect = (loc: DfsLabsLocation) => {
-    onSelect(loc)
-    setQuery(loc.location_name)
+    if (selectedCodes.has(loc.location_code)) {
+      // Already added — just close and clear the query for the next add.
+      setQuery("")
+      setOpen(false)
+      return
+    }
+    onAdd(loc)
+    // Clear query so the user can immediately search for the next location.
+    setQuery("")
     setOpen(false)
   }
 
@@ -1050,7 +1125,9 @@ function LocationAutocomplete({
   return (
     <section className="space-y-3 rounded-lg border p-4">
       <div className="flex flex-col gap-2">
-        <Label htmlFor="dfs-location-search">DataForSEO location</Label>
+        <Label htmlFor="dfs-location-search">
+          DataForSEO locations — add every city / state the partner serves
+        </Label>
         <div className="relative w-[420px]">
           <input
             id="dfs-location-search"
@@ -1059,13 +1136,6 @@ function LocationAutocomplete({
             onChange={(e) => {
               setQuery(e.target.value)
               setOpen(true)
-              if (
-                selected &&
-                e.target.value.toLowerCase() !==
-                  selected.location_name.toLowerCase()
-              ) {
-                onSelect(null)
-              }
             }}
             onFocus={() => setOpen(true)}
             onBlur={() => {
@@ -1105,47 +1175,81 @@ function LocationAutocomplete({
                   No matches. Try a broader search.
                 </li>
               ) : null}
-              {results.map((loc, i) => (
-                <li
-                  key={loc.location_code}
-                  id={`dfs-location-opt-${loc.location_code}`}
-                  role="option"
-                  aria-selected={i === activeIndex}
-                  onMouseDown={(e) => {
-                    // onMouseDown fires before onBlur, so we can select
-                    // before the list closes.
-                    e.preventDefault()
-                    handleSelect(loc)
-                  }}
-                  onMouseEnter={() => setActiveIndex(i)}
-                  className={cn(
-                    "flex cursor-pointer items-center justify-between gap-2 rounded-sm px-2 py-1.5",
-                    i === activeIndex
-                      ? "bg-accent text-accent-foreground"
-                      : "",
-                  )}
-                >
-                  <span className="truncate">{loc.location_name}</span>
-                  <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
-                    {loc.location_type}
-                  </span>
-                </li>
-              ))}
+              {results.map((loc, i) => {
+                const alreadyAdded = selectedCodes.has(loc.location_code)
+                return (
+                  <li
+                    key={loc.location_code}
+                    id={`dfs-location-opt-${loc.location_code}`}
+                    role="option"
+                    aria-selected={i === activeIndex}
+                    aria-disabled={alreadyAdded}
+                    onMouseDown={(e) => {
+                      // onMouseDown fires before onBlur, so we can select
+                      // before the list closes.
+                      e.preventDefault()
+                      if (!alreadyAdded) handleSelect(loc)
+                    }}
+                    onMouseEnter={() => setActiveIndex(i)}
+                    className={cn(
+                      "flex items-center justify-between gap-2 rounded-sm px-2 py-1.5",
+                      alreadyAdded
+                        ? "cursor-not-allowed opacity-50"
+                        : "cursor-pointer",
+                      i === activeIndex && !alreadyAdded
+                        ? "bg-accent text-accent-foreground"
+                        : "",
+                    )}
+                  >
+                    <span className="truncate">{loc.location_name}</span>
+                    <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                      {alreadyAdded ? "added" : loc.location_type}
+                    </span>
+                  </li>
+                )
+              })}
             </ul>
           ) : null}
         </div>
+
+        {selected.length > 0 ? (
+          <ul className="flex flex-wrap gap-1.5">
+            {selected.map((loc) => (
+              <li
+                key={loc.location_code}
+                className="inline-flex items-center gap-1 rounded-full border bg-secondary px-2 py-0.5 text-xs"
+              >
+                <span className="font-mono">{loc.location_name}</span>
+                <span className="text-[9px] uppercase tracking-wide text-muted-foreground">
+                  {loc.location_type}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onRemove(loc.location_code)}
+                  disabled={disabled}
+                  aria-label={`Remove ${loc.location_name}`}
+                  className="ml-0.5 rounded-full px-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
         <p className="text-xs text-muted-foreground">
-          {selected ? (
+          {selected.length === 0 ? (
             <>
-              Selected:{" "}
-              <code className="font-mono">{selected.location_name}</code>{" "}
-              <span className="text-[10px]">(code {selected.location_code})</span>
+              Start typing to find cities, counties, or states in DataForSEO&apos;s
+              Google Ads taxonomy. Add every area the partner serves — local
+              volume will be summed across them and Claude will drop keywords
+              that reference cities outside this list.
             </>
           ) : (
             <>
-              Pick a location. City, county, state, and country entries are
-              drawn live from DataForSEO&apos;s Labs taxonomy, so whatever you
-              select will be accepted by the API.
+              {selected.length} location{selected.length === 1 ? "" : "s"}{" "}
+              selected. Search + add more if the partner&apos;s service area
+              covers additional cities.
             </>
           )}
         </p>

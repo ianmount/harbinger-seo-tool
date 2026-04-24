@@ -53,6 +53,11 @@ const bodySchema = z.object({
   // the results table). Hard-capped at MAX_KEYWORDS_HARD_LIMIT below to
   // stay inside Claude's output-token budget.
   maxKeywords: z.number().int().positive().optional(),
+  // Display labels for the geographic locations the partner serves
+  // (e.g. "Oklahoma City,Oklahoma,United States"). When provided, Claude
+  // is instructed to drop keywords that reference an out-of-area
+  // city/state so the results stay scoped to the partner's footprint.
+  allowedLocations: z.array(z.string().trim().min(1)).optional(),
 })
 
 type ParsedBody = z.infer<typeof bodySchema>
@@ -132,6 +137,20 @@ function buildPrompt(
   if (partner.industryKnowledge)
     lines.push(`Industry knowledge:\n${partner.industryKnowledge}`)
 
+  const allowed = body.allowedLocations ?? []
+  if (allowed.length > 0) {
+    lines.push("")
+    lines.push(`# Allowed service area`)
+    lines.push(
+      `The partner ONLY serves these locations. This is the authoritative geographic scope for keyword selection:`,
+    )
+    for (const loc of allowed) lines.push(`- ${loc}`)
+    lines.push("")
+    lines.push(
+      `When evaluating each candidate keyword, DROP keywords that reference a geographic location outside this list. For example, if the allowed list has only Oklahoma locations, "dumpster rental dallas" must be dropped because Dallas is in Texas. A keyword that references a city WITHIN an allowed state (e.g. "dumpster rental tulsa" when "Oklahoma" appears above) is allowed. Keep keywords that are location-agnostic (no city/state at all) or use "near me" / "local".`,
+    )
+  }
+
   lines.push("")
   lines.push(`# Recent GSC queries (last 90 days, top ${topHistorical.length} by impressions)`)
   if (topHistorical.length === 0) {
@@ -166,7 +185,7 @@ function buildPrompt(
   lines.push("")
   lines.push(`## Selection criteria (in priority order)`)
   lines.push(
-    `1. **Relevance** — the keyword must clearly match the partner's services or an adjacent service a customer would expect. A dumpster-rental company should not surface keywords about recycling tips or commercial real-estate unless they actually serve that query. Drop off-topic keywords; do not keep them with a low fit score.`,
+    `1. **Relevance (topical + geographic)** — the keyword must clearly match the partner's services or an adjacent service a customer would expect, AND must not reference an out-of-area location (see "Allowed service area" section above if present). A dumpster-rental company in Oklahoma should not surface "dumpster rental dallas" or "recycling tips" — drop both, don't demote them with a low fit score.`,
   )
   lines.push(
     `2. **Realistic difficulty** — a local service business at a normal scale cannot realistically rank for national broad-head terms with very high keyword_difficulty. Weight long-tail / mid-difficulty queries more favorably.`,
