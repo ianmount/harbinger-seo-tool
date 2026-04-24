@@ -24,10 +24,7 @@ import {
 import { useSelectedPartner } from "@/lib/use-selected-partner"
 import { findBestGscSite } from "@/lib/gsc-site-match"
 import { findBestGa4Property } from "@/lib/ga4-site-match"
-import {
-  findSuggestedDfsLocation,
-  parseLocationCities,
-} from "@/lib/locations"
+import { findSuggestedDfsLocation } from "@/lib/locations"
 import { cn } from "@/lib/utils"
 import type {
   DfsLabsLocation,
@@ -81,9 +78,7 @@ interface SortState {
 
 const FILTER_ALL = "__all__"
 // Safety ceiling on seeds per run. Each seed triggers two DataForSEO calls
-// (ideas + suggestions), so this caps total DFS cost per run. The default
-// seed generator surfaces *every* partner service (no hidden truncation);
-// this only kicks in for pathologically long Airtable Services fields.
+// (ideas + suggestions), so this caps total DFS cost per run.
 const MAX_SEEDS = 50
 const DEFAULT_MAX_KEYWORDS = 300
 // Keep in sync with MAX_OUTPUT_KEYWORDS in /api/claude/keywords/route.ts.
@@ -96,102 +91,6 @@ function parseSeedsFromTextarea(text: string): string[] {
     .split(/[\n,]/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
-}
-
-/**
- * Strip markdown/list noise from a service string so it can be used as a
- * DataForSEO seed. Airtable service fields are free-text and often contain
- * bold markers, list bullets, trailing colons, and embedded links.
- */
-function cleanServiceName(raw: string): string {
-  return raw
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // [text](url) → text
-    .replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1") // **bold** / *italic* → text
-    .replace(/^[\s\-*•–—]+/, "") // leading bullet/dash
-    .replace(/[:;]\s*$/, "") // trailing punctuation
-    .replace(/[()]/g, "") // stray parens
-    .replace(/\s+/g, " ") // collapse whitespace
-    .trim()
-}
-
-/**
- * Extract a clean city name from a DFS location row's display name
- * (e.g. "Oklahoma City,Oklahoma,United States" → "Oklahoma City").
- * Returns null for country/state-level selections where there's no city.
- */
-function cityFromLocation(loc: DfsLabsLocation | null): string | null {
-  if (!loc) return null
-  if (loc.location_type === "Country" || loc.location_type === "State") {
-    return null
-  }
-  const first = loc.location_name.split(",")[0]?.trim()
-  return first && first.length > 0 ? first : null
-}
-
-// Words that commonly appear as a section header in the Services field
-// (e.g. "**Services:**", "Our Offerings:") and survive markdown stripping.
-// Treat them as noise so we don't ship seeds like "Services in Oklahoma City".
-const SERVICE_HEADER_NOISE = new Set([
-  "service",
-  "services",
-  "offering",
-  "offerings",
-  "product",
-  "products",
-  "solution",
-  "solutions",
-  "our services",
-  "our offerings",
-  "our products",
-  "our solutions",
-  "what we do",
-  "what we offer",
-  "main services",
-  "key services",
-  "core services",
-  "primary services",
-])
-
-function generateDefaultSeeds(
-  partner: Partner,
-  selectedLocation: DfsLabsLocation | null,
-): string[] {
-  // Every cleaned service name becomes a seed. No hidden truncation — if
-  // the partner lists 15 services we generate 15 seeds (×2 variants when
-  // we have a city); the MAX_SEEDS ceiling in the parent run-handler is
-  // the only backstop against runaway Airtable fields.
-  const services = partner.services
-    .split(/[\n,;]/)
-    .map(cleanServiceName)
-    .filter((s) => {
-      // Sanity-check a "service name": short-ish, not a URL, not a sentence,
-      // and not a generic section header that slipped through markdown cleanup.
-      if (s.length < 2 || s.length > 60) return false
-      if (/^https?:\/\//i.test(s)) return false
-      if (s.split(/\s+/).length > 8) return false
-      if (SERVICE_HEADER_NOISE.has(s.toLowerCase())) return false
-      return true
-    })
-
-  // Prefer the explicitly picked location's city. Falling back to parsing
-  // partner.serviceAreas is risky — that field often contains addresses,
-  // URL-wrapped markdown, and stray labels that yield bogus "cities"
-  // (e.g. "Physical Locations" from "Physical location: <address>").
-  const city =
-    cityFromLocation(selectedLocation) ??
-    parseLocationCities(partner.serviceAreas)[0] ??
-    null
-
-  const seeds: string[] = []
-  for (const service of services) {
-    if (city) {
-      seeds.push(`${service} in ${city}`)
-      seeds.push(`${service} near me`)
-    } else {
-      seeds.push(service)
-    }
-  }
-  return Array.from(new Set(seeds)).slice(0, MAX_SEEDS)
 }
 
 function dedupeByKeyword(rows: KeywordResult[]): KeywordResult[] {
@@ -376,24 +275,17 @@ export default function KeywordResearchPage() {
     )
   }, [])
 
-  // First selected location drives city-based seed generation. The full
-  // list is used to aggregate volume and to scope Claude's selection.
-  const primaryLocation = selectedLocations[0] ?? null
-
-  const defaultSeeds = useMemo(
-    () => (partner ? generateDefaultSeeds(partner, primaryLocation) : []),
-    [partner, primaryLocation],
-  )
-
   const initialLocationQuery = useMemo(
     () => (partner ? findSuggestedDfsLocation(partner.serviceAreas) : ""),
     [partner],
   )
 
-  const effectiveSeeds = useMemo(() => {
-    const fromText = parseSeedsFromTextarea(seedsText)
-    return fromText.length > 0 ? fromText : defaultSeeds
-  }, [seedsText, defaultSeeds])
+  // Seeds come from the textarea only — we no longer auto-generate from the
+  // partner's Airtable Services. The Run button requires at least one.
+  const effectiveSeeds = useMemo(
+    () => parseSeedsFromTextarea(seedsText),
+    [seedsText],
+  )
 
   const running = phase.status === "running"
 
@@ -404,7 +296,7 @@ export default function KeywordResearchPage() {
       setPhase({
         status: "error",
         message:
-          "No seeds available — enter at least one seed keyword in the textarea or make sure the partner has services listed in Airtable.",
+          "Enter at least one seed keyword in the textarea before running research.",
       })
       return
     }
@@ -883,25 +775,19 @@ export default function KeywordResearchPage() {
               <Label htmlFor="seeds">Seed keywords</Label>
               <Textarea
                 id="seeds"
-                placeholder={
-                  defaultSeeds.length > 0
-                    ? `Leave blank to auto-generate:\n${defaultSeeds.join("\n")}`
-                    : "e.g. water heater repair, plumber near me"
-                }
+                placeholder="e.g. water heater repair, plumber near me, emergency drain service"
                 value={seedsText}
                 onChange={(e) => setSeedsText(e.target.value)}
                 className="min-h-[100px]"
                 disabled={running}
               />
               <p className="text-xs text-muted-foreground">
-                Comma or newline separated. Defaults include every partner
-                service (from Airtable) × two location variants (<code>in
-                &lt;city&gt;</code> and <code>near me</code>). Safety cap at{" "}
-                {MAX_SEEDS} seeds per run — each seed costs two DataForSEO
-                calls. {" "}
+                Comma or newline separated. At least one is required. Each
+                seed costs two DataForSEO calls, so the first {MAX_SEEDS} are
+                used per run.{" "}
                 {effectiveSeeds.length > 0
                   ? `Using (${Math.min(effectiveSeeds.length, MAX_SEEDS)}): ${effectiveSeeds.slice(0, MAX_SEEDS).join(", ")}`
-                  : "No seeds yet."}
+                  : null}
               </p>
             </div>
 
