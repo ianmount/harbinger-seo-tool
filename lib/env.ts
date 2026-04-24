@@ -20,6 +20,9 @@ const envSchema = z.object({
   AIRTABLE_PARTNERS_TABLE: optionalString,
   APP_PASSWORD: optionalString,
   APP_AUTH_SECRET: optionalString,
+  // Vercel Blob storage token for the SEO Audit PDF output. Required only
+  // for the /audit tab — the rest of the app works without it.
+  BLOB_READ_WRITE_TOKEN: optionalString,
 })
 
 export type Env = z.infer<typeof envSchema>

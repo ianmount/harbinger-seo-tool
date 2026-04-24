@@ -25,6 +25,12 @@ An internal tool for Harbinger Marketing's SEO engineer to run the full 6-month 
 4. **Google Analytics 4** — behavioral/conversion data (sessions, users, conversions, landing pages, traffic sources) per partner property. Shares the same OAuth client + refresh token as GSC. Scope: `analytics.readonly` (also covers the GA4 Admin API for property enumeration). Wrapped by `lib/ga4.ts`.
 5. **Airtable** — source of truth for partner info (name, services, location, site URL, GA4 property ID, GSC siteUrl format). Read-only for MVP.
 
+### Libraries added for the Audit tab
+- **`cheerio` + native `fetch`** — SEO crawler (no headless browser; see Audit tab notes). Max 50 pages, 5 concurrent, 8s/page timeout, mobile Googlebot UA.
+- **`@react-pdf/renderer`** — PDF output for the Audit tab. Pure JS, no Chromium dep. Fonts use built-in Helvetica; register custom fonts later via `Font.register`.
+- **`@vercel/blob`** — public-with-unguessable-slug storage for the generated audit PDFs. Requires `BLOB_READ_WRITE_TOKEN`.
+- **`fast-xml-parser`** — sitemap.xml / sitemap_index.xml parsing in the crawler.
+
 ## Folder Structure
 - `app/` — Next.js pages and API routes
   - `app/api/airtable/` — Airtable reads
@@ -44,6 +50,7 @@ Local dev: set in `.env.local` (never committed; template in `.env.example`).
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`
 - `AIRTABLE_PAT`, `AIRTABLE_BASE_ID`, `AIRTABLE_PARTNERS_TABLE`
 - `APP_PASSWORD`, `APP_AUTH_SECRET` (see Auth below)
+- `BLOB_READ_WRITE_TOKEN` (Audit tab only — Vercel Blob store; optional for the rest of the app)
 
 ## Auth
 Single-password app-level gate in front of the entire app. This protects the production deployment because Vercel's free-tier "Vercel Authentication" only covers previews.
@@ -66,12 +73,15 @@ Single-password app-level gate in front of the entire app. This protects the pro
 - Use shadcn components for all primitives (buttons, selects, tables, etc.). Do not hand-roll these.
 
 ## MVP Scope — What's Included
-Five tabs, each wrapping one workflow:
-1. Keyword Research — GSC queries + DataForSEO volume/difficulty → scored keyword list
-2. Strategy — approved keywords + partner profile → Claude-generated strategy doc
-3. Content Production — page brief → Claude-generated technical package + body copy, with automatic JSON-LD schema validation and optional live-page GSC URL Inspection
-4. Backlinks — competitor domains → DataForSEO backlinks → Claude-categorized prospects + outreach drafts
-5. Reporting — partner + date range → GSC data + Claude narrative report
+Six tabs:
+1. **Audit** (pre-sales deliverable) — prospect domain + markets → crawl + DataForSEO competitive/backlinks + optional GSC/GA4 → Claude synthesis → polished PDF (Vercel Blob). 5-7 findings hard constraint. ~$0.85–$1.00/audit. Audit synthesis uses `claude-sonnet-4-6` (Opus 4.7 timed out on the payload).
+2. Keyword Research — GSC queries + DataForSEO volume/difficulty → scored keyword list
+3. Strategy — approved keywords + partner profile → Claude-generated strategy doc
+4. Content Production — page brief → Claude-generated technical package + body copy, with automatic JSON-LD schema validation and optional live-page GSC URL Inspection
+5. Backlinks — competitor domains → DataForSEO backlinks → Claude-categorized prospects + outreach drafts
+6. Reporting — partner + date range → GSC data + Claude narrative report
+
+Note: `Prospect` (Audit tab, in-memory only) is distinct from `Partner` (Airtable-backed, used by tabs 2–6).
 
 ## MVP Scope — What's NOT Included
 - No database / persistent storage in the tool itself. Outputs that need to survive sessions are written to Airtable.

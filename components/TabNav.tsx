@@ -5,6 +5,7 @@ import { usePathname, useSearchParams } from "next/navigation"
 import { cn } from "@/lib/utils"
 
 const TABS = [
+  { href: "/audit", label: "Audit" },
   { href: "/keyword-research", label: "Keyword Research" },
   { href: "/strategy", label: "Strategy" },
   { href: "/content", label: "Content" },
