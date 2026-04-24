@@ -835,6 +835,7 @@ export default function KeywordResearchPage() {
 
           {phase.status === "done" ? (
             <section className="space-y-3">
+              <ColumnLegend />
               <div className="flex flex-wrap items-center gap-3">
                 <div className="flex flex-col gap-1">
                   <span className="text-xs font-medium text-muted-foreground">
@@ -1265,6 +1266,110 @@ function LocationAutocomplete({
         </p>
       </div>
     </section>
+  )
+}
+
+/**
+ * Collapsible panel above the results table describing where each column's
+ * value actually comes from. Helps the SEO engineer answer "why is this
+ * keyword here?" without having to re-read the code.
+ */
+function ColumnLegend() {
+  return (
+    <details className="group rounded-lg border bg-card p-0 text-sm">
+      <summary className="cursor-pointer list-none px-4 py-2.5 text-xs font-medium text-muted-foreground hover:text-foreground">
+        <span className="inline-flex items-center gap-2">
+          <span className="transition-transform group-open:rotate-90">▸</span>
+          How these columns work
+        </span>
+      </summary>
+      <dl className="space-y-3 border-t px-4 py-3 text-xs leading-relaxed">
+        <div>
+          <dt className="font-medium text-foreground">Keyword</dt>
+          <dd className="text-muted-foreground">
+            A candidate keyword. Sourced from DataForSEO&apos;s{" "}
+            <code className="font-mono">keyword_ideas</code> +{" "}
+            <code className="font-mono">keyword_suggestions</code> endpoints
+            run at US country level for each seed, plus the partner&apos;s
+            top 50 Google Search Console queries (last 90 days) as
+            historical winners. Deduplicated before scoring.
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium text-foreground">Cluster</dt>
+          <dd className="text-muted-foreground">
+            Topical grouping assigned by Claude. Short 2–4 word label
+            (e.g. &ldquo;Emergency Repair&rdquo;, &ldquo;Pricing &amp;
+            Estimates&rdquo;). Keywords in the same cluster target similar
+            customer intent and would typically share a landing page or
+            content piece.
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium text-foreground">Volume</dt>
+          <dd className="text-muted-foreground">
+            Monthly search volume. When you&apos;ve picked one or more
+            non-country locations, this is the{" "}
+            <strong>sum of Google Ads search_volume</strong> across every
+            selected city — the total addressable monthly demand across the
+            partner&apos;s service footprint. Falls back to country-level
+            volume from <code className="font-mono">keyword_ideas</code> /{" "}
+            <code className="font-mono">bulk_keyword_difficulty</code> when
+            city data is unavailable.
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium text-foreground">Difficulty</dt>
+          <dd className="text-muted-foreground">
+            Keyword difficulty (0–100) from DataForSEO&apos;s{" "}
+            <code className="font-mono">bulk_keyword_difficulty</code>{" "}
+            endpoint, run at US country level. Reflects how hard it is to
+            rank organically — a rough blend of top-10 domain authority,
+            backlink counts, and content strength. Higher is harder.
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium text-foreground">Fit</dt>
+          <dd className="text-muted-foreground">
+            Claude&apos;s 0–100 fit score for this partner. Combines four
+            criteria in priority order: (1) topical + geographic relevance
+            to the partner&apos;s services and selected locations,
+            (2) realistic difficulty for a local service business,
+            (3) meaningful volume, (4) intent. Since the output is already
+            pre-filtered to Claude&apos;s top picks, most scores land 50–90;
+            85+ is reserved for clear winners.
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium text-foreground">Intent</dt>
+          <dd className="text-muted-foreground">
+            Search intent classification by Claude.{" "}
+            <strong>Informational</strong> = researching / learning (how-to,
+            what is).{" "}
+            <strong>Commercial</strong> = evaluating options before buying
+            (best, reviews, comparison).{" "}
+            <strong>Transactional</strong> = ready to book / buy (near me,
+            same day, emergency).{" "}
+            <strong>Navigational</strong> = looking for a specific brand or
+            site.
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium text-foreground">Recommendation</dt>
+          <dd className="text-muted-foreground">
+            Claude&apos;s action-oriented verdict.{" "}
+            <strong>Target</strong> = actively pursue now (good fit +
+            realistic difficulty + meaningful volume).{" "}
+            <strong>Monitor</strong> = worth tracking but not the immediate
+            priority (edge case, seasonal, lower volume).{" "}
+            <strong>Skip</strong> = rare in this output since off-topic and
+            out-of-area keywords are already dropped before scoring; used
+            only when a selected keyword turns out weak on closer
+            inspection.
+          </dd>
+        </div>
+      </dl>
+    </details>
   )
 }
 
