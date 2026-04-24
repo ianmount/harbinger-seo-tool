@@ -11,6 +11,7 @@ import type {
 const DFS_BASE = "https://api.dataforseo.com"
 const DEFAULT_LIMIT = 50
 const DEFAULT_LANGUAGE = "English"
+const DEFAULT_LANGUAGE_CODE = "en"
 const RATE_LIMIT_RETRY_MS = 2000
 
 export class DataForSEOError extends Error {
@@ -60,10 +61,20 @@ function authHeader(): string {
   return `Basic ${token}`
 }
 
-function locationParams(location: DfsLocation): Record<string, string | number> {
-  return "code" in location
-    ? { location_code: location.code }
-    : { location_name: location.name }
+// DataForSEO requires *paired* location + language fields:
+//   - `location_code` must be paired with `language_code` (e.g. 2840 + "en")
+//   - `location_name` must be paired with `language_name` (e.g. "United
+//     States" + "English")
+// Mixing them (location_code + language_name) yields a cryptic 40501
+// "Invalid Field: 'location_code'" response — so we always emit the pair
+// together and remove the standalone `language_name` from the request body.
+function locationAndLanguageParams(
+  location: DfsLocation,
+): Record<string, string | number> {
+  if ("code" in location) {
+    return { location_code: location.code, language_code: DEFAULT_LANGUAGE_CODE }
+  }
+  return { location_name: location.name, language_name: DEFAULT_LANGUAGE }
 }
 
 export async function dfsRequest<T = DfsEnvelope>(
@@ -232,8 +243,7 @@ export async function keywordIdeas(
     [
       {
         keywords: [seed],
-        ...locationParams(location),
-        language_name: DEFAULT_LANGUAGE,
+        ...locationAndLanguageParams(location),
         limit: opts.limit ?? DEFAULT_LIMIT,
       },
     ],
@@ -251,8 +261,7 @@ export async function keywordSuggestions(
     [
       {
         keyword: seed,
-        ...locationParams(location),
-        language_name: DEFAULT_LANGUAGE,
+        ...locationAndLanguageParams(location),
         limit: opts.limit ?? DEFAULT_LIMIT,
       },
     ],
@@ -270,8 +279,7 @@ export async function bulkKeywordDifficulty(
     [
       {
         keywords,
-        ...locationParams(location),
-        language_name: DEFAULT_LANGUAGE,
+        ...locationAndLanguageParams(location),
       },
     ],
   )
@@ -288,8 +296,7 @@ export async function searchVolume(
     [
       {
         keywords,
-        ...locationParams(location),
-        language_name: DEFAULT_LANGUAGE,
+        ...locationAndLanguageParams(location),
       },
     ],
   )
