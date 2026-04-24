@@ -108,12 +108,7 @@ export default function LoginPage() {
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-5">
               <div className="space-y-2">
-                <Label
-                  htmlFor="password"
-                  className="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-2"
-                >
-                  Password
-                </Label>
+                <Label htmlFor="password">Password</Label>
                 <Input
                   id="password"
                   type="password"
@@ -123,7 +118,6 @@ export default function LoginPage() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   disabled={submitting}
-                  className="font-serif text-[14px]"
                 />
               </div>
 
@@ -139,7 +133,7 @@ export default function LoginPage() {
 
               <Button
                 type="submit"
-                className="w-full font-sans text-[12.5px] font-bold uppercase tracking-[0.08em]"
+                className="w-full"
                 disabled={submitting}
                 size="lg"
               >
