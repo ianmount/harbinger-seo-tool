@@ -113,23 +113,29 @@ function generateSlug(): string {
 }
 
 /**
- * POST to one of our own /api/audit/* routes. Using fetch here rather than
- * a direct function import because the intermediate routes already validate
- * inputs and log — no reason to duplicate. The AsyncLocalStorage cost tracker
- * survives across fetch because the route handlers don't cross realms; the
- * DataForSEO/Claude helpers inside those routes will still see the active
- * store as long as they run in-process. (Next.js runs all internal fetches
- * to `/api/*` in the same server process.)
+ * POST to one of our own /api/audit/* routes. The proxy at the project root
+ * gates all /api/* paths behind the `harbinger_auth` cookie, so we forward
+ * the incoming request's cookie header on these internal fetches — otherwise
+ * the proxy 401s us even though we're calling ourselves. (A cleaner fix
+ * would be inlining the route logic into lib/ so we skip the HTTP hop
+ * entirely; we can do that later.)
+ *
+ * The AsyncLocalStorage cost tracker survives across fetch because Next.js
+ * runs internal /api/* fetches in the same server process.
  */
-async function internalPost<T>(path: string, body: unknown, baseUrl: string): Promise<T> {
+async function internalPost<T>(
+  path: string,
+  body: unknown,
+  baseUrl: string,
+  cookie: string | null,
+): Promise<T> {
   const res = await fetch(`${baseUrl}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(cookie ? { cookie } : {}),
+    },
     body: JSON.stringify(body),
-    // Forward the auth cookie implicitly is not possible here (no request
-    // context); these routes don't require auth themselves — middleware
-    // protects the /api boundary but trusted server-to-server calls can
-    // bypass by going through the same origin. For the MVP this is fine.
   })
   if (!res.ok) {
     const text = await res.text()
@@ -164,8 +170,9 @@ async function runPipeline(params: {
   prospect: Prospect
   seedServices: string[]
   baseUrl: string
+  cookie: string | null
 }): Promise<PipelineResult> {
-  const { prospect, seedServices, baseUrl } = params
+  const { prospect, seedServices, baseUrl, cookie } = params
 
   // Parallel: crawl + competitive + backlinks + (optional) GSC + (optional) GA4.
   const crawlPromise = crawlSite({ domain: prospect.domain })
@@ -179,6 +186,7 @@ async function runPipeline(params: {
       seedServices,
     },
     baseUrl,
+    cookie,
   ).then((r) => r.report)
 
   const backlinksPromise = referringDomainsWithSpamScore(prospect.domain)
@@ -265,6 +273,7 @@ async function runPipeline(params: {
       ga4,
     },
     baseUrl,
+    cookie,
   )
   const synthesis = synthesisRes.synthesis
 
@@ -320,12 +329,13 @@ export async function POST(request: Request) {
   }
 
   const baseUrl = baseUrlFromRequest(request)
+  const cookie = request.headers.get("cookie")
   const accumulator = createCostAccumulator()
   const startedAt = Date.now()
 
   try {
     const result = await withAuditCost(accumulator, () =>
-      runPipeline({ prospect, seedServices, baseUrl }),
+      runPipeline({ prospect, seedServices, baseUrl, cookie }),
     )
 
     const durationSeconds = Math.round((Date.now() - startedAt) / 1000)
