@@ -24,8 +24,9 @@ import {
 import { useSelectedPartner } from "@/lib/use-selected-partner"
 import { findBestGscSite } from "@/lib/gsc-site-match"
 import {
-  parseLocationCandidates,
+  findSuggestedDfsLocation,
   parseLocationCities,
+  US_DFS_LOCATIONS,
 } from "@/lib/locations"
 import { cn } from "@/lib/utils"
 import type {
@@ -214,6 +215,8 @@ async function fetchJson<T>(
   return body
 }
 
+const LOCATION_CUSTOM = "__custom__"
+
 export default function KeywordResearchPage() {
   const { partner, loading: partnerLoading, error: partnerError } =
     useSelectedPartner()
@@ -225,6 +228,8 @@ export default function KeywordResearchPage() {
     key: "fitScore",
     direction: "desc",
   })
+  const [locationChoice, setLocationChoice] = useState<string>("United States")
+  const [customLocation, setCustomLocation] = useState<string>("")
 
   useEffect(() => {
     // Reset state when partner changes. The URL param drives partner selection,
@@ -234,25 +239,21 @@ export default function KeywordResearchPage() {
     setClusterFilter(FILTER_ALL)
     setRecFilter(FILTER_ALL)
     setSeedsText("")
-  }, [partner?.id])
+    setCustomLocation("")
+    setLocationChoice(
+      partner ? findSuggestedDfsLocation(partner.serviceAreas) : "United States",
+    )
+  }, [partner?.id, partner])
 
   const defaultSeeds = useMemo(
     () => (partner ? generateDefaultSeeds(partner) : []),
     [partner],
   )
 
-  const locationCandidates = useMemo(
-    () => (partner ? parseLocationCandidates(partner.serviceAreas) : []),
-    [partner],
-  )
-
-  const locationParsedSuccessfully = useMemo(
-    () =>
-      !!partner &&
-      locationCandidates.length > 0 &&
-      locationCandidates[0] !== partner.serviceAreas,
-    [partner, locationCandidates],
-  )
+  const effectiveLocation = useMemo(() => {
+    if (locationChoice === LOCATION_CUSTOM) return customLocation.trim()
+    return locationChoice
+  }, [locationChoice, customLocation])
 
   const effectiveSeeds = useMemo(() => {
     const fromText = parseSeedsFromTextarea(seedsText)
@@ -272,8 +273,16 @@ export default function KeywordResearchPage() {
       })
       return
     }
+    if (!effectiveLocation) {
+      setPhase({
+        status: "error",
+        message:
+          "Pick a location, or enter a custom DataForSEO location name (e.g. \"Oklahoma City,Oklahoma,United States\").",
+      })
+      return
+    }
 
-    const location = locationCandidates
+    const location = effectiveLocation
 
     // Stage 1: GSC (non-fatal — continue without historical if it fails)
     setPhase({ status: "running", stage: "gsc" })
@@ -467,7 +476,7 @@ export default function KeywordResearchPage() {
           err instanceof Error ? err.message : "Claude clustering failed",
       })
     }
-  }, [partner, effectiveSeeds, locationCandidates])
+  }, [partner, effectiveSeeds, effectiveLocation])
 
   const rows = useMemo<ScoredKeyword[]>(
     () => (phase.status === "done" ? phase.rows : []),
@@ -542,10 +551,14 @@ export default function KeywordResearchPage() {
         </p>
       ) : (
         <>
-          <PartnerSummary
-            partner={partner}
-            locationCandidates={locationCandidates}
-            locationParsedSuccessfully={locationParsedSuccessfully}
+          <PartnerSummary partner={partner} />
+
+          <LocationSelector
+            value={locationChoice}
+            onChange={setLocationChoice}
+            customValue={customLocation}
+            onCustomChange={setCustomLocation}
+            disabled={running}
           />
 
           <section className="space-y-3 rounded-lg border p-4">
@@ -751,15 +764,7 @@ export default function KeywordResearchPage() {
   )
 }
 
-function PartnerSummary({
-  partner,
-  locationCandidates,
-  locationParsedSuccessfully,
-}: {
-  partner: Partner
-  locationCandidates: string[]
-  locationParsedSuccessfully: boolean
-}) {
+function PartnerSummary({ partner }: { partner: Partner }) {
   return (
     <section className="grid gap-4 rounded-lg border p-4 sm:grid-cols-2">
       <div>
@@ -775,31 +780,61 @@ function PartnerSummary({
         <p className="mt-1 whitespace-pre-wrap text-sm">
           {partner.serviceAreas}
         </p>
-        <p className="mt-1 text-xs text-muted-foreground">
-          DataForSEO location:{" "}
-          {locationCandidates.length > 0 ? (
-            <code className="font-mono">{locationCandidates[0]}</code>
-          ) : (
-            <span className="text-destructive">unparsed</span>
-          )}
-          {locationCandidates.length > 1 ? (
-            <span className="ml-2">
-              (fallback:{" "}
-              {locationCandidates.slice(1).map((c, i) => (
-                <span key={c}>
-                  {i > 0 ? " → " : ""}
-                  <code className="font-mono">{c}</code>
-                </span>
-              ))}
-              )
-            </span>
-          ) : null}
-          {!locationParsedSuccessfully ? (
-            <span className="ml-2 text-destructive">
-              (couldn&apos;t parse — DataForSEO will surface the error)
-            </span>
-          ) : null}
+      </div>
+    </section>
+  )
+}
+
+function LocationSelector({
+  value,
+  onChange,
+  customValue,
+  onCustomChange,
+  disabled,
+}: {
+  value: string
+  onChange: (v: string) => void
+  customValue: string
+  onCustomChange: (v: string) => void
+  disabled?: boolean
+}) {
+  const isCustom = value === LOCATION_CUSTOM
+  return (
+    <section className="space-y-3 rounded-lg border p-4">
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="dfs-location">DataForSEO location</Label>
+        <Select value={value} onValueChange={onChange} disabled={disabled}>
+          <SelectTrigger id="dfs-location" className="w-[360px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent className="max-h-[400px]">
+            {US_DFS_LOCATIONS.map((loc) => (
+              <SelectItem key={loc} value={loc}>
+                {loc}
+              </SelectItem>
+            ))}
+            <SelectItem value={LOCATION_CUSTOM}>Custom…</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          Country- and state-level locations are always valid in DataForSEO.
+          Use &ldquo;Custom…&rdquo; for a specific city in DFS&apos;s format:{" "}
+          <code className="font-mono">City,State,United States</code> — note
+          there are no spaces after the commas, and the state must be the full
+          name (e.g.{" "}
+          <code className="font-mono">Oklahoma City,Oklahoma,United States</code>
+          ). DFS may still reject smaller cities.
         </p>
+        {isCustom ? (
+          <input
+            type="text"
+            value={customValue}
+            onChange={(e) => onCustomChange(e.target.value)}
+            placeholder="Oklahoma City,Oklahoma,United States"
+            disabled={disabled}
+            className="mt-1 w-[360px] rounded-md border border-input bg-transparent px-3 py-2 font-mono text-sm shadow-xs focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 outline-none disabled:cursor-not-allowed disabled:opacity-50"
+          />
+        ) : null}
       </div>
     </section>
   )

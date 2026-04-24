@@ -1,17 +1,15 @@
 /**
- * Airtable → DataForSEO location parsing.
+ * Airtable → DataForSEO location helpers.
  *
- * Partner.serviceAreas is free-text ("Peachtree City, GA", "Atlanta, Georgia",
- * "Greensboro and Winston Salem, North Carolina"). DataForSEO wants
- * "City,FullStateName,United States" (no spaces after commas).
+ * Partner.serviceAreas is totally free-text (simple "Peachtree City, GA" all
+ * the way to multi-line markdown with links). DFS's Labs endpoints want a
+ * `location_name` that exactly matches their taxonomy — trying to auto-infer
+ * city-level locations isn't reliable (many US cities aren't in the DFS
+ * taxonomy and get rejected with status 40501).
  *
- * parseLocation → canonical DFS string, or raw input if parsing fails. We
- * deliberately do NOT swap to a default location — surfacing the DFS error
- * is more honest than silently pretending the partner is in Mountain View.
- *
- * parseLocationCities → list of city names pulled from the first line, split
- * on " and " / " & " so "Greensboro and Winston Salem" yields both cities.
- * Used to build default seeds.
+ * The UI picks a location manually from US_DFS_LOCATIONS. These helpers
+ * provide a smart default (findSuggestedDfsLocation) and seed-generation
+ * support (parseLocationCities).
  */
 
 const US_STATE_ABBREV: Record<string, string> = {
@@ -83,56 +81,40 @@ function splitCities(cityPart: string): string[] {
     .filter((s) => s.length > 0)
 }
 
-function resolveStateName(raw: string): string | null {
-  const stateRaw = raw.replace(/,\s*(united states|usa|us)\s*\.?$/i, "").trim()
-  if (/^[A-Za-z]{2}$/.test(stateRaw)) {
-    return US_STATE_ABBREV[stateRaw.toUpperCase()] ?? null
-  }
-  return US_STATE_FROM_NAME.get(stateRaw.toLowerCase()) ?? null
-}
+/**
+ * Known-valid DataForSEO Labs location strings. "United States" covers the
+ * whole country; state-level strings (e.g. "Georgia,United States") all
+ * exist in DFS's taxonomy. City-level strings are not included here because
+ * DFS's city coverage is spotty — cities can be added via the "Custom…"
+ * input.
+ */
+export const US_DFS_LOCATIONS: readonly string[] = Object.freeze([
+  "United States",
+  ...Object.values(US_STATE_ABBREV)
+    .slice()
+    .sort()
+    .map((name) => `${name},United States`),
+])
 
 /**
- * DataForSEO location candidates ordered from most to least specific.
- *
- * When parsing succeeds, returns [city-state-country, state-country,
- * "United States"]. Callers should try them in order and fall back on
- * 40501 "Invalid Field: location_name" — many smaller US cities are not
- * in DFS's location taxonomy, and falling back to the state is the
- * correct behavior for local-SEO keyword research.
- *
- * When parsing fails, returns [raw] so DataForSEO surfaces the underlying
- * error rather than silently swapping to a default (per CLAUDE.md).
+ * Best-effort suggested DFS location for a partner. Scans the full
+ * serviceAreas text for any ", ST" (2-letter code) or state-name mention and
+ * returns the corresponding "{State},United States" string. Falls back to
+ * "United States" if nothing matches.
  */
-export function parseLocationCandidates(raw: string): string[] {
-  const line = firstLine(raw)
-  if (!line) return [raw]
-
-  const commaIdx = line.indexOf(",")
-  if (commaIdx <= 0) return [raw]
-
-  const cityPart = line.slice(0, commaIdx).trim()
-  const stateRaw = line.slice(commaIdx + 1).trim()
-
-  const stateName = resolveStateName(stateRaw)
-  if (!stateName) return [raw]
-
-  const cities = splitCities(cityPart)
-  const primaryCity = cities[0]
-  const candidates: string[] = []
-  if (primaryCity) {
-    candidates.push(`${primaryCity},${stateName},United States`)
+export function findSuggestedDfsLocation(raw: string): string {
+  if (!raw) return "United States"
+  const abbrevMatch = raw.match(/(?:[,\s])([A-Z]{2})\b/)
+  if (abbrevMatch) {
+    const full = US_STATE_ABBREV[abbrevMatch[1]]
+    if (full) return `${full},United States`
   }
-  candidates.push(`${stateName},United States`)
-  candidates.push("United States")
-  return candidates
-}
-
-/**
- * Convenience wrapper for UIs that only need the most specific string to
- * display. Returns the top candidate from parseLocationCandidates.
- */
-export function parseLocation(raw: string): string {
-  return parseLocationCandidates(raw)[0] ?? raw
+  const lower = raw.toLowerCase()
+  for (const [nameLower, properName] of US_STATE_FROM_NAME.entries()) {
+    const re = new RegExp(`\\b${nameLower.replace(/\s+/g, "\\s+")}\\b`, "i")
+    if (re.test(lower)) return `${properName},United States`
+  }
+  return "United States"
 }
 
 /** City names for seed-keyword generation. */
