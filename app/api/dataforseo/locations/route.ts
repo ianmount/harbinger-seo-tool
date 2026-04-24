@@ -28,6 +28,44 @@ function scoreLocation(loc: DfsLabsLocation, q: string): number {
 }
 
 /**
+ * Return the full set of locations under a country (including the country
+ * row itself), walking the parent chain. Necessary because DFS Labs may
+ * not populate `country_iso_code` on state/city rows — only `location_code_parent`
+ * is reliable for establishing hierarchy.
+ */
+function locationsUnderCountry(
+  all: DfsLabsLocation[],
+  countryIso: string,
+): DfsLabsLocation[] {
+  const countryRow = all.find(
+    (l) =>
+      l.location_type === "Country" &&
+      (l.country_iso_code ?? "").toUpperCase() === countryIso,
+  )
+  if (!countryRow) return []
+
+  const childrenOf = new Map<number, DfsLabsLocation[]>()
+  for (const l of all) {
+    if (l.location_code_parent == null) continue
+    const list = childrenOf.get(l.location_code_parent) ?? []
+    list.push(l)
+    childrenOf.set(l.location_code_parent, list)
+  }
+
+  const result: DfsLabsLocation[] = [countryRow]
+  const queue: number[] = [countryRow.location_code]
+  while (queue.length > 0) {
+    const parent = queue.shift()!
+    const kids = childrenOf.get(parent) ?? []
+    for (const kid of kids) {
+      result.push(kid)
+      queue.push(kid.location_code)
+    }
+  }
+  return result
+}
+
+/**
  * GET /api/dataforseo/locations?q=atlanta&country=US
  *
  * Returns up to MAX_RESULTS Labs locations matching the query, ordered by
@@ -44,23 +82,22 @@ export async function GET(request: Request) {
       url.searchParams.get("country") ?? DEFAULT_COUNTRY
     ).toUpperCase()
 
-    // Whole list is already scoped to the requested country by
-    // listLabsLocations (it hits /v3/keywords_data/google_ads/locations/{cc}).
-    const scoped = await listLabsLocations(country)
+    const all = await listLabsLocations()
+    const scoped = locationsUnderCountry(all, country)
 
     if (!q) {
       // No query: return the country row + its direct children (states/regions).
-      const country_row = scoped.find((l) => l.location_type === "Country")
-      const children = country_row
+      const countryRow = scoped.find((l) => l.location_type === "Country")
+      const children = countryRow
         ? scoped
             .filter(
               (l) =>
-                l.location_code_parent === country_row.location_code &&
+                l.location_code_parent === countryRow.location_code &&
                 (l.location_type === "State" || l.location_type === "Region"),
             )
             .sort((a, b) => a.location_name.localeCompare(b.location_name))
         : []
-      const results = country_row ? [country_row, ...children] : children
+      const results = countryRow ? [countryRow, ...children] : children
       return NextResponse.json({
         results: results.slice(0, MAX_RESULTS),
         total: results.length,
