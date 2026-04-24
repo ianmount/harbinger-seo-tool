@@ -67,6 +67,31 @@ export interface KeywordResult {
 }
 
 /**
+ * Output of the Claude clustering/scoring step. Extends KeywordResult with
+ * Claude's assigned cluster, fit score, intent classification, and
+ * target/monitor/skip recommendation.
+ */
+export type KeywordIntent =
+  | "informational"
+  | "commercial"
+  | "transactional"
+  | "navigational"
+
+export type KeywordRecommendation = "target" | "monitor" | "skip"
+
+export interface ScoredKeyword extends KeywordResult {
+  cluster: string
+  fitScore: number
+  intent: KeywordIntent
+  recommendation: KeywordRecommendation
+}
+
+export interface KeywordCluster {
+  name: string
+  keywords: ScoredKeyword[]
+}
+
+/**
  * DataForSEO location param. Prefer `{ name }` for "live" endpoints because
  * they accept `location_name` directly without a code lookup. `{ code }` is
  * supported for when a caller has already resolved to a specific location id.
