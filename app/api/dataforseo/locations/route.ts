@@ -82,7 +82,10 @@ export async function GET(request: Request) {
       url.searchParams.get("country") ?? DEFAULT_COUNTRY
     ).toUpperCase()
 
-    const all = await listLabsLocations()
+    // The Google Ads locations endpoint is already country-scoped. We still
+    // run locationsUnderCountry to pick up the country row + descendants in
+    // case the list includes adjacent country entries.
+    const all = await listLabsLocations(country)
     const scoped = locationsUnderCountry(all, country)
 
     if (!q) {

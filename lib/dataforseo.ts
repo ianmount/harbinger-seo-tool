@@ -325,36 +325,40 @@ const labsLocationItemSchema = z
 
 let cachedLocations: DfsLabsLocation[] | null = null
 let cachedLocationsFetchedAt = 0
+let cachedLocationsCountry = ""
 const LOCATIONS_CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24h
 
+// Hardcoded country code for all Labs keyword_ideas / keyword_suggestions /
+// bulk_keyword_difficulty calls. DataForSEO Labs' keyword research endpoints
+// only accept country-level location codes (their
+// /v3/dataforseo_labs/locations_and_languages list contains no states/cities —
+// verified against live API 2026-04-24). Local-volume data comes from a
+// separate Google Ads search_volume enrichment pass that DOES support cities.
+export const DFS_LABS_COUNTRY_CODE_US = 2840
+
 /**
- * Fetch the DataForSEO Labs location taxonomy. Labs has its own location
- * database distinct from Google Ads — codes are NOT interchangeable.
- * Sending a Google Ads code (e.g. 1015254 for Atlanta from the
- * /v3/keywords_data/google_ads/locations list) to a Labs endpoint yields
- * 40501 "Invalid Field: 'location_code'". This endpoint returns codes
- * that actually work with /v3/dataforseo_labs/google/* endpoints.
+ * Fetch DataForSEO's Google Ads location list for a country. These are
+ * Google Ads codes and work with /v3/keywords_data/google_ads/search_volume
+ * (the endpoint we use for city-level volume data). They do NOT work with
+ * Labs endpoints — Labs has a separate taxonomy that's country-only.
  *
- * The response is a flat list where each row has a `location_code`,
- * `location_code_parent`, and `location_type` ("Country" | "State" | "City" | …).
- * Non-country rows may not have `country_iso_code` populated — callers
- * that want a country-scoped subset should walk the parent chain from
- * the country row instead of filtering by ISO code.
- *
- * Cached in-process for 24h because the taxonomy changes rarely and the
- * response is large. First call after cold start pays one DFS request
- * (several seconds); subsequent calls return cache.
+ * Cached in-process for 24h. Response for US is large (~100k rows);
+ * subsequent calls return cache.
  */
-export async function listLabsLocations(): Promise<DfsLabsLocation[]> {
+export async function listLabsLocations(
+  countryIsoCode = "US",
+): Promise<DfsLabsLocation[]> {
+  const country = countryIsoCode.toUpperCase()
   const now = Date.now()
   if (
     cachedLocations &&
+    cachedLocationsCountry === country &&
     now - cachedLocationsFetchedAt < LOCATIONS_CACHE_TTL_MS
   ) {
     return cachedLocations
   }
 
-  const url = `${DFS_BASE}/v3/dataforseo_labs/locations_and_languages`
+  const url = `${DFS_BASE}/v3/keywords_data/google_ads/locations/${country}`
   const response = await fetch(url, {
     method: "GET",
     headers: { Authorization: authHeader() },
@@ -363,7 +367,7 @@ export async function listLabsLocations(): Promise<DfsLabsLocation[]> {
   if (!response.ok) {
     const text = await response.text()
     throw new DataForSEOError(
-      `DataForSEO HTTP ${response.status} fetching Labs locations: ${text.slice(0, 500)}`,
+      `DataForSEO HTTP ${response.status} fetching locations for ${country}: ${text.slice(0, 500)}`,
       { status: response.status },
     )
   }
@@ -400,8 +404,9 @@ export async function listLabsLocations(): Promise<DfsLabsLocation[]> {
 
   cachedLocations = locations
   cachedLocationsFetchedAt = now
+  cachedLocationsCountry = country
   console.log(
-    `[dataforseo] cached ${locations.length} Labs Google locations`,
+    `[dataforseo] cached ${locations.length} Google Ads locations for ${country}`,
   )
   return locations
 }

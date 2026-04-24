@@ -44,6 +44,7 @@ type Stage =
   | "gsc"
   | "dfs-ideas"
   | "dfs-difficulty"
+  | "dfs-local-volume"
   | "claude"
   | "done"
 
@@ -127,6 +128,8 @@ function stageLabel(stage: Stage): string {
       return "Fetching keyword ideas & suggestions from DataForSEO…"
     case "dfs-difficulty":
       return "Measuring keyword difficulty…"
+    case "dfs-local-volume":
+      return "Fetching city-level search volume…"
     case "claude":
       return "Clustering and scoring with Claude…"
     case "done":
@@ -135,7 +138,14 @@ function stageLabel(stage: Stage): string {
 }
 
 function stageIndex(stage: Stage): number {
-  return ["gsc", "dfs-ideas", "dfs-difficulty", "claude", "done"].indexOf(stage)
+  return [
+    "gsc",
+    "dfs-ideas",
+    "dfs-difficulty",
+    "dfs-local-volume",
+    "claude",
+    "done",
+  ].indexOf(stage)
 }
 
 function csvEscape(value: unknown): string {
@@ -434,7 +444,57 @@ export default function KeywordResearchPage() {
       console.warn("[keyword-research] difficulty fetch failed:", err)
     }
 
-    // Stage 4: Claude clustering + scoring
+    // Stage 4: Local volume enrichment. Labs' keyword_ideas/suggestions only
+    // give country-level volume; we overlay city-level volume from Google
+    // Ads search_volume so the user actually sees local demand.
+    const isCityLevel =
+      selectedLocation.location_type !== "Country" &&
+      selectedLocation.location_type !== undefined
+    if (isCityLevel) {
+      setPhase({
+        status: "running",
+        stage: "dfs-local-volume",
+        note: `${enriched.length} keywords @ ${selectedLocation.location_name}`,
+      })
+      try {
+        const keywordList = enriched.map((r) => r.keyword).slice(0, 1000)
+        const volBody = await fetchJson<{ results: KeywordResult[] }>(
+          "/api/dataforseo/keywords",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              mode: "volume",
+              keywords: keywordList,
+              locationCode,
+            }),
+          },
+          "DataForSEO local search volume",
+        )
+        const volByKw = new Map(
+          (volBody.results ?? []).map((r) => [r.keyword.toLowerCase(), r]),
+        )
+        enriched = enriched.map((r) => {
+          const v = volByKw.get(r.keyword.toLowerCase())
+          if (!v) return r
+          // Prefer local volume when present; fall back to country volume.
+          return {
+            ...r,
+            search_volume: v.search_volume ?? r.search_volume,
+            cpc: v.cpc ?? r.cpc,
+            competition: v.competition ?? r.competition,
+            competition_level: v.competition_level ?? r.competition_level,
+          }
+        })
+      } catch (err) {
+        console.warn(
+          "[keyword-research] local volume fetch failed, using country-level:",
+          err,
+        )
+      }
+    }
+
+    // Stage 5: Claude clustering + scoring
     setPhase({
       status: "running",
       stage: "claude",
@@ -986,7 +1046,13 @@ function LocationAutocomplete({
 
 function StageProgress({ phase }: { phase: Phase }) {
   if (phase.status !== "running") return null
-  const stages: Stage[] = ["gsc", "dfs-ideas", "dfs-difficulty", "claude"]
+  const stages: Stage[] = [
+    "gsc",
+    "dfs-ideas",
+    "dfs-difficulty",
+    "dfs-local-volume",
+    "claude",
+  ]
   const currentIdx = stageIndex(phase.stage)
   return (
     <div className="flex flex-col gap-1">

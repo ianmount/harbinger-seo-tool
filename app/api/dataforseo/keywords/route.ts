@@ -3,6 +3,7 @@ import { z } from "zod"
 import {
   bulkKeywordDifficulty,
   DataForSEOError,
+  DFS_LABS_COUNTRY_CODE_US,
   keywordIdeas,
   keywordSuggestions,
   searchVolume,
@@ -94,28 +95,35 @@ export async function POST(request: Request) {
   }
 
   const data = parsed.data
-  const location = buildLocation(data.locationCode, data.location)
+
+  // DFS Labs' keyword_ideas / keyword_suggestions / bulk_keyword_difficulty
+  // only accept country-level location codes. We ignore the user's selection
+  // for these and always use the US country code. The user's city selection
+  // is used only by `volume` (Google Ads search_volume), which does support
+  // cities and is how we get city-level volume data for each keyword.
+  const labsLocation: DfsLocation = { code: DFS_LABS_COUNTRY_CODE_US }
+  const userLocation = buildLocation(data.locationCode, data.location)
 
   try {
     switch (data.mode) {
       case "ideas": {
-        const results = await keywordIdeas(data.seed, location, {
+        const results = await keywordIdeas(data.seed, labsLocation, {
           limit: data.limit,
         })
         return NextResponse.json({ results })
       }
       case "suggestions": {
-        const results = await keywordSuggestions(data.seed, location, {
+        const results = await keywordSuggestions(data.seed, labsLocation, {
           limit: data.limit,
         })
         return NextResponse.json({ results })
       }
       case "volume": {
-        const results = await searchVolume(data.keywords, location)
+        const results = await searchVolume(data.keywords, userLocation)
         return NextResponse.json({ results })
       }
       case "difficulty": {
-        const results = await bulkKeywordDifficulty(data.keywords, location)
+        const results = await bulkKeywordDifficulty(data.keywords, labsLocation)
         return NextResponse.json({ results })
       }
     }
