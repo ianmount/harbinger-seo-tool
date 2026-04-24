@@ -38,6 +38,13 @@ export interface Partner {
   targetAudience?: string
   contentMarketing?: string
   industryKnowledge?: string
+  /**
+   * GA4 property identifier from Airtable. Stored as either a bare numeric ID
+   * ("123456789") or the full resource name ("properties/123456789"). Callers
+   * should pass the raw value through `normalizePropertyId` in `lib/ga4.ts`
+   * before sending it to the GA4 API.
+   */
+  ga4PropertyId?: string
   unfilledContext?: PartnerContextField[]
 }
 
@@ -114,4 +121,62 @@ export interface GSCDailyRow {
   impressions: number
   ctr: number
   position: number
+}
+
+/**
+ * GA4 types. GA4 integration is optional per partner; code paths that surface
+ * GA4 data must handle a missing `ga4PropertyId` gracefully.
+ */
+
+/** A GA4 property accessible to the authed Google account. */
+export interface GA4PropertyInfo {
+  /** Full resource name, e.g. "properties/123456789". */
+  propertyId: string
+  displayName: string
+  /** Primary web stream URL if the caller resolved it. Often unset. */
+  websiteUrl?: string
+}
+
+export interface GA4LandingPage {
+  landingPage: string
+  sessions: number
+  conversions: number
+  /** 0–1 fraction. 0 when sessions is 0. */
+  conversionRate: number
+}
+
+export interface GA4TrafficSource {
+  source: string
+  medium: string
+  sessions: number
+  conversions: number
+}
+
+export interface GA4SeoReport {
+  /** Normalized "properties/X" form. */
+  propertyId: string
+  dateRange: { startDate: string; endDate: string }
+  sessions: number
+  users: number
+  conversions: number
+  /**
+   * False when no conversion events fired across any dimension in the range.
+   * Consumers can use this to show "conversions not configured" messaging.
+   */
+  conversionsConfigured: boolean
+  topLandingPages: GA4LandingPage[]
+  trafficSources: GA4TrafficSource[]
+  /** Top landing pages filtered to sessionDefaultChannelGroup = "Organic Search". */
+  organicOnly: GA4LandingPage[]
+}
+
+/**
+ * Per-page conversion signal for keyword scoring. Sorted by conversions desc
+ * and filtered to pages with > 0 conversions (empty array when conversions
+ * are not configured).
+ */
+export interface GA4PageConversion {
+  landingPage: string
+  conversions: number
+  conversionRate: number
 }

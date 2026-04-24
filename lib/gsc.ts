@@ -10,8 +10,16 @@ import type {
   GSCTopQueryRow,
 } from "@/lib/types"
 
+/**
+ * OAuth scopes requested during the consent flow. analytics.readonly is
+ * included so the same refresh token can also drive the GA4 Data / Admin APIs
+ * (see lib/ga4.ts). Changing this list requires re-consenting — revoke the
+ * existing grant at https://myaccount.google.com/permissions and re-run
+ * /api/gsc/auth so Google mints a new refresh token with the full scope set.
+ */
 export const GSC_SCOPES = [
   "https://www.googleapis.com/auth/webmasters.readonly",
+  "https://www.googleapis.com/auth/analytics.readonly",
 ] as const
 
 export class GSCError extends Error {

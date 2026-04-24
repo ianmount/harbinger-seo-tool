@@ -30,6 +30,7 @@ const partnerFieldsSchema = z.object({
   "Target Audience": stringOrJoinedArray,
   "Content Marketing": stringOrJoinedArray,
   "Industry Knowledge": stringOrJoinedArray,
+  "GA4 Property ID": stringOrJoinedArray,
 })
 
 type ParsedFields = z.infer<typeof partnerFieldsSchema>
@@ -71,6 +72,7 @@ function toPartner(id: string, parsed: ParsedFields): Partner {
     targetAudience: parsed["Target Audience"],
     contentMarketing: parsed["Content Marketing"],
     industryKnowledge: parsed["Industry Knowledge"],
+    ga4PropertyId: parsed["GA4 Property ID"],
     ...(unfilledContext.length > 0 ? { unfilledContext } : {}),
   }
 }
