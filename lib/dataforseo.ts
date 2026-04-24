@@ -328,13 +328,18 @@ let cachedLocationsFetchedAt = 0
 const LOCATIONS_CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24h
 
 /**
- * Fetch the DataForSEO Labs Google location taxonomy. Labs has its own
- * location database distinct from Google Ads — codes are NOT interchangeable.
+ * Fetch the DataForSEO Labs location taxonomy. Labs has its own location
+ * database distinct from Google Ads — codes are NOT interchangeable.
  * Sending a Google Ads code (e.g. 1015254 for Atlanta from the
  * /v3/keywords_data/google_ads/locations list) to a Labs endpoint yields
- * 40501 "Invalid Field: 'location_code'". The Labs-Google-specific
- * locations_and_languages endpoint returns codes that are guaranteed to
- * work with /v3/dataforseo_labs/google/* endpoints.
+ * 40501 "Invalid Field: 'location_code'". This endpoint returns codes
+ * that actually work with /v3/dataforseo_labs/google/* endpoints.
+ *
+ * The response is a flat list where each row has a `location_code`,
+ * `location_code_parent`, and `location_type` ("Country" | "State" | "City" | …).
+ * Non-country rows may not have `country_iso_code` populated — callers
+ * that want a country-scoped subset should walk the parent chain from
+ * the country row instead of filtering by ISO code.
  *
  * Cached in-process for 24h because the taxonomy changes rarely and the
  * response is large. First call after cold start pays one DFS request
@@ -349,7 +354,7 @@ export async function listLabsLocations(): Promise<DfsLabsLocation[]> {
     return cachedLocations
   }
 
-  const url = `${DFS_BASE}/v3/dataforseo_labs/google/locations_and_languages`
+  const url = `${DFS_BASE}/v3/dataforseo_labs/locations_and_languages`
   const response = await fetch(url, {
     method: "GET",
     headers: { Authorization: authHeader() },
