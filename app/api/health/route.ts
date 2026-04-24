@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { env } from "@/lib/env"
+import { GSC_SCOPES } from "@/lib/gsc"
 
 export const dynamic = "force-dynamic"
 
@@ -12,5 +13,11 @@ export function GET() {
       env.AIRTABLE_PAT && env.AIRTABLE_BASE_ID && env.AIRTABLE_PARTNERS_TABLE,
     ),
   }
-  return NextResponse.json({ ok: true, envPresent })
+  // `oauthScopes` surfaces the scope list the OAuth flow will request so we
+  // can verify a deploy without running through Google's consent screen.
+  return NextResponse.json({
+    ok: true,
+    envPresent,
+    oauthScopes: [...GSC_SCOPES],
+  })
 }
