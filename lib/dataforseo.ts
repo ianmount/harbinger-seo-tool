@@ -9,6 +9,7 @@ import type {
   DfsLocation,
   DomainRankOverview,
   KeywordResult,
+  ReferringDomain,
   ReferringDomainSample,
 } from "@/lib/types"
 
@@ -290,6 +291,86 @@ export async function bulkKeywordDifficulty(
     ],
   )
   return extractLabsItems(envelope).map(normalizeLabsItem)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Backlinks tab — referring_domains for competitor backlink research.
+//
+// A separate pass from `referringDomainsWithSpamScore` below (used by the
+// Audit tab). That one computes spam/authority summaries for a single
+// domain; this one surfaces *each* referring domain as a candidate prospect
+// that the user can pitch for a link.
+
+const backlinksTabDomainSchema = z
+  .object({
+    // DataForSEO sometimes returns "domain"; in some response shapes the field
+    // is named slightly differently. `.passthrough()` below lets us stay
+    // forgiving on unknown fields while validating the ones we consume.
+    domain: z.string(),
+    rank: z.number().nullable().optional(),
+    backlinks: z.number().nullable().optional(),
+    backlinks_spam_score: z.number().nullable().optional(),
+    first_seen: z.string().nullable().optional(),
+  })
+  .passthrough()
+
+function extractBacklinksItems(envelope: DfsEnvelope): unknown[] {
+  // /v3/backlinks/referring_domains/live places items under
+  // tasks[0].result[0].items — same shape as DFS Labs endpoints.
+  const firstTask = envelope.tasks[0]
+  if (!firstTask) return []
+  const result = firstTask.result
+  if (!result || result.length === 0) return []
+  const firstResult = result[0] as { items?: unknown[] } | null
+  return firstResult?.items ?? []
+}
+
+/**
+ * Fetch referring domains for a target (competitor domain or URL) via
+ * DataForSEO's backlinks/referring_domains/live endpoint.
+ *
+ * - `target` may be a bare domain ("example.com") or a URL; DataForSEO
+ *   accepts either.
+ * - `limit` is capped at 1000 by DataForSEO. Order defaults to rank desc so
+ *   the highest-authority referrers come first.
+ *
+ * Returns a normalized ReferringDomain list with `referringTo` set to the
+ * original target so the caller can merge results from multiple competitors
+ * and still trace each prospect back to its source.
+ */
+export async function referringDomains(
+  target: string,
+  limit: number,
+): Promise<ReferringDomain[]> {
+  const trimmed = target.trim()
+  if (!trimmed) return []
+  const envelope = await dfsRequest(
+    "/v3/backlinks/referring_domains/live",
+    [
+      {
+        target: trimmed,
+        limit: Math.min(Math.max(limit, 1), 1000),
+        order_by: ["rank,desc"],
+      },
+    ],
+  )
+  const items = extractBacklinksItems(envelope)
+  const out: ReferringDomain[] = []
+  for (const raw of items) {
+    const parsed = backlinksTabDomainSchema.safeParse(raw)
+    if (!parsed.success) continue
+    const d = parsed.data
+    if (!d.domain) continue
+    out.push({
+      domain: d.domain,
+      rank: d.rank ?? 0,
+      backlinks: d.backlinks ?? 0,
+      spamScore: d.backlinks_spam_score ?? 0,
+      firstSeen: d.first_seen ?? undefined,
+      referringTo: trimmed,
+    })
+  }
+  return out
 }
 
 export async function searchVolume(

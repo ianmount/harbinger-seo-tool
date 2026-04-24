@@ -229,6 +229,66 @@ export interface GA4PageConversion {
   conversionRate: number
 }
 
+/**
+ * One referring domain pulled from DataForSEO's backlinks/referring_domains
+ * endpoint, flattened to the fields the backlinks tab actually uses. `rank`
+ * is DataForSEO's 0–1000 authority metric (higher = stronger domain);
+ * `spamScore` is 0–100 (higher = more likely spammy). `referringTo` is the
+ * competitor target whose referring list surfaced this domain — so the user
+ * can click through and see the actual link context.
+ *
+ * Distinct from `ReferringDomainSample` (see Audit tab types below): that
+ * type is produced by the prospect audit's backlink pass and tracks
+ * `referringPages` + `lastSeen` rather than the sourcing competitor.
+ */
+export interface ReferringDomain {
+  domain: string
+  rank: number
+  backlinks: number
+  spamScore: number
+  firstSeen?: string
+  /** The competitor target we fetched referrers for. */
+  referringTo: string
+}
+
+/**
+ * Backlinks tab prospect categorized by Claude. Adds a category + outreach
+ * angle to the raw ReferringDomain so the user can triage prospects in the
+ * results table.
+ *
+ * Categories:
+ *  - citation        — directories / listing sites (YellowPages, BBB, etc.)
+ *  - resource_page   — curated link lists ("Top 10 Plumbers in Tulsa")
+ *  - editorial       — publications that run articles (local news, blogs)
+ *  - supplier        — businesses whose partner/vendor page could mention us
+ *  - other           — anything Claude can't confidently categorize
+ */
+export type ProspectCategory =
+  | "citation"
+  | "resource_page"
+  | "editorial"
+  | "supplier"
+  | "other"
+
+export type OutreachPriority = "high" | "medium" | "low"
+
+export interface CategorizedProspect extends ReferringDomain {
+  category: ProspectCategory
+  angle: string
+  reasoning: string
+  outreachPriority: OutreachPriority
+}
+
+/**
+ * One message in a 3-email outreach sequence. `sendAfterDays` is days from
+ * the initial send (0 for the first email, 3–7 for follow-ups).
+ */
+export interface OutreachEmail {
+  subject: string
+  body: string
+  sendAfterDays: number
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Audit tab types.
 //
