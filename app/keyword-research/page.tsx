@@ -83,19 +83,65 @@ function parseSeedsFromTextarea(text: string): string[] {
     .filter((s) => s.length > 0)
 }
 
-function generateDefaultSeeds(partner: Partner): string[] {
+/**
+ * Strip markdown/list noise from a service string so it can be used as a
+ * DataForSEO seed. Airtable service fields are free-text and often contain
+ * bold markers, list bullets, trailing colons, and embedded links.
+ */
+function cleanServiceName(raw: string): string {
+  return raw
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // [text](url) → text
+    .replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1") // **bold** / *italic* → text
+    .replace(/^[\s\-*•–—]+/, "") // leading bullet/dash
+    .replace(/[:;]\s*$/, "") // trailing punctuation
+    .replace(/[()]/g, "") // stray parens
+    .replace(/\s+/g, " ") // collapse whitespace
+    .trim()
+}
+
+/**
+ * Extract a clean city name from a DFS location row's display name
+ * (e.g. "Oklahoma City,Oklahoma,United States" → "Oklahoma City").
+ * Returns null for country/state-level selections where there's no city.
+ */
+function cityFromLocation(loc: DfsLabsLocation | null): string | null {
+  if (!loc) return null
+  if (loc.location_type === "Country" || loc.location_type === "State") {
+    return null
+  }
+  const first = loc.location_name.split(",")[0]?.trim()
+  return first && first.length > 0 ? first : null
+}
+
+function generateDefaultSeeds(
+  partner: Partner,
+  selectedLocation: DfsLabsLocation | null,
+): string[] {
   const services = partner.services
-    .split(/[\n,]/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
+    .split(/[\n,;]/)
+    .map(cleanServiceName)
+    .filter((s) => {
+      // Sanity-check a "service name": short-ish, not a URL, not a sentence
+      if (s.length < 2 || s.length > 60) return false
+      if (/^https?:\/\//i.test(s)) return false
+      if (s.split(/\s+/).length > 8) return false
+      return true
+    })
     .slice(0, 3)
-  const cities = parseLocationCities(partner.serviceAreas)
-  const primaryCity = cities[0]
+
+  // Prefer the explicitly picked location's city. Falling back to parsing
+  // partner.serviceAreas is risky — that field often contains addresses,
+  // URL-wrapped markdown, and stray labels that yield bogus "cities"
+  // (e.g. "Physical Locations" from "Physical location: <address>").
+  const city =
+    cityFromLocation(selectedLocation) ??
+    parseLocationCities(partner.serviceAreas)[0] ??
+    null
 
   const seeds: string[] = []
   for (const service of services) {
-    if (primaryCity) {
-      seeds.push(`${service} in ${primaryCity}`)
+    if (city) {
+      seeds.push(`${service} in ${city}`)
       seeds.push(`${service} near me`)
     } else {
       seeds.push(service)
@@ -260,8 +306,8 @@ export default function KeywordResearchPage() {
   }, [partner?.id])
 
   const defaultSeeds = useMemo(
-    () => (partner ? generateDefaultSeeds(partner) : []),
-    [partner],
+    () => (partner ? generateDefaultSeeds(partner, selectedLocation) : []),
+    [partner, selectedLocation],
   )
 
   const initialLocationQuery = useMemo(
