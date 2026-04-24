@@ -3,30 +3,68 @@ import { z } from "zod"
 import {
   bulkKeywordDifficulty,
   DataForSEOError,
+  DFS_LABS_COUNTRY_CODE_US,
   keywordIdeas,
   keywordSuggestions,
   searchVolume,
 } from "@/lib/dataforseo"
+import type { DfsLocation } from "@/lib/types"
 
 export const dynamic = "force-dynamic"
 
-const seedBase = z.object({
-  seed: z.string().trim().min(1),
-  location: z.string().trim().min(1),
-  limit: z.number().int().positive().max(1000).optional(),
-})
-
-const keywordsBase = z.object({
-  keywords: z.array(z.string().trim().min(1)).min(1).max(1000),
-  location: z.string().trim().min(1),
-})
+// Prefer `locationCode` (numeric DFS location ID) — names are fragile across
+// DFS's Labs vs Google Ads taxonomies. `location` (string name) is still
+// accepted for quick one-off testing and backwards compatibility.
+const locationRefine = (
+  v: { location?: string; locationCode?: number },
+): boolean => Boolean(v.location) || Boolean(v.locationCode)
+const locationError = { message: "Provide locationCode (preferred) or location" }
 
 const bodySchema = z.discriminatedUnion("mode", [
-  seedBase.extend({ mode: z.literal("ideas") }),
-  seedBase.extend({ mode: z.literal("suggestions") }),
-  keywordsBase.extend({ mode: z.literal("volume") }),
-  keywordsBase.extend({ mode: z.literal("difficulty") }),
+  z
+    .object({
+      mode: z.literal("ideas"),
+      seed: z.string().trim().min(1),
+      limit: z.number().int().positive().max(1000).optional(),
+      location: z.string().trim().min(1).optional(),
+      locationCode: z.number().int().positive().optional(),
+    })
+    .refine(locationRefine, locationError),
+  z
+    .object({
+      mode: z.literal("suggestions"),
+      seed: z.string().trim().min(1),
+      limit: z.number().int().positive().max(1000).optional(),
+      location: z.string().trim().min(1).optional(),
+      locationCode: z.number().int().positive().optional(),
+    })
+    .refine(locationRefine, locationError),
+  z
+    .object({
+      mode: z.literal("volume"),
+      keywords: z.array(z.string().trim().min(1)).min(1).max(1000),
+      location: z.string().trim().min(1).optional(),
+      locationCode: z.number().int().positive().optional(),
+    })
+    .refine(locationRefine, locationError),
+  z
+    .object({
+      mode: z.literal("difficulty"),
+      keywords: z.array(z.string().trim().min(1)).min(1).max(1000),
+      location: z.string().trim().min(1).optional(),
+      locationCode: z.number().int().positive().optional(),
+    })
+    .refine(locationRefine, locationError),
 ])
+
+function buildLocation(
+  code: number | undefined,
+  name: string | undefined,
+): DfsLocation {
+  if (code != null) return { code }
+  if (name) return { name }
+  throw new Error("locationCode or location is required")
+}
 
 function errorResponse(error: unknown) {
   if (error instanceof DataForSEOError) {
@@ -56,34 +94,36 @@ export async function POST(request: Request) {
     )
   }
 
-  const { location } = parsed.data
-  const locationParam = { name: location }
+  const data = parsed.data
+
+  // DFS Labs' keyword_ideas / keyword_suggestions / bulk_keyword_difficulty
+  // only accept country-level location codes. We ignore the user's selection
+  // for these and always use the US country code. The user's city selection
+  // is used only by `volume` (Google Ads search_volume), which does support
+  // cities and is how we get city-level volume data for each keyword.
+  const labsLocation: DfsLocation = { code: DFS_LABS_COUNTRY_CODE_US }
+  const userLocation = buildLocation(data.locationCode, data.location)
 
   try {
-    switch (parsed.data.mode) {
+    switch (data.mode) {
       case "ideas": {
-        const results = await keywordIdeas(parsed.data.seed, locationParam, {
-          limit: parsed.data.limit,
+        const results = await keywordIdeas(data.seed, labsLocation, {
+          limit: data.limit,
         })
         return NextResponse.json({ results })
       }
       case "suggestions": {
-        const results = await keywordSuggestions(
-          parsed.data.seed,
-          locationParam,
-          { limit: parsed.data.limit },
-        )
+        const results = await keywordSuggestions(data.seed, labsLocation, {
+          limit: data.limit,
+        })
         return NextResponse.json({ results })
       }
       case "volume": {
-        const results = await searchVolume(parsed.data.keywords, locationParam)
+        const results = await searchVolume(data.keywords, userLocation)
         return NextResponse.json({ results })
       }
       case "difficulty": {
-        const results = await bulkKeywordDifficulty(
-          parsed.data.keywords,
-          locationParam,
-        )
+        const results = await bulkKeywordDifficulty(data.keywords, labsLocation)
         return NextResponse.json({ results })
       }
     }

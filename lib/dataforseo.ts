@@ -3,6 +3,7 @@ import { z } from "zod"
 import { requireEnv } from "@/lib/env"
 import type {
   CompetitionLevel,
+  DfsLabsLocation,
   DfsLocation,
   KeywordResult,
 } from "@/lib/types"
@@ -10,6 +11,7 @@ import type {
 const DFS_BASE = "https://api.dataforseo.com"
 const DEFAULT_LIMIT = 50
 const DEFAULT_LANGUAGE = "English"
+const DEFAULT_LANGUAGE_CODE = "en"
 const RATE_LIMIT_RETRY_MS = 2000
 
 export class DataForSEOError extends Error {
@@ -59,10 +61,20 @@ function authHeader(): string {
   return `Basic ${token}`
 }
 
-function locationParams(location: DfsLocation): Record<string, string | number> {
-  return "code" in location
-    ? { location_code: location.code }
-    : { location_name: location.name }
+// DataForSEO requires *paired* location + language fields:
+//   - `location_code` must be paired with `language_code` (e.g. 2840 + "en")
+//   - `location_name` must be paired with `language_name` (e.g. "United
+//     States" + "English")
+// Mixing them (location_code + language_name) yields a cryptic 40501
+// "Invalid Field: 'location_code'" response — so we always emit the pair
+// together and remove the standalone `language_name` from the request body.
+function locationAndLanguageParams(
+  location: DfsLocation,
+): Record<string, string | number> {
+  if ("code" in location) {
+    return { location_code: location.code, language_code: DEFAULT_LANGUAGE_CODE }
+  }
+  return { location_name: location.name, language_name: DEFAULT_LANGUAGE }
 }
 
 export async function dfsRequest<T = DfsEnvelope>(
@@ -231,8 +243,7 @@ export async function keywordIdeas(
     [
       {
         keywords: [seed],
-        ...locationParams(location),
-        language_name: DEFAULT_LANGUAGE,
+        ...locationAndLanguageParams(location),
         limit: opts.limit ?? DEFAULT_LIMIT,
       },
     ],
@@ -250,8 +261,7 @@ export async function keywordSuggestions(
     [
       {
         keyword: seed,
-        ...locationParams(location),
-        language_name: DEFAULT_LANGUAGE,
+        ...locationAndLanguageParams(location),
         limit: opts.limit ?? DEFAULT_LIMIT,
       },
     ],
@@ -269,8 +279,7 @@ export async function bulkKeywordDifficulty(
     [
       {
         keywords,
-        ...locationParams(location),
-        language_name: DEFAULT_LANGUAGE,
+        ...locationAndLanguageParams(location),
       },
     ],
   )
@@ -287,10 +296,117 @@ export async function searchVolume(
     [
       {
         keywords,
-        ...locationParams(location),
-        language_name: DEFAULT_LANGUAGE,
+        ...locationAndLanguageParams(location),
       },
     ],
   )
   return extractGoogleAdsItems(envelope).map(normalizeGoogleAdsItem)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Location taxonomy.
+//
+// DataForSEO Labs' keyword_ideas / keyword_suggestions / bulk_keyword_difficulty
+// endpoints are picky about `location_name` (a lot of cities that exist in the
+// Google Ads location list are rejected at the Labs layer with status 40501).
+// The reliable path is `location_code` — numeric IDs that map 1:1 to locations
+// in DFS's Labs taxonomy. This helper fetches the full list once per process
+// so the UI can offer a searchable picker and callers can pass codes.
+
+const labsLocationItemSchema = z
+  .object({
+    location_code: z.number(),
+    location_name: z.string(),
+    location_code_parent: z.number().nullable().optional(),
+    country_iso_code: z.string().nullable().optional(),
+    location_type: z.string(),
+  })
+  .passthrough()
+
+let cachedLocations: DfsLabsLocation[] | null = null
+let cachedLocationsFetchedAt = 0
+let cachedLocationsCountry = ""
+const LOCATIONS_CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24h
+
+// Hardcoded country code for all Labs keyword_ideas / keyword_suggestions /
+// bulk_keyword_difficulty calls. DataForSEO Labs' keyword research endpoints
+// only accept country-level location codes (their
+// /v3/dataforseo_labs/locations_and_languages list contains no states/cities —
+// verified against live API 2026-04-24). Local-volume data comes from a
+// separate Google Ads search_volume enrichment pass that DOES support cities.
+export const DFS_LABS_COUNTRY_CODE_US = 2840
+
+/**
+ * Fetch DataForSEO's Google Ads location list for a country. These are
+ * Google Ads codes and work with /v3/keywords_data/google_ads/search_volume
+ * (the endpoint we use for city-level volume data). They do NOT work with
+ * Labs endpoints — Labs has a separate taxonomy that's country-only.
+ *
+ * Cached in-process for 24h. Response for US is large (~100k rows);
+ * subsequent calls return cache.
+ */
+export async function listLabsLocations(
+  countryIsoCode = "US",
+): Promise<DfsLabsLocation[]> {
+  const country = countryIsoCode.toUpperCase()
+  const now = Date.now()
+  if (
+    cachedLocations &&
+    cachedLocationsCountry === country &&
+    now - cachedLocationsFetchedAt < LOCATIONS_CACHE_TTL_MS
+  ) {
+    return cachedLocations
+  }
+
+  const url = `${DFS_BASE}/v3/keywords_data/google_ads/locations/${country}`
+  const response = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: authHeader() },
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new DataForSEOError(
+      `DataForSEO HTTP ${response.status} fetching locations for ${country}: ${text.slice(0, 500)}`,
+      { status: response.status },
+    )
+  }
+
+  const json: unknown = await response.json()
+  const parsed = envelopeSchema.safeParse(json)
+  if (!parsed.success) {
+    throw new DataForSEOError(
+      `DataForSEO locations response did not match expected shape: ${parsed.error.message}`,
+    )
+  }
+  const envelope = parsed.data
+  if (envelope.status_code !== 20000) {
+    throw new DataForSEOError(
+      `DataForSEO locations returned status ${envelope.status_code}: ${envelope.status_message}`,
+      { dfsStatus: envelope.status_code },
+    )
+  }
+
+  const firstTask = envelope.tasks[0]
+  const rawItems = firstTask?.result ?? []
+  const locations: DfsLabsLocation[] = []
+  for (const raw of rawItems) {
+    const item = labsLocationItemSchema.safeParse(raw)
+    if (!item.success) continue
+    locations.push({
+      location_code: item.data.location_code,
+      location_name: item.data.location_name,
+      location_code_parent: item.data.location_code_parent ?? null,
+      country_iso_code: item.data.country_iso_code ?? null,
+      location_type: item.data.location_type,
+    })
+  }
+
+  cachedLocations = locations
+  cachedLocationsFetchedAt = now
+  cachedLocationsCountry = country
+  console.log(
+    `[dataforseo] cached ${locations.length} Google Ads locations for ${country}`,
+  )
+  return locations
 }
