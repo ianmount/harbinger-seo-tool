@@ -86,25 +86,33 @@ const claudeResponseSchema = z.object({
 
 type ClaudeKeywordTuple = z.infer<typeof claudeKeywordTupleSchema>
 
-// Token-budget guard. 300 keywords × ~15 compact-output tokens ≈ 4.5k
-// output tokens, well inside CLAUDE_MAX_TOKENS. The prompt itself caps
-// around 15k input tokens at this count. The caller can tune
-// `maxKeywords` in the request body; MAX_KEYWORDS_HARD_LIMIT is the
-// absolute ceiling past which we start risking truncation even with
-// the compact-tuple output format.
+// Token budgets.
+// - MAX_INPUT_KEYWORDS: hard cap on how many candidates we show Claude. At
+//   ~30 prompt tokens per keyword (number, volume, difficulty, competition),
+//   800 candidates is ~24k input tokens — comfortable in Opus 4.7's context.
+// - DEFAULT_MAX_KEYWORDS: how many Claude selects and returns when the
+//   caller doesn't specify.
+// - MAX_OUTPUT_KEYWORDS: upper bound on the caller's request. Past this the
+//   compact-tuple output risks truncating against CLAUDE_MAX_TOKENS (at ~15
+//   output tokens per tuple, 500 tuples ≈ 7.5k output tokens).
+const MAX_INPUT_KEYWORDS = 800
 const DEFAULT_MAX_KEYWORDS = 300
-const MAX_KEYWORDS_HARD_LIMIT = 500
+const MAX_OUTPUT_KEYWORDS = 500
 const CLAUDE_MAX_TOKENS = 32000
 
 const SYSTEM_PROMPT =
-  "You are an SEO strategist grouping keywords into topical clusters for a local service business. Be decisive: every keyword gets a cluster, a fit score, an intent, and a recommendation. Reply with a single JSON object — no markdown fences, no commentary."
+  "You are an SEO strategist for a local service business. You see a pool of candidate keywords with their volume and difficulty; your job is to select the ones that will actually drive business value and group them into topical clusters. Be ruthless: off-topic, unrealistic-difficulty, and zero-volume keywords must be excluded from the output entirely — do not lower their fit score and keep them. Reply with a single JSON object — no markdown fences, no commentary."
 
 function formatNumber(n: number | undefined): string {
   if (n == null) return "—"
   return n.toLocaleString("en-US", { maximumFractionDigits: 2 })
 }
 
-function buildPrompt(body: ParsedBody, keywords: KeywordResult[]): string {
+function buildPrompt(
+  body: ParsedBody,
+  keywords: KeywordResult[],
+  targetCount: number,
+): string {
   const { partner, gscHistorical } = body
 
   const topHistorical = gscHistorical
@@ -139,7 +147,9 @@ function buildPrompt(body: ParsedBody, keywords: KeywordResult[]): string {
   }
 
   lines.push("")
-  lines.push(`# Keywords to classify (${keywords.length})`)
+  lines.push(
+    `# Candidate keywords (${keywords.length} total — you select the best ${targetCount})`,
+  )
   lines.push(`| # | Keyword | Volume | Difficulty | Competition |`)
   lines.push(`|---:|---|---:|---:|---:|`)
   keywords.forEach((kw, i) => {
@@ -149,33 +159,43 @@ function buildPrompt(body: ParsedBody, keywords: KeywordResult[]): string {
   })
 
   lines.push("")
-  lines.push(`# Instructions`)
+  lines.push(`# Task`)
   lines.push(
-    `Group every keyword above into topical clusters appropriate for a local service business like this partner.`,
+    `Select **up to ${targetCount}** keywords from the candidate pool above — the ones most worth this partner's time and budget — and group them into topical clusters. Fewer than ${targetCount} is fine if the pool genuinely runs out of good candidates; do NOT pad with weak keywords to hit the number.`,
+  )
+  lines.push("")
+  lines.push(`## Selection criteria (in priority order)`)
+  lines.push(
+    `1. **Relevance** — the keyword must clearly match the partner's services or an adjacent service a customer would expect. A dumpster-rental company should not surface keywords about recycling tips or commercial real-estate unless they actually serve that query. Drop off-topic keywords; do not keep them with a low fit score.`,
   )
   lines.push(
-    `Prefer 4–10 clusters total. Cluster names should be short (2–4 words), human-readable, and reflect the topic (e.g. "Emergency Repair", "Commercial Services", "Pricing & Estimates").`,
+    `2. **Realistic difficulty** — a local service business at a normal scale cannot realistically rank for national broad-head terms with very high keyword_difficulty. Weight long-tail / mid-difficulty queries more favorably.`,
   )
   lines.push(
-    `For each keyword, assign:`,
+    `3. **Meaningful volume** — zero-volume keywords rarely justify content. Prefer keywords with at least some measurable search_volume. That said, a highly-relevant long-tail term with modest volume beats a high-volume off-topic term.`,
   )
   lines.push(
-    `- cluster: name of one of the clusters you created (must be consistent across keywords in the same cluster)`,
+    `4. **Intent** — transactional and commercial keywords typically drive conversions for a service business. Informational keywords can still qualify when they support the funnel (how-to, cost, comparison), but hold them to a higher relevance bar.`,
+  )
+  lines.push("")
+  lines.push(`## Output fields per selected keyword`)
+  lines.push(
+    `- **cluster**: a short (2–4 word), human-readable topic label (e.g. "Emergency Repair", "Commercial Services", "Pricing & Estimates"). Prefer 4–10 clusters total across your selection; use the same cluster name consistently for keywords in the same group.`,
   )
   lines.push(
-    `- fitScore (0-100): how good a fit this keyword is for this partner, considering volume, difficulty, commercial intent, and alignment with the partner's services. Reserve 80+ for keywords that are clearly worth pursuing; 40-79 for worth monitoring; below 40 for poor fit.`,
+    `- **fitScore (0-100)**: how strongly you'd recommend this keyword for this partner, combining all four criteria above. Since the output is pre-filtered to your top picks, expect most scores to land 50–90. Reserve 85+ for the clear winners.`,
   )
   lines.push(
-    `- intent: one of "informational", "commercial", "transactional", "navigational"`,
+    `- **intent**: one of "informational", "commercial", "transactional", "navigational".`,
   )
   lines.push(
-    `- recommendation: "target" if this keyword should be actively pursued (good fit + realistic difficulty for a local business), "monitor" if it's worth tracking but not the immediate priority, "skip" if the partner shouldn't invest in it (off-topic, unrealistic difficulty, or no meaningful volume)`,
+    `- **recommendation**: "target" = actively pursue now, "monitor" = track but not priority, "skip" = (should be rare in this output since we already filtered; use only if on reflection a selected keyword turns out weak).`,
   )
 
   lines.push("")
   lines.push(`# Output format`)
   lines.push(
-    `Output exactly one JSON object. No prose, no markdown fences. Each keyword is a 5-element array in this exact order: [keyword (verbatim from input), cluster name, fitScore 0-100, intent, recommendation]. Intent is one of "informational"/"commercial"/"transactional"/"navigational". Recommendation is one of "target"/"monitor"/"skip".`,
+    `Output exactly one JSON object. No prose, no markdown fences. Each selected keyword is a 5-element array in this exact order: [keyword (verbatim from input), cluster name, fitScore 0-100, intent, recommendation]. Intent is one of "informational"/"commercial"/"transactional"/"navigational". Recommendation is one of "target"/"monitor"/"skip".`,
   )
   lines.push("```")
   lines.push(`{`)
@@ -190,7 +210,7 @@ function buildPrompt(body: ParsedBody, keywords: KeywordResult[]): string {
   lines.push(`}`)
   lines.push("```")
   lines.push(
-    `Every one of the ${keywords.length} input keywords must appear exactly once as the first element of a tuple. Keep strings on one line; do not insert line breaks inside a tuple.`,
+    `The "keyword" field of each tuple must match a candidate from the pool above verbatim. Do NOT invent keywords. Return at most ${targetCount} tuples. Sort them by descending fitScore (best picks first).`,
   )
 
   return lines.join("\n")
@@ -367,12 +387,18 @@ export async function POST(request: Request) {
     )
   }
 
+  // How many keywords to surface (Claude's output target).
   const requestedMax = parsed.data.maxKeywords ?? DEFAULT_MAX_KEYWORDS
-  const effectiveMax = Math.min(requestedMax, MAX_KEYWORDS_HARD_LIMIT)
-  const keywords = deduped.slice(0, effectiveMax)
-  const truncated = deduped.length - keywords.length
+  const targetCount = Math.min(requestedMax, MAX_OUTPUT_KEYWORDS)
 
-  const prompt = buildPrompt(parsed.data, keywords)
+  // Full candidate pool for Claude to choose from. We intentionally show
+  // Claude *more* than targetCount so selection is by fit-to-partner rather
+  // than upstream ordering. Only cap at MAX_INPUT_KEYWORDS to keep the
+  // prompt from exceeding a reasonable input-token budget.
+  const candidates = deduped.slice(0, MAX_INPUT_KEYWORDS)
+  const candidatesDropped = deduped.length - candidates.length
+
+  const prompt = buildPrompt(parsed.data, candidates, targetCount)
   try {
     let scored: z.infer<typeof claudeResponseSchema>
     try {
@@ -386,8 +412,24 @@ export async function POST(request: Request) {
       scored = await callClaudeForKeywords(retryPrompt)
     }
 
-    const clusters = buildClusters(keywords, scored)
-    return NextResponse.json({ clusters, truncated })
+    // Defensive clamp in case Claude exceeded the target count. buildClusters
+    // joins against the candidates list, so any scored keyword that isn't in
+    // the pool is already dropped there.
+    if (scored.keywords.length > targetCount) {
+      scored = { keywords: scored.keywords.slice(0, targetCount) }
+    }
+
+    const clusters = buildClusters(candidates, scored)
+    return NextResponse.json({
+      clusters,
+      // `truncated` now means candidates we never showed Claude at all
+      // (input pool was larger than MAX_INPUT_KEYWORDS); separately report
+      // how many candidates Claude chose to skip as a relevance signal.
+      truncated: candidatesDropped,
+      candidatesShown: candidates.length,
+      targetCount,
+      selected: scored.keywords.length,
+    })
   } catch (error: unknown) {
     console.error("[api/claude/keywords] failed:", error)
     if (error instanceof ClaudeApiError) {

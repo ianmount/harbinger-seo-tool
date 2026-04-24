@@ -71,7 +71,7 @@ interface SortState {
 const FILTER_ALL = "__all__"
 const MAX_SEEDS = 6
 const DEFAULT_MAX_KEYWORDS = 300
-// Keep in sync with MAX_KEYWORDS_HARD_LIMIT in /api/claude/keywords/route.ts.
+// Keep in sync with MAX_OUTPUT_KEYWORDS in /api/claude/keywords/route.ts.
 // Past this the compact-tuple output risks truncating against Claude's
 // max_tokens ceiling.
 const MAX_KEYWORDS_CEILING = 500
@@ -113,6 +113,30 @@ function cityFromLocation(loc: DfsLabsLocation | null): string | null {
   return first && first.length > 0 ? first : null
 }
 
+// Words that commonly appear as a section header in the Services field
+// (e.g. "**Services:**", "Our Offerings:") and survive markdown stripping.
+// Treat them as noise so we don't ship seeds like "Services in Oklahoma City".
+const SERVICE_HEADER_NOISE = new Set([
+  "service",
+  "services",
+  "offering",
+  "offerings",
+  "product",
+  "products",
+  "solution",
+  "solutions",
+  "our services",
+  "our offerings",
+  "our products",
+  "our solutions",
+  "what we do",
+  "what we offer",
+  "main services",
+  "key services",
+  "core services",
+  "primary services",
+])
+
 function generateDefaultSeeds(
   partner: Partner,
   selectedLocation: DfsLabsLocation | null,
@@ -121,10 +145,12 @@ function generateDefaultSeeds(
     .split(/[\n,;]/)
     .map(cleanServiceName)
     .filter((s) => {
-      // Sanity-check a "service name": short-ish, not a URL, not a sentence
+      // Sanity-check a "service name": short-ish, not a URL, not a sentence,
+      // and not a generic section header that slipped through markdown cleanup.
       if (s.length < 2 || s.length > 60) return false
       if (/^https?:\/\//i.test(s)) return false
       if (s.split(/\s+/).length > 8) return false
+      if (SERVICE_HEADER_NOISE.has(s.toLowerCase())) return false
       return true
     })
     .slice(0, 3)
@@ -714,10 +740,12 @@ export default function KeywordResearchPage() {
                 className="h-9 w-[140px] rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
               />
               <p className="text-xs text-muted-foreground">
-                How many keywords to send to Claude for clustering and scoring.
-                Every scored keyword appears in the results table. Default{" "}
-                {DEFAULT_MAX_KEYWORDS}, hard-capped at {MAX_KEYWORDS_CEILING} to
-                keep Claude&apos;s output within token limits.
+                How many keywords Claude will surface in the results table.
+                Claude sees the full candidate pool from DataForSEO and picks
+                the best ones by relevance, volume, difficulty, and intent —
+                it may return fewer if the pool runs out of good fits.
+                Default {DEFAULT_MAX_KEYWORDS}, hard-capped at{" "}
+                {MAX_KEYWORDS_CEILING}.
               </p>
             </div>
 
