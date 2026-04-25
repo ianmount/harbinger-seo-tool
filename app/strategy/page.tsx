@@ -3,6 +3,7 @@
 import { useCallback, useMemo, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import { CheckIcon, CopyIcon, DownloadIcon, UploadIcon } from "lucide-react"
+import { PageHeader } from "@/components/PageHeader"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
@@ -418,14 +419,21 @@ export default function StrategyPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Strategy</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Turn an approved keyword list into a 6-month SEO strategy document —
-          page roadmap, FAQ banks, internal linking plan, and month-by-month
-          priorities.
-        </p>
-      </div>
+      <PageHeader
+        eyebrow="Workflow / Strategy"
+        title="Strategy"
+        tail="— turn keywords into a plan."
+        subtitle={
+          <>
+            Turn an approved keyword list into a{" "}
+            <b className="font-sans font-extrabold not-italic text-foreground">
+              6&#8209;month
+            </b>{" "}
+            SEO strategy document — page roadmap, FAQ banks, internal linking
+            plan, and month&#8209;by&#8209;month priorities.
+          </>
+        }
+      />
 
       {partnerLoading ? (
         <p className="text-sm text-muted-foreground">Loading partner…</p>

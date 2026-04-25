@@ -5,6 +5,7 @@ import type { DateRange } from "react-day-picker"
 import { marked } from "marked"
 import ReactMarkdown from "react-markdown"
 import { CalendarIcon, DownloadIcon } from "lucide-react"
+import { PageHeader } from "@/components/PageHeader"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Calendar } from "@/components/ui/calendar"
@@ -507,13 +508,20 @@ export default function ReportingPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Reporting</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Generate a monthly performance narrative from Google Search Console
-          data for the selected partner.
-        </p>
-      </div>
+      <PageHeader
+        eyebrow="Workflow / Reporting"
+        title="Reporting"
+        tail="— the monthly narrative."
+        subtitle={
+          <>
+            Generate a monthly performance narrative from{" "}
+            <b className="font-sans font-extrabold not-italic text-foreground">
+              Google Search Console
+            </b>{" "}
+            data for the selected partner.
+          </>
+        }
+      />
 
       {partnerLoading ? (
         <p className="text-sm text-muted-foreground">Loading partner…</p>
