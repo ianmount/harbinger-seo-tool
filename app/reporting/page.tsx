@@ -376,7 +376,7 @@ export default function ReportingPage() {
       if (!response.ok) {
         if (body.code === "NO_REFRESH_TOKEN") {
           throw new Error(
-            "GSC is not connected. Visit /api/gsc/auth to complete the OAuth flow and paste the refresh token into Vercel as GOOGLE_REFRESH_TOKEN.",
+            "GSC is not connected. Visit /api/gsc/auth to complete the OAuth flow and paste the refresh token into Vercel as GOOGLE_REFRESH_TOKEN_PARTNERS.",
           )
         }
         throw new Error(body.error ?? `GSC request failed (${response.status})`)

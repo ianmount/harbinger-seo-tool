@@ -800,6 +800,145 @@ const referringDomainItemSchema = z
  *
  * Returns a BacklinkReport by combining the summary data + sampled examples.
  */
+// ────────────────────────────────────────────────────────────────────────────
+// Competitive Analysis tab — ranked-keyword position counts + indexed-page
+// estimate. Used by /api/comp-analysis/run.
+
+const rankedKeywordPositionItemSchema = z
+  .object({
+    ranked_serp_element: z
+      .object({
+        serp_item: z
+          .object({
+            rank_absolute: z.number().nullable().optional(),
+            rank_group: z.number().nullable().optional(),
+          })
+          .passthrough()
+          .nullable()
+          .optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+  })
+  .passthrough()
+
+export interface RankedPositionCounts {
+  top3: number
+  top10: number
+  top20: number
+  top100: number
+  /** Total keywords sampled (capped at MAX). */
+  sampled: number
+  /** True when the cap was hit and counts are an underestimate. */
+  truncated: boolean
+}
+
+const RANKED_PAGE_SIZE = 1000
+const RANKED_MAX_KEYWORDS = 10_000
+
+/**
+ * Pull the full set of keywords a domain ranks for in a given location and
+ * count how many fall into the Top 3 / 10 / 20 / 100 buckets.
+ *
+ * Pages until total_count is reached, capped at RANKED_MAX_KEYWORDS to avoid
+ * runaway calls on enormous domains. Logs a warning when capped — the
+ * resulting counts are then a lower bound. DataForSEO Labs rejects city-level
+ * location names with status 40501; pass state-level (e.g. "Florida,United
+ * States") or a country code (2840) for reliable results.
+ */
+export async function rankedKeywordPositionCounts(
+  domain: string,
+  location: DfsLocation,
+): Promise<RankedPositionCounts> {
+  const target = stripDomain(domain)
+  const counts = { top3: 0, top10: 0, top20: 0, top100: 0 }
+  let sampled = 0
+  let offset = 0
+  let truncated = false
+
+  while (sampled < RANKED_MAX_KEYWORDS) {
+    const limit = Math.min(RANKED_PAGE_SIZE, RANKED_MAX_KEYWORDS - sampled)
+    const envelope = await dfsRequest(
+      "/v3/dataforseo_labs/google/ranked_keywords/live",
+      [
+        {
+          target,
+          ...locationAndLanguageParams(location),
+          limit,
+          offset,
+          ignore_synonyms: true,
+          load_rank_absolute: true,
+        },
+      ],
+    )
+    const firstTask = envelope.tasks[0]
+    const result = firstTask?.result?.[0] as
+      | { items?: unknown[]; total_count?: number }
+      | undefined
+    const items = result?.items ?? []
+    if (items.length === 0) break
+
+    for (const raw of items) {
+      const parsed = rankedKeywordPositionItemSchema.safeParse(raw)
+      if (!parsed.success) continue
+      const serp = parsed.data.ranked_serp_element?.serp_item
+      const position = serp?.rank_absolute ?? serp?.rank_group ?? 0
+      if (!position) continue
+      sampled++
+      if (position <= 3) counts.top3++
+      if (position <= 10) counts.top10++
+      if (position <= 20) counts.top20++
+      if (position <= 100) counts.top100++
+    }
+
+    const total = result?.total_count ?? sampled
+    if (sampled >= total) break
+    if (sampled >= RANKED_MAX_KEYWORDS) {
+      truncated = true
+      console.warn(
+        `[dataforseo] rankedKeywordPositionCounts capped at ${RANKED_MAX_KEYWORDS} for ${target} (total=${total})`,
+      )
+      break
+    }
+    offset += items.length
+    if (items.length < limit) break
+  }
+
+  return { ...counts, sampled, truncated }
+}
+
+/**
+ * site:<domain> SERP query — returns Google's claimed indexed-page count.
+ * Approximate; Google's site: count is well-known to be inaccurate, so the
+ * Comp Analysis CSV header notes this in a footnote.
+ */
+export async function indexedPageCount(domain: string): Promise<number> {
+  const target = stripDomain(domain)
+  const envelope = await dfsRequest(
+    "/v3/serp/google/organic/live/advanced",
+    [
+      {
+        keyword: `site:${target}`,
+        location_code: DFS_LABS_COUNTRY_CODE_US,
+        language_code: DEFAULT_LANGUAGE_CODE,
+        depth: 1,
+      },
+    ],
+  )
+  const firstTask = envelope.tasks[0]
+  const first = firstTask?.result?.[0] as
+    | { se_results_count?: number; total_count?: number }
+    | undefined
+  return first?.se_results_count ?? first?.total_count ?? 0
+}
+
+/** Backlinks summary count of referring domains for a target. */
+export async function referringDomainCount(domain: string): Promise<number> {
+  const summary = await backlinksSummary(domain)
+  return summary.referringDomains
+}
+
 export async function referringDomainsWithSpamScore(
   domain: string,
   opts: { limit?: number } = {},

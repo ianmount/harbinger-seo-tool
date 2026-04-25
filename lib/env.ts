@@ -14,7 +14,14 @@ const envSchema = z.object({
   DATAFORSEO_PASSWORD: optionalString,
   GOOGLE_CLIENT_ID: optionalString,
   GOOGLE_CLIENT_SECRET: optionalString,
-  GOOGLE_REFRESH_TOKEN: optionalString,
+  // Two-account Google OAuth setup. The partners token drives the existing
+  // partner pipeline (Reporting, Keyword Research, etc.); the assessments
+  // token drives the Assessment workflow (Audit + Competitive Analysis).
+  // Same OAuth client, different refresh tokens.
+  GOOGLE_REFRESH_TOKEN_PARTNERS: optionalString,
+  GOOGLE_REFRESH_TOKEN_ASSESSMENTS: optionalString,
+  GOOGLE_PARTNERS_EMAIL: optionalString,
+  GOOGLE_ASSESSMENTS_EMAIL: optionalString,
   AIRTABLE_PAT: optionalString,
   AIRTABLE_BASE_ID: optionalString,
   AIRTABLE_PARTNERS_TABLE: optionalString,

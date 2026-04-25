@@ -39,7 +39,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const rows = await getQueries(parsed.data)
+    const rows = await getQueries({ account: "partners", ...parsed.data })
     return NextResponse.json({ rows })
   } catch (error: unknown) {
     console.error("[api/gsc/queries] failed:", error)

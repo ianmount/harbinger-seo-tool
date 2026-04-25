@@ -125,3 +125,47 @@ export function parseLocationCities(raw: string): string[] {
   const cityPart = commaIdx > 0 ? line.slice(0, commaIdx) : line
   return splitCities(cityPart)
 }
+
+/**
+ * Parse one user-entered location line ("City, ST" or "City, FullState")
+ * into { city, state }. State is normalized to its full name (e.g.
+ * "FL" → "Florida"). Returns null if the line can't be parsed.
+ *
+ * Used by the Assessment Audit and Comp Analysis tabs to normalize the
+ * "Target locations" textarea into structured records.
+ */
+export function parseTargetLocation(
+  raw: string,
+): { city: string; state: string } | null {
+  const line = raw.trim()
+  if (!line) return null
+  const m = line.match(/^([^,]+?)\s*,\s*([A-Za-z. ]+)$/)
+  if (!m) return null
+  const city = m[1].trim()
+  const stateRaw = m[2].trim().replace(/\.$/, "")
+  if (!city || !stateRaw) return null
+  const upper = stateRaw.toUpperCase()
+  if (US_STATE_ABBREV[upper]) {
+    return { city, state: US_STATE_ABBREV[upper] }
+  }
+  if (US_STATE_FROM_NAME.has(stateRaw.toLowerCase())) {
+    return {
+      city,
+      state: US_STATE_FROM_NAME.get(stateRaw.toLowerCase()) ?? stateRaw,
+    }
+  }
+  return null
+}
+
+/**
+ * Parse a multi-line textarea of target locations. Skips blank lines and
+ * lines that can't be parsed.
+ */
+export function parseTargetLocationLines(
+  raw: string,
+): Array<{ city: string; state: string }> {
+  return raw
+    .split("\n")
+    .map((line) => parseTargetLocation(line))
+    .filter((x): x is { city: string; state: string } => x !== null)
+}

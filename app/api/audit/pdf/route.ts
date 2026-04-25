@@ -235,7 +235,7 @@ function partnerToProspect(partner: Partner): Prospect {
 
 async function autoResolveGscSiteUrl(partner: Partner): Promise<string | null> {
   try {
-    const sites = await listSites()
+    const sites = await listSites("assessments")
     const matches = findGscSiteCandidates(partner.website, sites)
     return matches[0]?.siteUrl ?? null
   } catch (err) {
@@ -253,7 +253,7 @@ async function autoResolveGa4PropertyId(
     return raw.startsWith("properties/") ? raw : `properties/${raw}`
   }
   try {
-    const props = await listProperties()
+    const props = await listProperties({ account: "assessments" })
     const matches = findGa4PropertyCandidates(partner.website, props)
     return matches[0]?.propertyId ?? null
   } catch (err) {
@@ -283,29 +283,34 @@ async function buildGscSlice(siteUrl: string): Promise<AuditGscSlice | null> {
       longDaily,
     ] = await Promise.all([
       getTopQueriesPaginated({
+        account: "assessments",
         siteUrl,
         startDate: longStart,
         endDate: longEnd,
         maxRows: 25_000,
       }),
       getTopPagesPaginated({
+        account: "assessments",
         siteUrl,
         startDate: longStart,
         endDate: longEnd,
         maxRows: 25_000,
       }),
       getTopQueriesPaginated({
+        account: "assessments",
         siteUrl,
         startDate: recentStart,
         endDate: recentEnd,
         maxRows: 25_000,
       }),
       getDailyClicks({
+        account: "assessments",
         siteUrl,
         startDate: recentStart,
         endDate: recentEnd,
       }),
       getDailyClicks({
+        account: "assessments",
         siteUrl,
         startDate: longStart,
         endDate: longEnd,
@@ -375,21 +380,25 @@ async function buildGa4Slice(propertyId: string): Promise<AuditGa4Slice | null> 
     const [currentYear, priorYear, monthlyOrganic, channelBreakdown] =
       await Promise.all([
         getSeoReport({
+          account: "assessments",
           propertyId,
           startDate: yearStart,
           endDate: yearEnd,
         }),
         getSeoReport({
+          account: "assessments",
           propertyId,
           startDate: priorYearStart,
           endDate: priorYearEnd,
         }).catch(() => undefined),
         getMonthlyOrganic({
+          account: "assessments",
           propertyId,
           startDate: yearStart,
           endDate: yearEnd,
         }),
         getChannelBreakdown({
+          account: "assessments",
           propertyId,
           startDate: yearStart,
           endDate: yearEnd,

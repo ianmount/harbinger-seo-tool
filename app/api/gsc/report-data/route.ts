@@ -46,9 +46,9 @@ export async function POST(request: Request) {
 
   try {
     const [topQueries, topPages, dailyClicks] = await Promise.all([
-      getTopQueries({ siteUrl, startDate, endDate, rowLimit: rowLimit ?? 100 }),
-      getTopPages({ siteUrl, startDate, endDate, rowLimit: rowLimit ?? 100 }),
-      getDailyClicks({ siteUrl, startDate, endDate }),
+      getTopQueries({ account: "partners", siteUrl, startDate, endDate, rowLimit: rowLimit ?? 100 }),
+      getTopPages({ account: "partners", siteUrl, startDate, endDate, rowLimit: rowLimit ?? 100 }),
+      getDailyClicks({ account: "partners", siteUrl, startDate, endDate }),
     ])
     return NextResponse.json({ topQueries, topPages, dailyClicks })
   } catch (error: unknown) {

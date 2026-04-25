@@ -1,8 +1,12 @@
 import "server-only"
 import { BetaAnalyticsDataClient } from "@google-analytics/data"
 import { google } from "googleapis"
-import { env } from "@/lib/env"
-import { getOAuth2Client } from "@/lib/gsc"
+import {
+  GoogleAuthError,
+  type GoogleAccount,
+  emailFor,
+  getGoogleAuthClient,
+} from "@/lib/google-auth"
 import type {
   GA4ChannelRow,
   GA4LandingPage,
@@ -14,10 +18,9 @@ import type {
 } from "@/lib/types"
 
 /**
- * GA4 Data API scope. analytics.readonly also covers the Admin API's read
- * endpoints (accountSummaries.list, etc.), so a single refresh token drives
- * both `getSeoReport` (Data) and `listProperties` (Admin). Scope is declared
- * on the shared OAuth client in lib/gsc.ts.
+ * GA4 client. All entry points take an explicit `account: GoogleAccount`
+ * so the call site is responsible for picking the partners or assessments
+ * Google identity (see lib/google-auth.ts for the factory).
  */
 export const GA4_SCOPES = [
   "https://www.googleapis.com/auth/analytics.readonly",
@@ -34,20 +37,32 @@ type GA4ErrorCode =
 export class GA4Error extends Error {
   readonly code: GA4ErrorCode
   readonly status: number | undefined
-  constructor(message: string, code: GA4ErrorCode, status?: number) {
+  readonly account: GoogleAccount | undefined
+  constructor(
+    message: string,
+    code: GA4ErrorCode,
+    opts: { status?: number; account?: GoogleAccount } = {},
+  ) {
     super(message)
     this.name = "GA4Error"
     this.code = code
-    this.status = status
+    this.status = opts.status
+    this.account = opts.account
   }
 }
 
-function assertRefreshToken(): void {
-  if (!env.GOOGLE_REFRESH_TOKEN) {
-    throw new GA4Error(
-      "GOOGLE_REFRESH_TOKEN is not set. Complete the OAuth flow at /api/gsc/auth and set the refresh token in the environment.",
-      "NO_REFRESH_TOKEN",
-    )
+function getOAuth2(account: GoogleAccount) {
+  try {
+    return getGoogleAuthClient(account)
+  } catch (err) {
+    if (err instanceof GoogleAuthError) {
+      throw new GA4Error(
+        `${err.message} (Google account: ${emailFor(account)})`,
+        "NO_REFRESH_TOKEN",
+        { account },
+      )
+    }
+    throw err
   }
 }
 
@@ -90,26 +105,31 @@ function assertIsoDate(d: string, label: string): void {
   }
 }
 
-let cachedDataClient: BetaAnalyticsDataClient | null = null
+const cachedDataClients: Partial<Record<GoogleAccount, BetaAnalyticsDataClient>> = {}
 
 /**
- * Returns a shared BetaAnalyticsDataClient bound to the same OAuth2 client
- * GSC uses. Cached per-process so each Vercel invocation only mints one
- * gRPC/gax channel.
+ * Returns a BetaAnalyticsDataClient bound to the requested account's OAuth
+ * client. Cached per-account per-process so each Vercel invocation only
+ * mints one gRPC/gax channel per identity.
  */
-function getDataClient(): BetaAnalyticsDataClient {
-  if (cachedDataClient) return cachedDataClient
-  assertRefreshToken()
-  const authClient = getOAuth2Client()
-  cachedDataClient = new BetaAnalyticsDataClient({ authClient })
-  return cachedDataClient
+function getDataClient(account: GoogleAccount): BetaAnalyticsDataClient {
+  const cached = cachedDataClients[account]
+  if (cached) return cached
+  const authClient = getOAuth2(account)
+  const client = new BetaAnalyticsDataClient({ authClient })
+  cachedDataClients[account] = client
+  return client
 }
 
 /**
  * Translate an error from the Data/Admin APIs into a GA4Error with a stable
  * code the callers can branch on.
  */
-function wrapApiError(error: unknown, context: string): never {
+function wrapApiError(
+  error: unknown,
+  context: string,
+  account: GoogleAccount,
+): never {
   if (error instanceof GA4Error) throw error
   const err = error as {
     code?: number | string
@@ -139,7 +159,10 @@ function wrapApiError(error: unknown, context: string): never {
     httpStatus = grpcOrHttp
   }
   const message = error instanceof Error ? error.message : String(error)
-  throw new GA4Error(`${context}: ${message}`, mapped, httpStatus)
+  throw new GA4Error(`${context}: ${message}`, mapped, {
+    status: httpStatus,
+    account,
+  })
 }
 
 function toNumber(v: string | null | undefined): number {
@@ -152,33 +175,10 @@ function safeRate(num: number, denom: number): number {
   return denom > 0 ? num / denom : 0
 }
 
-/**
- * Enumerate GA4 properties the authed account can see via the Admin API,
- * with each property's primary web-stream URL attached when available.
- *
- * Implemented as a two-step walk: first `accountSummaries.list` for the
- * property list, then `properties.dataStreams.list` per property to resolve
- * the website URL. The per-property call is the expensive part (N+1 pattern
- * at roughly one call per property), so we:
- *   - cap concurrency to 10 so we don't hammer Admin API quotas
- *   - cache the full result at module scope for the life of the serverless
- *     instance (`PROPERTY_CACHE_TTL_MS`). The cache is per-process on Vercel
- *     so cold starts re-fetch, which is fine — worst case one slow request.
- *
- * Pass `{ forceRefresh: true }` to bypass the cache (e.g. after a partner
- * reports a new property they just created).
- *
- * Requires analytics.readonly scope — covers both Admin read and Data. If
- * the token lacks admin access this throws GA4Error with code=FORBIDDEN;
- * callers can then fall back to Airtable's `GA4 Property ID` field.
- *
- * Streams whose `type !== "WEB_DATA_STREAM"` are ignored (mobile app
- * streams have no SEO-relevant URL). When a property has multiple web
- * streams we keep the first one returned — the SDK lists them in creation
- * order, so the oldest / primary stream wins.
- */
 const PROPERTY_CACHE_TTL_MS = 10 * 60 * 1000 // 10 minutes
-let propertyCache: { at: number; properties: GA4PropertyInfo[] } | null = null
+const propertyCache: Partial<
+  Record<GoogleAccount, { at: number; properties: GA4PropertyInfo[] }>
+> = {}
 
 async function mapWithConcurrency<T, U>(
   items: readonly T[],
@@ -199,20 +199,20 @@ async function mapWithConcurrency<T, U>(
 }
 
 export async function listProperties(
-  opts: { forceRefresh?: boolean } = {},
+  params: { account: GoogleAccount; forceRefresh?: boolean },
 ): Promise<GA4PropertyInfo[]> {
+  const { account } = params
+  const cached = propertyCache[account]
   if (
-    !opts.forceRefresh &&
-    propertyCache &&
-    Date.now() - propertyCache.at < PROPERTY_CACHE_TTL_MS
+    !params.forceRefresh &&
+    cached &&
+    Date.now() - cached.at < PROPERTY_CACHE_TTL_MS
   ) {
-    return propertyCache.properties
+    return cached.properties
   }
-  assertRefreshToken()
-  const auth = getOAuth2Client()
+  const auth = getOAuth2(account)
   const admin = google.analyticsadmin({ version: "v1beta", auth })
   try {
-    // Step 1: enumerate properties via accountSummaries (handles paging).
     const summaries: Array<{ property: string; displayName: string }> = []
     let pageToken: string | undefined
     do {
@@ -221,8 +221,8 @@ export async function listProperties(
         pageToken,
       })
       const accounts = response.data.accountSummaries ?? []
-      for (const account of accounts) {
-        for (const p of account.propertySummaries ?? []) {
+      for (const accountSummary of accounts) {
+        for (const p of accountSummary.propertySummaries ?? []) {
           if (!p.property || !p.displayName) continue
           summaries.push({
             property: p.property,
@@ -233,10 +233,6 @@ export async function listProperties(
       pageToken = response.data.nextPageToken ?? undefined
     } while (pageToken)
 
-    // Step 2: fetch data streams for each property, concurrency-limited.
-    // A stream failure for one property shouldn't tank the whole list — we
-    // just leave websiteUrl undefined for that property and let the caller
-    // decide what to do (manual override).
     const properties = await mapWithConcurrency(summaries, 10, async (p) => {
       let websiteUrl: string | undefined
       try {
@@ -261,19 +257,19 @@ export async function listProperties(
       }
     })
 
-    propertyCache = { at: Date.now(), properties }
+    propertyCache[account] = { at: Date.now(), properties }
     return properties
   } catch (error: unknown) {
-    wrapApiError(error, "listProperties")
+    wrapApiError(error, "listProperties", account)
   }
 }
 
 export async function getSeoReport(params: {
+  account: GoogleAccount
   propertyId: string
   startDate: string
   endDate: string
 }): Promise<GA4SeoReport> {
-  assertRefreshToken()
   assertIsoDate(params.startDate, "startDate")
   assertIsoDate(params.endDate, "endDate")
   if (params.startDate > params.endDate) {
@@ -283,7 +279,7 @@ export async function getSeoReport(params: {
     )
   }
   const property = normalizePropertyId(params.propertyId)
-  const client = getDataClient()
+  const client = getDataClient(params.account)
   const dateRanges = [
     { startDate: params.startDate, endDate: params.endDate },
   ] as const
@@ -308,7 +304,7 @@ export async function getSeoReport(params: {
           orderBys: [
             { metric: { metricName: "sessions" }, desc: true },
           ],
-          limit: 10,
+          limit: 50,
         }),
         client.runReport({
           property,
@@ -337,7 +333,7 @@ export async function getSeoReport(params: {
           orderBys: [
             { metric: { metricName: "sessions" }, desc: true },
           ],
-          limit: 10,
+          limit: 50,
         }),
       ])
 
@@ -383,9 +379,6 @@ export async function getSeoReport(params: {
       },
     )
 
-    // A GA4 property with no configured conversion events returns zeros
-    // across every query in the range. Detect that case so the UI can show a
-    // "conversions not configured" note instead of implying zero performance.
     const conversionsConfigured =
       conversions > 0 ||
       topLandingPages.some((p) => p.conversions > 0) ||
@@ -404,28 +397,20 @@ export async function getSeoReport(params: {
       organicOnly,
     }
   } catch (error: unknown) {
-    wrapApiError(error, "getSeoReport")
+    wrapApiError(error, "getSeoReport", params.account)
   }
 }
 
-/**
- * Month-by-month organic-search sessions for the audit's seasonality
- * commentary. Returns YYYY-MM bucketed rows for the supplied range.
- *
- * Filtered to `sessionDefaultChannelGroup = "Organic Search"` so the trend
- * line isn't muddied by paid spikes. Conversions and engagement duration
- * come along for free since we're already in the report.
- */
 export async function getMonthlyOrganic(params: {
+  account: GoogleAccount
   propertyId: string
   startDate: string
   endDate: string
 }): Promise<GA4MonthlyOrganicRow[]> {
-  assertRefreshToken()
   assertIsoDate(params.startDate, "startDate")
   assertIsoDate(params.endDate, "endDate")
   const property = normalizePropertyId(params.propertyId)
-  const client = getDataClient()
+  const client = getDataClient(params.account)
   try {
     const [resp] = await client.runReport({
       property,
@@ -449,7 +434,6 @@ export async function getMonthlyOrganic(params: {
     return rows.flatMap((row): GA4MonthlyOrganicRow[] => {
       const yearMonthRaw = row.dimensionValues?.[0]?.value
       if (!yearMonthRaw) return []
-      // GA4 returns yearMonth as "YYYYMM"; reformat to "YYYY-MM" for clarity.
       const month =
         yearMonthRaw.length === 6
           ? `${yearMonthRaw.slice(0, 4)}-${yearMonthRaw.slice(4)}`
@@ -464,25 +448,20 @@ export async function getMonthlyOrganic(params: {
       ]
     })
   } catch (error: unknown) {
-    wrapApiError(error, "getMonthlyOrganic")
+    wrapApiError(error, "getMonthlyOrganic", params.account)
   }
 }
 
-/**
- * Sessions / users / conversions broken out by GA4's default channel
- * grouping (Organic Search, Direct, Paid Search, Referral, etc.) — used
- * by the audit to call out how dependent the partner is on organic.
- */
 export async function getChannelBreakdown(params: {
+  account: GoogleAccount
   propertyId: string
   startDate: string
   endDate: string
 }): Promise<GA4ChannelRow[]> {
-  assertRefreshToken()
   assertIsoDate(params.startDate, "startDate")
   assertIsoDate(params.endDate, "endDate")
   const property = normalizePropertyId(params.propertyId)
-  const client = getDataClient()
+  const client = getDataClient(params.account)
   try {
     const [resp] = await client.runReport({
       property,
@@ -510,23 +489,16 @@ export async function getChannelBreakdown(params: {
       ]
     })
   } catch (error: unknown) {
-    wrapApiError(error, "getChannelBreakdown")
+    wrapApiError(error, "getChannelBreakdown", params.account)
   }
 }
 
-/**
- * Returns landing pages ranked by conversions. Intended for the keyword
- * scoring flow: pages that already convert well are signal that their topical
- * cluster is paying off, and Claude can nudge related keywords up in fit.
- * Pages with zero conversions are omitted so the array is empty when the
- * property has no configured conversion events.
- */
 export async function getConversionsByPage(params: {
+  account: GoogleAccount
   propertyId: string
   startDate: string
   endDate: string
 }): Promise<GA4PageConversion[]> {
-  assertRefreshToken()
   assertIsoDate(params.startDate, "startDate")
   assertIsoDate(params.endDate, "endDate")
   if (params.startDate > params.endDate) {
@@ -536,7 +508,7 @@ export async function getConversionsByPage(params: {
     )
   }
   const property = normalizePropertyId(params.propertyId)
-  const client = getDataClient()
+  const client = getDataClient(params.account)
 
   try {
     const [resp] = await client.runReport({
@@ -563,6 +535,6 @@ export async function getConversionsByPage(params: {
     }
     return out
   } catch (error: unknown) {
-    wrapApiError(error, "getConversionsByPage")
+    wrapApiError(error, "getConversionsByPage", params.account)
   }
 }

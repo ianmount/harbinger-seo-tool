@@ -78,8 +78,8 @@ function renderMissingRefreshToken() {
 
 function renderSuccess(refreshToken: string) {
   const body = `
-<h1>GSC OAuth complete</h1>
-<div class="warning"><strong>This refresh token grants read access to your Google Search Console data.</strong> Do not share it, do not commit it to git, do not paste it into chat. Put it in Vercel's Environment Variables only.</div>
+<h1>Google OAuth complete</h1>
+<div class="warning"><strong>This refresh token grants read access to Google Search Console + GA4 data for whichever account you just signed in with.</strong> Do not share it, do not commit it to git, do not paste it into chat. Put it in Vercel's Environment Variables only.</div>
 <label for="token">Refresh token (click the box to select, then Ctrl/Cmd+C — or use the copy button)</label>
 <textarea id="token" readonly rows="3" onclick="this.select()">${escapeHtml(refreshToken)}</textarea>
 <button type="button" id="copy-btn">Copy to clipboard</button>
@@ -88,7 +88,8 @@ function renderSuccess(refreshToken: string) {
 <ol>
   <li>Copy the token above.</li>
   <li>Open the Vercel dashboard → project → <strong>Settings → Environment Variables</strong>.</li>
-  <li>Set <code>GOOGLE_REFRESH_TOKEN</code> to this value (Production, Preview, Development — pick what you're targeting).</li>
+  <li>If you signed in as the <strong>partners</strong> account: set <code>GOOGLE_REFRESH_TOKEN_PARTNERS</code> to this value.<br>
+      If you signed in as the <strong>assessments</strong> account: set <code>GOOGLE_REFRESH_TOKEN_ASSESSMENTS</code> instead.</li>
   <li>Trigger a redeploy (push a commit, or use the Redeploy button on the latest deployment).</li>
   <li>After the deploy finishes, hit <code>/api/gsc/sites</code>. You should get back your accessible GSC properties.</li>
 </ol>
