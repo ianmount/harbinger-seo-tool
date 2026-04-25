@@ -455,8 +455,29 @@ export interface BacklinkReport {
 
 // ── GSC / GA4 slices the audit passes to Claude ───────────────────────────
 
+/**
+ * GSC slice for the audit. Holds two windows:
+ *   - `longRange`  — up to 16 months (the GSC retention max), used for
+ *                    position distribution, page concentration, mega-impression
+ *                    hubs, topic clustering. The rich analyses live here.
+ *   - `recent`     — last 90 days, used to compute the partner's OWN observed
+ *                    CTR benchmarks at top-3 by impression tier. This is the
+ *                    calibration baseline for every uplift estimate Claude
+ *                    produces — we do NOT use industry CTR averages.
+ *
+ * Plus the derived analyses that we compute server-side and pass to Claude
+ * pre-chewed, because doing arithmetic on 25,000-row exports inside a Claude
+ * prompt is unreliable.
+ */
 export interface AuditGscSlice {
   siteUrl: string
+  longRange: AuditGscWindow
+  recent: AuditGscWindow
+  /** Derived analyses (server-side computed) — see lib/audit-analyses.ts. */
+  analyses: AuditGscAnalyses
+}
+
+export interface AuditGscWindow {
   dateRange: { startDate: string; endDate: string }
   totalClicks: number
   totalImpressions: number
@@ -465,13 +486,142 @@ export interface AuditGscSlice {
 }
 
 /**
- * Q-over-Q comparison block for the audit. `current` is the most recently
- * completed quarter; `prior` is the same quarter a year earlier. Prior data
- * is optional because some partners are too new.
+ * One band of the position-distribution table.
+ *
+ * `band` is a human label like "1–3" or "11–20". Bands are inclusive at both
+ * ends. Counts are rolled up across the entire long-range query export, so
+ * an impression tier value here represents 16-month cumulative impressions.
+ */
+export interface PositionBand {
+  band: string
+  positionMin: number
+  positionMax: number
+  queryCount: number
+  clicks: number
+  impressions: number
+  /** Aggregate CTR across the whole band: clicks / impressions. */
+  ctr: number
+}
+
+/**
+ * Observed-CTR benchmark for the partner's OWN queries at top-3 positions,
+ * segmented by impression tier. These are the calibration values that drive
+ * every uplift estimate downstream — derived from the 90-day recent window
+ * (positions 1–3, non-brand queries only when we can detect the brand).
+ *
+ * `tier` is a label like "<100" or "1K–10K". When `queryCount` is below
+ * `minSampleSize` the tier is flagged as low-confidence and the audit must
+ * fall back to a conservative default rather than reporting a noisy number.
+ */
+export interface ObservedCtrTier {
+  tier: string
+  impressionMin: number
+  impressionMax: number | null
+  queryCount: number
+  /** Mean CTR across queries in this tier. */
+  meanCtr: number
+  /** Median CTR — used in commentary because it's robust to outliers. */
+  medianCtr: number
+  /** True when queryCount is too low to trust (< 5). */
+  lowConfidence: boolean
+}
+
+/**
+ * One quick-win query: currently sitting at positions 4–10, with enough
+ * impressions to make a top-3 move worth the work. Uplift is calibrated
+ * against the partner's own observed CTR for the matched impression tier.
+ */
+export interface QuickWinQuery {
+  query: string
+  page: string | null
+  currentPosition: number
+  currentClicks: number
+  currentImpressions: number
+  currentCtr: number
+  /** Tier label from ObservedCtrTier, used to look up calibrated CTR. */
+  matchedTier: string
+  /** Calibrated CTR drawn from the partner's own top-3 data for the tier. */
+  projectedTopThreeCtr: number
+  /** Annualized clicks at projectedTopThreeCtr × annualized impressions. */
+  projectedAnnualClicks: number
+  /** projectedAnnualClicks − annualized current clicks. */
+  upliftAnnualClicks: number
+}
+
+/**
+ * One mega-impression hub: page with 100K+ impressions and sub-2% CTR.
+ * These are usually the highest-ROI title/meta rewrite targets.
+ */
+export interface MegaImpressionHub {
+  page: string
+  clicks: number
+  impressions: number
+  ctr: number
+  position: number
+  /** Calibrated top-3 CTR for the tier the page sits in. */
+  projectedCtr: number
+  /** Calibrated additional clicks if CTR moved to projectedCtr. */
+  projectedAdditionalClicks: number
+}
+
+/**
+ * Power-page concentration. % of total clicks that come from the top N pages,
+ * for several N values. High concentration = algorithm-update vulnerability.
+ */
+export interface PowerPageConcentration {
+  totalPages: number
+  totalClicks: number
+  /** Cumulative click share at each top-N cutoff. */
+  bands: { topN: number; clicks: number; sharePct: number }[]
+  /** Pages it takes to reach 50% of clicks. */
+  pagesToHalfOfClicks: number
+}
+
+/**
+ * Aggregate of all GSC-derived analyses we hand to Claude pre-chewed.
+ */
+export interface AuditGscAnalyses {
+  positionDistribution: PositionBand[]
+  observedCtrTiers: ObservedCtrTier[]
+  quickWins: QuickWinQuery[]
+  megaImpressionHubs: MegaImpressionHub[]
+  pageConcentration: PowerPageConcentration
+  /** Clicks summed across the whole long-range window. */
+  totalClicksLongRange: number
+  totalImpressionsLongRange: number
+}
+
+/**
+ * GA4 slice for the audit. Holds:
+ *   - `currentYear`  — full last 12 months, for sessions / users / conversions.
+ *   - `priorYear`    — the 12 months before that, for YoY commentary
+ *                      (optional — newer partners may not have it).
+ *   - `monthlyOrganic` — month-by-month organic sessions for the last 12
+ *                        months. Used for the seasonality commentary.
+ *   - `channelBreakdown` — session counts by default channel grouping for
+ *                          the last 12 months, so the audit can call out
+ *                          how dependent the partner is on organic search.
  */
 export interface AuditGa4Slice {
-  current: GA4SeoReport
-  prior?: GA4SeoReport
+  currentYear: GA4SeoReport
+  priorYear?: GA4SeoReport
+  monthlyOrganic: GA4MonthlyOrganicRow[]
+  channelBreakdown: GA4ChannelRow[]
+}
+
+export interface GA4MonthlyOrganicRow {
+  /** YYYY-MM. */
+  month: string
+  sessions: number
+  conversions: number
+  engagementDurationSec: number
+}
+
+export interface GA4ChannelRow {
+  channel: string
+  sessions: number
+  users: number
+  conversions: number
 }
 
 // ── Claude synthesis output (what the PDF renders) ────────────────────────
@@ -547,6 +697,107 @@ export interface AuditBacklinkRisk {
   spamExamples: string[]
 }
 
+/**
+ * Section 3a — Position Distribution narrative. Numbers come from the
+ * server-computed `AuditGscAnalyses.positionDistribution`, but the narrative
+ * is Claude's read of the table.
+ */
+export interface AuditPositionDistribution {
+  bands: PositionBand[]
+  narrative: string
+}
+
+/**
+ * Section 3b — Partner's Own Observed CTR Benchmarks. Tiers come from
+ * `AuditGscAnalyses.observedCtrTiers`. The narrative names the tiers and
+ * explains the AI Overview suppression effect honestly.
+ */
+export interface AuditObservedCtrBenchmarks {
+  tiers: ObservedCtrTier[]
+  narrative: string
+}
+
+/**
+ * Section 3c — CTR Opportunity Quantification. Total uplift estimate, with
+ * Claude's narrative explaining the calibration.
+ */
+export interface AuditCtrOpportunity {
+  /** The total uplift, calibrated against partner's own observed CTRs. */
+  estimatedAnnualClickUplift: number
+  /** Number of queries contributing to the estimate. */
+  contributingQueryCount: number
+  /** Honest narrative referencing AI Overview suppression. */
+  narrative: string
+}
+
+/**
+ * Section 3d — Power Page Concentration. Echoes the server-computed values
+ * with Claude's risk read.
+ */
+export interface AuditPowerPageConcentration {
+  bands: { topN: number; clicks: number; sharePct: number }[]
+  pagesToHalfOfClicks: number
+  narrative: string
+}
+
+/**
+ * Section 3e — Topic Cluster Performance. Claude clusters the query list
+ * inside the synthesis prompt (no separate API call) and reports per-cluster
+ * volume + CTR, then names the underperforming cluster as a content target.
+ */
+export interface AuditTopicCluster {
+  name: string
+  queryCount: number
+  totalClicks: number
+  totalImpressions: number
+  averageCtr: number
+  averagePosition: number
+  /** Claude's qualitative read of this cluster's performance. */
+  notes: string
+}
+
+export interface AuditTopicClusters {
+  clusters: AuditTopicCluster[]
+  /** Cluster name flagged as the highest-leverage content target. */
+  highestLeverageCluster: string
+  narrative: string
+}
+
+/**
+ * Sections 3f + 3g — Quick wins + Mega-impression hubs. Server pre-computes
+ * the candidates from the GSC data; Claude picks the most prospect-friendly
+ * slice and writes the narrative.
+ */
+export interface AuditQuickWins {
+  queries: QuickWinQuery[]
+  narrative: string
+}
+
+export interface AuditMegaImpressionHubs {
+  pages: MegaImpressionHub[]
+  narrative: string
+}
+
+/**
+ * Section 3h — Local Performance. One row per service area / city. When the
+ * partner has GSC, counts come from filtering the query export by city tokens
+ * appearing in the query string. Otherwise falls back to DataForSEO competitor
+ * comparison only.
+ */
+export interface AuditLocalPerformanceRow {
+  city: string
+  state: string
+  rankingsCount: number
+  topThreeCount: number
+  totalClicks: number
+  totalImpressions: number
+}
+
+export interface AuditLocalPerformance {
+  rows: AuditLocalPerformanceRow[]
+  narrative: string
+}
+
 export interface AuditSynthesis {
   prospectDomain: string
   prospectName?: string
@@ -560,11 +811,24 @@ export interface AuditSynthesis {
   technicalFindings: AuditTechnicalFinding[]
   backlinkRisk: AuditBacklinkRisk
   roadmap: AuditRoadmapItem[]
+  /** Section 3a–3h — only populated when GSC data is available. */
+  positionDistribution?: AuditPositionDistribution
+  observedCtrBenchmarks?: AuditObservedCtrBenchmarks
+  ctrOpportunity?: AuditCtrOpportunity
+  pageConcentration?: AuditPowerPageConcentration
+  topicClusters?: AuditTopicClusters
+  quickWins?: AuditQuickWins
+  megaImpressionHubs?: AuditMegaImpressionHubs
+  localPerformance?: AuditLocalPerformance
   dataSources: {
     crawlPagesAnalyzed: number
     gscIncluded: boolean
     ga4Included: boolean
+    /** True when GSC long-range covered <6 months — caps trend commentary. */
+    gscShortHistory: boolean
     competitorsAutoSuggested: boolean
+    /** True when partner data was pulled from Airtable; false for raw prospect. */
+    partnerDriven: boolean
   }
   /** Populated by the PDF route before upload, used for the footer note. */
   costUsd?: number
