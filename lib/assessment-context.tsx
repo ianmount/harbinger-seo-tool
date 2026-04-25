@@ -44,10 +44,23 @@ export interface AssessmentState {
    * DataForSEO-validated locations selected for the comp analysis. These
    * carry real `location_code`s from DFS's Google Ads US taxonomy, so the
    * backend doesn't need to guess or probe — codes are passed straight
-   * through to ranked_keywords / domain_rank_overview.
+   * through to the SERP probes and per-domain metrics.
    */
   compDfsLocations: DfsLabsLocation[]
-  competitorUrls: string[]
+  /**
+   * Per-location competitor lists. The competitor set is allowed to
+   * differ between locations — a domain that's a Sarasota competitor
+   * doesn't have to be a Bradenton competitor. Entries are kept in
+   * sync with `compDfsLocations`: same order, same length.
+   */
+  locationCompetitors: {
+    /** Display label from the DFS row, e.g. "Sarasota,Florida,United States". */
+    location: string
+    /** DataForSEO Labs location code — primary key for lookups. */
+    locationCode: number
+    /** Cleaned competitor domains for this location. */
+    competitors: string[]
+  }[]
   compAnalysisRows: CompAnalysisLocationRows[] | null
   compAnalysisCsv: string | null
   compAnalysisRunAt: string | null
@@ -63,7 +76,7 @@ const INITIAL_STATE: AssessmentState = {
   targetLocations: "",
   auditResult: null,
   compDfsLocations: [],
-  competitorUrls: [],
+  locationCompetitors: [],
   compAnalysisRows: null,
   compAnalysisCsv: null,
   compAnalysisRunAt: null,

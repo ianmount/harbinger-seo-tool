@@ -15,20 +15,21 @@ import type {
 } from "@/lib/types"
 
 /**
- * Competitive Analysis endpoint — SERP-based methodology.
+ * Competitive Analysis endpoint — SERP-based methodology, per-location
+ * competitor lists.
  *
- * For each (seed keyword × city), we query DataForSEO's SERP endpoint
- * with depth=100 and check whether each domain in the analysis (partner +
- * competitors) appears in the top 100 organic results, recording its best
- * rank. After all seeds for a city resolve, we aggregate per (domain ×
- * city) into Top 3 / 10 / 20 / 100 buckets — these are counts of seeds
- * the domain ranks for at each cutoff in that specific city.
+ * For each (seed × location) we query DataForSEO's SERP at depth=100 and
+ * record each result domain's rank_absolute. After all probes for a
+ * location resolve we count, per (domain × location), how many seeds
+ * the domain ranks for at top 3 / 10 / 20 / 100 — using ONLY that
+ * location's configured competitor list (plus the partner, which
+ * appears in every location).
  *
- * Numbers genuinely vary across cities because the underlying SERPs do.
- *
- * Per-domain metrics (referring domains, organic traffic at country
- * level, pages indexed at city level) are pulled separately and stay the
- * same shape as before.
+ * Domain-level metrics — Referring Domains, Pages Indexed, Organic
+ * Traffic — are pulled once per unique domain across the whole request
+ * (deduplicated across all locations) and reused for every row that
+ * domain appears in. Pages Indexed uses location_code 2840 (US) so the
+ * value is consistent regardless of which city a row belongs to.
  *
  * No GSC/GA4 — DataForSEO only.
  */
@@ -36,26 +37,23 @@ export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 export const maxDuration = 300
 
-const dfsLocationSchema = z.object({
-  location_code: z.number().int().positive(),
-  location_name: z.string().min(1),
-  location_type: z.string().min(1),
+const locationCompetitorsSchema = z.object({
+  /** Display label — used for UI and CSV row headers. */
+  location: z.string().min(1),
+  /** DataForSEO Labs location code, primary key for SERP lookups. */
+  locationCode: z.number().int().positive(),
+  competitors: z.array(z.string().min(3)).max(20),
 })
 
 const bodySchema = z.object({
   partnerUrl: z.string().min(3),
-  /**
-   * DataForSEO-validated locations (from `/api/dataforseo/locations`).
-   * The SERP endpoint accepts city-level Google Ads codes directly.
-   */
-  targetLocations: z.array(dfsLocationSchema).min(1).max(10),
-  competitorUrls: z.array(z.string().min(3)).min(1).max(20),
-  /**
-   * Seed keywords the user explicitly approved. Each (seed × city) is a
-   * SERP probe; cost scales linearly with this list, so the UI caps it
-   * and shows an estimate before submission.
-   */
+  /** User-approved seed keywords; one SERP probe per (seed × location). */
   seedKeywords: z.array(z.string().min(1)).min(1).max(200),
+  /**
+   * Per-location competitor lists. Locations are evaluated in the order
+   * supplied; the resulting `rows` array preserves that order.
+   */
+  locationCompetitors: z.array(locationCompetitorsSchema).min(1).max(10),
 })
 
 type Body = z.infer<typeof bodySchema>
@@ -105,6 +103,7 @@ function bestRank(hits: SerpRankedDomain[], targetDomain: string): number | null
 
 interface DomainMetrics {
   referringDomains: number
+  pagesIndexed: number
   organicTrafficRaw: number
 }
 
@@ -123,15 +122,15 @@ function describeError(err: unknown): string {
 }
 
 /**
- * Per-domain metrics: referring domains (location-independent) + organic
- * traffic at country level (Labs domain_rank_overview accepts country
- * codes only). Pages indexed is per-(domain × city) and lives in the
- * location loop below.
+ * Per-domain metrics, all pulled at country level so the same value is
+ * reported across every location row for a given domain. One call per
+ * domain per metric — no per-(domain × city) fan-out.
  */
 async function fetchDomainMetrics(
   domain: string,
 ): Promise<DomainMetricsResult> {
   let referringDomains = 0
+  let pagesIndexed = 0
   let organicTrafficRaw = 0
   let failed = false
   const errors: string[] = []
@@ -140,6 +139,14 @@ async function fetchDomainMetrics(
   } catch (err) {
     failed = true
     const msg = `referringDomainCount(${domain}): ${describeError(err)}`
+    errors.push(msg)
+    console.warn(`[api/comp-analysis] ${msg}`)
+  }
+  try {
+    pagesIndexed = await indexedPageCount(domain, DFS_LABS_COUNTRY_CODE_US)
+  } catch (err) {
+    failed = true
+    const msg = `indexedPageCount(${domain}, country): ${describeError(err)}`
     errors.push(msg)
     console.warn(`[api/comp-analysis] ${msg}`)
   }
@@ -154,7 +161,13 @@ async function fetchDomainMetrics(
     errors.push(msg)
     console.warn(`[api/comp-analysis] ${msg}`)
   }
-  return { referringDomains, organicTrafficRaw, failed, errors }
+  return {
+    referringDomains,
+    pagesIndexed,
+    organicTrafficRaw,
+    failed,
+    errors,
+  }
 }
 
 async function mapWithConcurrency<T, U>(
@@ -190,8 +203,6 @@ function buildCsv(
   seedCount: number,
 ): string {
   const lines: string[] = []
-  // Methodology comment — # prefix is a widely understood CSV
-  // convention (Excel, pandas all import it cleanly as a text row).
   lines.push(
     `# Top 3/10/20/100 reflects how many of your ${seedCount} approved target keywords each domain ranks for in the specified city. Numbers vary by city because rankings are measured against city-level Google SERPs.`,
   )
@@ -223,11 +234,9 @@ function buildRow(params: {
   domain: string
   isPartner: boolean
   buckets: { top3: number; top10: number; top20: number; top100: number }
-  pagesIndexed: number
   dm: DomainMetricsResult
-  failed: boolean
 }): CompAnalysisDomainRow {
-  const { domain, isPartner, buckets, pagesIndexed, dm, failed } = params
+  const { domain, isPartner, buckets, dm } = params
   return {
     domain,
     isPartner,
@@ -236,226 +245,10 @@ function buildRow(params: {
     top20: buckets.top20,
     top100: buckets.top100,
     referringDomains: dm.referringDomains,
-    pagesIndexed,
+    pagesIndexed: dm.pagesIndexed,
     organicTraffic: compactThousands(dm.organicTrafficRaw),
     organicTrafficRaw: dm.organicTrafficRaw,
-    failed: failed || dm.failed,
-  }
-}
-
-export async function POST(request: Request) {
-  let raw: unknown
-  try {
-    raw = await request.json()
-  } catch {
-    return NextResponse.json(
-      { error: "Request body must be valid JSON" },
-      { status: 400 },
-    )
-  }
-  const parsed = bodySchema.safeParse(raw)
-  if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Invalid request body", issues: parsed.error.flatten() },
-      { status: 400 },
-    )
-  }
-  const body: Body = parsed.data
-
-  const partnerDomain = cleanDomain(body.partnerUrl)
-  const competitorDomains = body.competitorUrls
-    .map(cleanDomain)
-    .filter((d) => d.length > 0 && d !== partnerDomain)
-  const allDomains = [partnerDomain, ...competitorDomains]
-
-  const seeds = Array.from(
-    new Set(
-      body.seedKeywords
-        .map((k) => k.trim())
-        .filter((k) => k.length > 0)
-        .map((k) => k.toLowerCase()),
-    ),
-  )
-  if (seeds.length === 0) {
-    return NextResponse.json(
-      { error: "At least one seed keyword is required." },
-      { status: 400 },
-    )
-  }
-
-  const warnings: string[] = []
-  const startedAt = Date.now()
-
-  try {
-    // 1. Per-domain metrics (referring domains + organic traffic at
-    //    country level). One pass, location-independent.
-    const domainMetrics = new Map<string, DomainMetricsResult>()
-    const dmResults = await mapWithConcurrency(allDomains, 3, (d) =>
-      fetchDomainMetrics(d),
-    )
-    for (let i = 0; i < allDomains.length; i++) {
-      domainMetrics.set(allDomains[i], dmResults[i])
-    }
-
-    // 2. Per-(domain × city) pages indexed via site: SERP probe.
-    const indexedTasks: Array<{ domain: string; locationIdx: number }> = []
-    for (const domain of allDomains) {
-      for (let li = 0; li < body.targetLocations.length; li++) {
-        indexedTasks.push({ domain, locationIdx: li })
-      }
-    }
-    const indexedResults = await mapWithConcurrency(
-      indexedTasks,
-      SERP_CONCURRENCY,
-      async (t) => {
-        try {
-          return {
-            value: await indexedPageCount(
-              t.domain,
-              body.targetLocations[t.locationIdx].location_code,
-            ),
-            error: null as string | null,
-          }
-        } catch (err) {
-          const msg = `indexedPageCount(${t.domain}, loc=${body.targetLocations[t.locationIdx].location_code}): ${describeError(err)}`
-          console.warn(`[api/comp-analysis] ${msg}`)
-          return { value: 0, error: msg }
-        }
-      },
-    )
-
-    // 3. Per-(seed × city) SERP probes — the heart of the new
-    //    methodology. concurrency capped at SERP_CONCURRENCY so a 40-seed
-    //    × 3-city run doesn't fan out 120 simultaneous calls.
-    const serpTasks: Array<{ seed: string; locationIdx: number }> = []
-    for (const seed of seeds) {
-      for (let li = 0; li < body.targetLocations.length; li++) {
-        serpTasks.push({ seed, locationIdx: li })
-      }
-    }
-    interface SerpProbeResult {
-      hits: SerpRankedDomain[]
-      error: string | null
-    }
-    const serpResults = await mapWithConcurrency(
-      serpTasks,
-      SERP_CONCURRENCY,
-      async (t): Promise<SerpProbeResult> => {
-        const loc = body.targetLocations[t.locationIdx]
-        try {
-          const hits = await serpRankedDomains(
-            t.seed,
-            { code: loc.location_code },
-            { depth: 100 },
-          )
-          return { hits, error: null }
-        } catch (err) {
-          const msg = `serp("${t.seed}", loc=${loc.location_code} ${loc.location_name}): ${describeError(err)}`
-          console.warn(`[api/comp-analysis] ${msg}`)
-          return { hits: [], error: msg }
-        }
-      },
-    )
-
-    // Build a lookup: city index → seed → hits.
-    const serpByCity: Array<Map<string, SerpRankedDomain[]>> =
-      body.targetLocations.map(() => new Map())
-    const serpErrors: Array<string[]> = body.targetLocations.map(() => [])
-    for (let i = 0; i < serpTasks.length; i++) {
-      const { seed, locationIdx } = serpTasks[i]
-      const r = serpResults[i]
-      serpByCity[locationIdx].set(seed, r.hits)
-      if (r.error) serpErrors[locationIdx].push(r.error)
-    }
-
-    // 4. Aggregate Top 3/10/20/100 buckets per (domain × city) and build rows.
-    const rows: CompAnalysisLocationRows[] = []
-    for (let li = 0; li < body.targetLocations.length; li++) {
-      const loc = body.targetLocations[li]
-
-      const partnerBuckets = bucketize(
-        partnerDomain,
-        seeds,
-        serpByCity[li],
-      )
-      const partnerIndexedIdx = indexedTasks.findIndex(
-        (t) => t.domain === partnerDomain && t.locationIdx === li,
-      )
-      const partnerRow = buildRow({
-        domain: partnerDomain,
-        isPartner: true,
-        buckets: partnerBuckets,
-        pagesIndexed: indexedResults[partnerIndexedIdx]?.value ?? 0,
-        dm: domainMetrics.get(partnerDomain)!,
-        failed: indexedResults[partnerIndexedIdx]?.error != null,
-      })
-
-      const competitorRows: CompAnalysisDomainRow[] = competitorDomains.map(
-        (d) => {
-          const buckets = bucketize(d, seeds, serpByCity[li])
-          const indexedIdx = indexedTasks.findIndex(
-            (t) => t.domain === d && t.locationIdx === li,
-          )
-          return buildRow({
-            domain: d,
-            isPartner: false,
-            buckets,
-            pagesIndexed: indexedResults[indexedIdx]?.value ?? 0,
-            dm: domainMetrics.get(d)!,
-            failed: indexedResults[indexedIdx]?.error != null,
-          })
-        },
-      )
-      competitorRows.sort((a, b) => b.top10 - a.top10)
-
-      rows.push({
-        location: loc.location_name,
-        locationCode: loc.location_code,
-        locationType: loc.location_type,
-        domains: [partnerRow, ...competitorRows],
-      })
-    }
-
-    // 5. Surface real per-call error messages so failed cells are explained.
-    for (const [domain, dm] of domainMetrics) {
-      for (const e of dm.errors) {
-        warnings.push(`${domain} — ${e}`)
-      }
-    }
-    for (let i = 0; i < indexedTasks.length; i++) {
-      const r = indexedResults[i]
-      if (r.error) {
-        const t = indexedTasks[i]
-        const loc = body.targetLocations[t.locationIdx]
-        warnings.push(`${t.domain} @ ${loc.location_name} — ${r.error}`)
-      }
-    }
-    for (let li = 0; li < body.targetLocations.length; li++) {
-      const loc = body.targetLocations[li]
-      const errs = Array.from(new Set(serpErrors[li]))
-      for (const e of errs) {
-        warnings.push(`${loc.location_name} — ${e}`)
-      }
-    }
-
-    const csv = buildCsv(rows, seeds.length)
-    const durationMs = Date.now() - startedAt
-    console.log(
-      `[api/comp-analysis/run] domains=${allDomains.length} cities=${body.targetLocations.length} seeds=${seeds.length} duration=${(durationMs / 1000).toFixed(1)}s warnings=${warnings.length}`,
-    )
-
-    return NextResponse.json({
-      rows,
-      csv,
-      warnings,
-      seedCount: seeds.length,
-      estimatedSerpCost: seeds.length * body.targetLocations.length * SERP_COST_USD,
-    })
-  } catch (error) {
-    console.error("[api/comp-analysis/run] failed:", error)
-    const status = error instanceof DataForSEOError ? 502 : 500
-    const message = error instanceof Error ? error.message : "Unknown error"
-    return NextResponse.json({ error: message }, { status })
+    failed: dm.failed,
   }
 }
 
@@ -479,4 +272,198 @@ function bucketize(
     if (rank <= 100) top100++
   }
   return { top3, top10, top20, top100 }
+}
+
+export async function POST(request: Request) {
+  let raw: unknown
+  try {
+    raw = await request.json()
+  } catch {
+    return NextResponse.json(
+      { error: "Request body must be valid JSON" },
+      { status: 400 },
+    )
+  }
+  const parsed = bodySchema.safeParse(raw)
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "Invalid request body", issues: parsed.error.flatten() },
+      { status: 400 },
+    )
+  }
+  const body: Body = parsed.data
+
+  const partnerDomain = cleanDomain(body.partnerUrl)
+
+  // Normalize each location's competitor list once; preserve user order
+  // within a location, drop the partner if it accidentally appears, dedupe.
+  const locationCompetitors = body.locationCompetitors.map((lc) => {
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const c of lc.competitors) {
+      const cd = cleanDomain(c)
+      if (!cd || cd === partnerDomain || seen.has(cd)) continue
+      seen.add(cd)
+      out.push(cd)
+    }
+    return { ...lc, competitors: out }
+  })
+
+  if (locationCompetitors.some((lc) => lc.competitors.length === 0)) {
+    return NextResponse.json(
+      {
+        error:
+          "Every location must have at least one competitor. Add competitors per-location and run again.",
+      },
+      { status: 400 },
+    )
+  }
+
+  // Deduplicated set of every unique domain in the request — this is what
+  // we pull domain-level metrics for. Partner is always included.
+  const uniqueDomains = new Set<string>([partnerDomain])
+  for (const lc of locationCompetitors) {
+    for (const c of lc.competitors) uniqueDomains.add(c)
+  }
+  const uniqueDomainsList = [...uniqueDomains]
+
+  // Dedupe seeds (lowercase) to avoid double-counting if the user pasted
+  // the same keyword twice via different cases.
+  const seeds = Array.from(
+    new Set(
+      body.seedKeywords
+        .map((k) => k.trim())
+        .filter((k) => k.length > 0)
+        .map((k) => k.toLowerCase()),
+    ),
+  )
+  if (seeds.length === 0) {
+    return NextResponse.json(
+      { error: "At least one seed keyword is required." },
+      { status: 400 },
+    )
+  }
+
+  const warnings: string[] = []
+  const startedAt = Date.now()
+
+  try {
+    // 1. Domain-level metrics — once per unique domain. Cached in a Map so
+    //    the same value is reused across every location row for that domain.
+    const domainMetrics = new Map<string, DomainMetricsResult>()
+    const dmResults = await mapWithConcurrency(uniqueDomainsList, 3, (d) =>
+      fetchDomainMetrics(d),
+    )
+    for (let i = 0; i < uniqueDomainsList.length; i++) {
+      domainMetrics.set(uniqueDomainsList[i], dmResults[i])
+    }
+
+    // 2. SERP probes — one per (seed × location). The probe doesn't care
+    //    which competitors the user chose for a location; it returns the
+    //    top-100 domains. We extract per-domain ranks from the cached hit
+    //    list when building rows.
+    const serpTasks: Array<{ seed: string; locationIdx: number }> = []
+    for (const seed of seeds) {
+      for (let li = 0; li < locationCompetitors.length; li++) {
+        serpTasks.push({ seed, locationIdx: li })
+      }
+    }
+    interface SerpProbeResult {
+      hits: SerpRankedDomain[]
+      error: string | null
+    }
+    const serpResults = await mapWithConcurrency(
+      serpTasks,
+      SERP_CONCURRENCY,
+      async (t): Promise<SerpProbeResult> => {
+        const lc = locationCompetitors[t.locationIdx]
+        try {
+          const hits = await serpRankedDomains(
+            t.seed,
+            { code: lc.locationCode },
+            { depth: 100 },
+          )
+          return { hits, error: null }
+        } catch (err) {
+          const msg = `serp("${t.seed}", loc=${lc.locationCode} ${lc.location}): ${describeError(err)}`
+          console.warn(`[api/comp-analysis] ${msg}`)
+          return { hits: [], error: msg }
+        }
+      },
+    )
+
+    const serpByLocation: Array<Map<string, SerpRankedDomain[]>> =
+      locationCompetitors.map(() => new Map())
+    const serpErrors: Array<string[]> = locationCompetitors.map(() => [])
+    for (let i = 0; i < serpTasks.length; i++) {
+      const { seed, locationIdx } = serpTasks[i]
+      const r = serpResults[i]
+      serpByLocation[locationIdx].set(seed, r.hits)
+      if (r.error) serpErrors[locationIdx].push(r.error)
+    }
+
+    // 3. Build rows. Per-location competitor sets differ: a domain that's
+    //    a competitor in Sarasota but not Bradenton appears in the
+    //    Sarasota section only.
+    const rows: CompAnalysisLocationRows[] = []
+    for (let li = 0; li < locationCompetitors.length; li++) {
+      const lc = locationCompetitors[li]
+      const partnerRow = buildRow({
+        domain: partnerDomain,
+        isPartner: true,
+        buckets: bucketize(partnerDomain, seeds, serpByLocation[li]),
+        dm: domainMetrics.get(partnerDomain)!,
+      })
+      const competitorRows: CompAnalysisDomainRow[] = lc.competitors.map(
+        (d) =>
+          buildRow({
+            domain: d,
+            isPartner: false,
+            buckets: bucketize(d, seeds, serpByLocation[li]),
+            dm: domainMetrics.get(d)!,
+          }),
+      )
+      competitorRows.sort((a, b) => b.top10 - a.top10)
+      rows.push({
+        location: lc.location,
+        locationCode: lc.locationCode,
+        // We don't have location_type here (it lives on the DfsLabsLocation);
+        // omit and let the UI derive it from compDfsLocations if needed.
+        locationType: "",
+        domains: [partnerRow, ...competitorRows],
+      })
+    }
+
+    for (const [domain, dm] of domainMetrics) {
+      for (const e of dm.errors) {
+        warnings.push(`${domain} — ${e}`)
+      }
+    }
+    for (let li = 0; li < locationCompetitors.length; li++) {
+      const lc = locationCompetitors[li]
+      const errs = Array.from(new Set(serpErrors[li]))
+      for (const e of errs) {
+        warnings.push(`${lc.location} — ${e}`)
+      }
+    }
+
+    const csv = buildCsv(rows, seeds.length)
+    const durationMs = Date.now() - startedAt
+    console.log(
+      `[api/comp-analysis/run] uniqueDomains=${uniqueDomainsList.length} cities=${locationCompetitors.length} seeds=${seeds.length} duration=${(durationMs / 1000).toFixed(1)}s warnings=${warnings.length}`,
+    )
+
+    return NextResponse.json({
+      rows,
+      csv,
+      warnings,
+      seedCount: seeds.length,
+      estimatedSerpCost: seeds.length * locationCompetitors.length * SERP_COST_USD,
+    })
+  } catch (error) {
+    console.error("[api/comp-analysis/run] failed:", error)
+    const status = error instanceof DataForSEOError ? 502 : 500
+    const message = error instanceof Error ? error.message : "Unknown error"
+    return NextResponse.json({ error: message }, { status })
+  }
 }

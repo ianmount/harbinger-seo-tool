@@ -84,12 +84,25 @@ function dedupeKeywords(text: string): string[] {
 export default function CompAnalysisPage() {
   const { state, setField, setMany } = useAssessment()
   const [running, setRunning] = useState(false)
-  const [suggesting, setSuggesting] = useState(false)
+  // Auto-suggest is per-location now; track which location-code is
+  // currently fetching so we can disable just that block's button.
+  const [suggestingForCode, setSuggestingForCode] = useState<number | null>(
+    null,
+  )
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [partnerUrl, setPartnerUrl] = useState(state.websiteUrl)
-  const [competitorText, setCompetitorText] = useState(
-    state.competitorUrls.join("\n"),
-  )
+  // Per-location competitor textarea text, keyed by location_code.
+  // Initialized from context's locationCompetitors so navigating away
+  // and back preserves the user's typing.
+  const [competitorTextByCode, setCompetitorTextByCode] = useState<
+    Record<number, string>
+  >(() => {
+    const init: Record<number, string> = {}
+    for (const lc of state.locationCompetitors) {
+      init[lc.locationCode] = lc.competitors.join("\n")
+    }
+    return init
+  })
   const [csvKeywords, setCsvKeywords] = useState<string[]>([])
   const [csvFilename, setCsvFilename] = useState<string | null>(null)
   const [manualText, setManualText] = useState("")
@@ -109,31 +122,50 @@ export default function CompAnalysisPage() {
     return parsed[0].city
   }, [state.compDfsLocations.length, state.targetLocations])
 
-  const competitors = useMemo(
-    () =>
-      competitorText
-        .split("\n")
-        .map((s) =>
-          s
-            .trim()
-            .replace(/^https?:\/\//i, "")
-            .replace(/^www\./i, "")
-            .replace(/\/.*$/, "")
-            .toLowerCase(),
-        )
-        .filter((s) => s.length > 0),
-    [competitorText],
-  )
+  /** Parse a competitor textarea into a clean, deduped domain list. */
+  const parseCompetitorText = useCallback((text: string): string[] => {
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const line of text.split("\n")) {
+      const cleaned = line
+        .trim()
+        .replace(/^https?:\/\//i, "")
+        .replace(/^www\./i, "")
+        .replace(/\/.*$/, "")
+        .toLowerCase()
+      if (!cleaned || seen.has(cleaned)) continue
+      seen.add(cleaned)
+      out.push(cleaned)
+    }
+    return out
+  }, [])
+
+  /** Per-location parsed competitor lists, in compDfsLocations order. */
+  const competitorsByCode = useMemo(() => {
+    const map = new Map<number, string[]>()
+    for (const loc of state.compDfsLocations) {
+      const text = competitorTextByCode[loc.location_code] ?? ""
+      map.set(loc.location_code, parseCompetitorText(text))
+    }
+    return map
+  }, [state.compDfsLocations, competitorTextByCode, parseCompetitorText])
 
   const cityCount = state.compDfsLocations.length
   const seedCount = seedKeywords.length
   const estimatedCost = seedCount * cityCount * SERP_COST_USD
 
+  // Run is enabled only when every location has ≥1 competitor.
+  const everyLocationHasCompetitor =
+    cityCount > 0 &&
+    state.compDfsLocations.every(
+      (loc) => (competitorsByCode.get(loc.location_code)?.length ?? 0) > 0,
+    )
+
   const canRun =
     !running &&
     partnerUrl.trim().length > 0 &&
     cityCount > 0 &&
-    competitors.length > 0 &&
+    everyLocationHasCompetitor &&
     seedCount > 0
 
   const handleFile = useCallback(async (file: File) => {
@@ -195,76 +227,87 @@ export default function CompAnalysisPage() {
     [state.compDfsLocations, setField],
   )
 
-  const autoSuggest = useCallback(async () => {
-    if (!partnerUrl.trim()) {
-      toast.error("Enter a partner URL first.")
-      return
-    }
-    if (state.compDfsLocations.length === 0) {
-      toast.error("Add at least one DataForSEO location first.")
-      return
-    }
-    if (seedKeywords.length === 0) {
-      setErrorMessage(
-        "Auto-suggest needs seed keywords. Upload a CSV or paste keywords first.",
-      )
-      return
-    }
-    setSuggesting(true)
-    setErrorMessage(null)
-    try {
-      const res = await fetch("/api/comp-analysis/suggest-competitors", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          partnerUrl: partnerUrl.trim(),
-          seedKeywords: seedKeywords.slice(0, 10),
-          targetLocations: state.compDfsLocations,
-        }),
-      })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        throw new Error(body.error ?? `HTTP ${res.status}`)
+  /**
+   * Auto-suggest competitors for a single location. Seed keywords still
+   * come from this tab's keyword inputs, but the SERP probes use only
+   * the targeted location's code so suggestions reflect that city's
+   * actual top-ranking domains.
+   */
+  const autoSuggestForLocation = useCallback(
+    async (loc: DfsLabsLocation) => {
+      if (!partnerUrl.trim()) {
+        toast.error("Enter a partner URL first.")
+        return
       }
-      const data = (await res.json()) as SuggestResponse
-      const suggested = data.suggestions.map((s) => s.domain)
-      const merged = Array.from(
-        new Set([
-          ...competitors,
-          ...suggested.filter((d) => !competitors.includes(d)),
-        ]),
-      )
-      setCompetitorText(merged.join("\n"))
-      setField("competitorUrls", merged)
-      if (suggested.length === 0) {
-        toast.info("No competitors found. Try different seed keywords.")
-      } else {
-        toast.success(
-          `Added ${suggested.length} suggested competitor${suggested.length === 1 ? "" : "s"}.`,
+      if (seedKeywords.length === 0) {
+        setErrorMessage(
+          "Auto-suggest needs seed keywords. Upload a CSV or paste keywords first.",
         )
+        return
       }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error"
-      setErrorMessage(message)
-      toast.error("Auto-suggest failed", { description: message })
-    } finally {
-      setSuggesting(false)
-    }
-  }, [
-    partnerUrl,
-    state.compDfsLocations,
-    seedKeywords,
-    competitors,
-    setField,
-  ])
+      setSuggestingForCode(loc.location_code)
+      setErrorMessage(null)
+      try {
+        const res = await fetch("/api/comp-analysis/suggest-competitors", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            partnerUrl: partnerUrl.trim(),
+            seedKeywords: seedKeywords.slice(0, 10),
+            targetLocations: [loc],
+          }),
+        })
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}))
+          throw new Error(body.error ?? `HTTP ${res.status}`)
+        }
+        const data = (await res.json()) as SuggestResponse
+        const suggested = data.suggestions.map((s) => s.domain)
+        const existing = competitorsByCode.get(loc.location_code) ?? []
+        const merged = Array.from(
+          new Set([
+            ...existing,
+            ...suggested.filter((d) => !existing.includes(d)),
+          ]),
+        )
+        setCompetitorTextByCode((prev) => ({
+          ...prev,
+          [loc.location_code]: merged.join("\n"),
+        }))
+        if (suggested.length === 0) {
+          toast.info(
+            `No competitors found for ${loc.location_name}. Try different seed keywords.`,
+          )
+        } else {
+          toast.success(
+            `Added ${suggested.length} suggestion${suggested.length === 1 ? "" : "s"} for ${loc.location_name}.`,
+          )
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error"
+        setErrorMessage(message)
+        toast.error("Auto-suggest failed", { description: message })
+      } finally {
+        setSuggestingForCode(null)
+      }
+    },
+    [partnerUrl, seedKeywords, competitorsByCode],
+  )
 
   const runAnalysis = useCallback(async () => {
     if (!canRun) return
     setRunning(true)
     setErrorMessage(null)
+
+    const locationCompetitors = state.compDfsLocations.map((loc) => ({
+      location: loc.location_name,
+      locationCode: loc.location_code,
+      competitors: competitorsByCode.get(loc.location_code) ?? [],
+    }))
+
     setMany({
       websiteUrl: partnerUrl.trim(),
-      competitorUrls: competitors,
+      locationCompetitors,
     })
     try {
       const res = await fetch("/api/comp-analysis/run", {
@@ -272,8 +315,7 @@ export default function CompAnalysisPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           partnerUrl: partnerUrl.trim(),
-          targetLocations: state.compDfsLocations,
-          competitorUrls: competitors,
+          locationCompetitors,
           seedKeywords,
         }),
       })
@@ -306,7 +348,7 @@ export default function CompAnalysisPage() {
     canRun,
     partnerUrl,
     state.compDfsLocations,
-    competitors,
+    competitorsByCode,
     seedKeywords,
     setMany,
   ])
@@ -397,53 +439,86 @@ export default function CompAnalysisPage() {
           parsedCount={seedKeywords.length}
         />
 
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="competitorUrls">
-              Competitor URLs (one per line)
-            </Label>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={autoSuggest}
-              disabled={
-                running ||
-                suggesting ||
-                !partnerUrl.trim() ||
-                state.compDfsLocations.length === 0 ||
-                seedKeywords.length === 0
-              }
-            >
-              {suggesting ? (
-                <>
-                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />{" "}
-                  Suggesting…
-                </>
-              ) : (
-                <>
-                  <Sparkles className="mr-1.5 h-3.5 w-3.5" /> Auto-suggest
-                  competitors
-                </>
-              )}
-            </Button>
-          </div>
-          <Textarea
-            id="competitorUrls"
-            placeholder={"competitor1.com\ncompetitor2.com"}
-            value={competitorText}
-            onChange={(e) => setCompetitorText(e.target.value)}
-            disabled={running}
-            rows={5}
-          />
-          <p className="text-xs text-ink-3">
-            {competitors.length} competitor
-            {competitors.length === 1 ? "" : "s"}
-            {seedKeywords.length === 0
-              ? " · auto-suggest needs seed keywords"
-              : ""}
+        {state.compDfsLocations.length === 0 ? (
+          <p className="rounded-md border border-dashed p-3 text-sm text-ink-3">
+            Add at least one target location above to configure
+            competitors.
           </p>
-        </div>
+        ) : (
+          <div className="space-y-4">
+            <Label>Competitors per location</Label>
+            <p className="-mt-2 text-xs text-ink-3">
+              Each location gets its own competitor list — a domain that
+              matters in Sarasota doesn&apos;t have to appear in
+              Bradenton. Run is enabled when every location has at least
+              one competitor.
+            </p>
+            {state.compDfsLocations.map((loc) => {
+              const text = competitorTextByCode[loc.location_code] ?? ""
+              const parsed = competitorsByCode.get(loc.location_code) ?? []
+              const isSuggesting =
+                suggestingForCode === loc.location_code
+              return (
+                <div
+                  key={loc.location_code}
+                  className="space-y-2 rounded-lg border bg-background p-3"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="font-sans text-[11px] font-extrabold uppercase tracking-[0.18em] text-ink-2">
+                      {loc.location_name}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => autoSuggestForLocation(loc)}
+                      disabled={
+                        running ||
+                        suggestingForCode != null ||
+                        !partnerUrl.trim() ||
+                        seedKeywords.length === 0
+                      }
+                    >
+                      {isSuggesting ? (
+                        <>
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />{" "}
+                          Suggesting…
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="mr-1.5 h-3.5 w-3.5" />{" "}
+                          Auto-suggest
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                  <Textarea
+                    placeholder={"competitor1.com\ncompetitor2.com"}
+                    value={text}
+                    onChange={(e) =>
+                      setCompetitorTextByCode((prev) => ({
+                        ...prev,
+                        [loc.location_code]: e.target.value,
+                      }))
+                    }
+                    disabled={running}
+                    rows={4}
+                  />
+                  <p className="text-xs text-ink-3">
+                    {parsed.length} competitor
+                    {parsed.length === 1 ? "" : "s"}
+                    {parsed.length === 0
+                      ? " · add at least one to enable Run"
+                      : ""}
+                    {seedKeywords.length === 0
+                      ? " · auto-suggest needs seed keywords"
+                      : ""}
+                  </p>
+                </div>
+              )
+            })}
+          </div>
+        )}
 
         {errorMessage && (
           <p className="text-sm text-destructive" role="alert">
