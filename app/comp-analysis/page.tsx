@@ -412,14 +412,22 @@ function CompResults({
       </div>
 
       {warnings.length > 0 && (
-        <div className="space-y-1 rounded-md border border-amber-400/50 bg-amber-50 p-3 text-xs text-amber-900 dark:bg-amber-900/20 dark:text-amber-200">
-          <strong>Warnings</strong>
-          <ul className="list-inside list-disc">
-            {Array.from(new Set(warnings)).slice(0, 5).map((w, i) => (
-              <li key={i}>{w}</li>
+        <details
+          open
+          className="rounded-md border border-amber-400/50 bg-amber-50 text-xs text-amber-900 dark:bg-amber-900/20 dark:text-amber-200"
+        >
+          <summary className="cursor-pointer px-3 py-2 font-semibold">
+            {Array.from(new Set(warnings)).length} warning
+            {Array.from(new Set(warnings)).length === 1 ? "" : "s"}
+          </summary>
+          <ul className="list-inside list-disc px-3 pb-3 pt-1 font-mono text-[11px]">
+            {Array.from(new Set(warnings)).map((w, i) => (
+              <li key={i} className="break-all">
+                {w}
+              </li>
             ))}
           </ul>
-        </div>
+        </details>
       )}
 
       <p className="text-xs text-ink-3">

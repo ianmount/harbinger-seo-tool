@@ -96,9 +96,13 @@ export async function dfsRequest<T = DfsEnvelope>(
     body: JSON.stringify(body),
   }
 
+  // Retry up to 3 times on 429 with exponential backoff + jitter so a
+  // burst of parallel calls doesn't all bunch up at the same retry instant.
   let response = await fetch(url, init)
-  if (response.status === 429) {
-    await new Promise((r) => setTimeout(r, RATE_LIMIT_RETRY_MS))
+  for (let attempt = 0; attempt < 3 && response.status === 429; attempt++) {
+    const backoffMs =
+      RATE_LIMIT_RETRY_MS * 2 ** attempt + Math.floor(Math.random() * 500)
+    await new Promise((r) => setTimeout(r, backoffMs))
     response = await fetch(url, init)
   }
 

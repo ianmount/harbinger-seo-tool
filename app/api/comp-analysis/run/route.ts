@@ -71,31 +71,46 @@ interface DomainMetrics {
   pagesIndexed: number
 }
 
+interface DomainMetricsResult extends DomainMetrics {
+  failed?: boolean
+  /** Specific error messages collected per call so the user can see them. */
+  errors: string[]
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof Error) {
+    // Cap message length so a 500-char DFS body doesn't dominate the UI.
+    return err.message.length > 220
+      ? `${err.message.slice(0, 217)}…`
+      : err.message
+  }
+  return String(err)
+}
+
 async function fetchDomainMetrics(
   domain: string,
-): Promise<DomainMetrics & { failed?: boolean }> {
+): Promise<DomainMetricsResult> {
   let referringDomains = 0
   let pagesIndexed = 0
   let failed = false
+  const errors: string[] = []
   try {
     referringDomains = await referringDomainCount(domain)
   } catch (err) {
     failed = true
-    console.warn(
-      `[api/comp-analysis] referringDomainCount failed for ${domain}:`,
-      err,
-    )
+    const msg = `referringDomainCount(${domain}): ${describeError(err)}`
+    errors.push(msg)
+    console.warn(`[api/comp-analysis] ${msg}`)
   }
   try {
     pagesIndexed = await indexedPageCount(domain)
   } catch (err) {
     failed = true
-    console.warn(
-      `[api/comp-analysis] indexedPageCount failed for ${domain}:`,
-      err,
-    )
+    const msg = `indexedPageCount(${domain}): ${describeError(err)}`
+    errors.push(msg)
+    console.warn(`[api/comp-analysis] ${msg}`)
   }
-  return { referringDomains, pagesIndexed, failed }
+  return { referringDomains, pagesIndexed, failed, errors }
 }
 
 interface LocationMetrics {
@@ -105,6 +120,7 @@ interface LocationMetrics {
   top100: number
   organicTrafficRaw: number
   failed?: boolean
+  errors: string[]
 }
 
 async function fetchLocationMetrics(
@@ -115,27 +131,26 @@ async function fetchLocationMetrics(
   let counts = { top3: 0, top10: 0, top20: 0, top100: 0 }
   let organicTrafficRaw = 0
   let failed = false
+  const errors: string[] = []
   try {
     const c = await rankedKeywordPositionCounts(domain, dfsLoc)
     counts = { top3: c.top3, top10: c.top10, top20: c.top20, top100: c.top100 }
   } catch (err) {
     failed = true
-    console.warn(
-      `[api/comp-analysis] rankedKeywordPositionCounts failed for ${domain} / ${locationCode}:`,
-      err,
-    )
+    const msg = `rankedKeywords(${domain}, loc=${locationCode}): ${describeError(err)}`
+    errors.push(msg)
+    console.warn(`[api/comp-analysis] ${msg}`)
   }
   try {
     const overview = await domainRankOverview(domain, dfsLoc)
     organicTrafficRaw = Math.round(overview.organicTraffic)
   } catch (err) {
     failed = true
-    console.warn(
-      `[api/comp-analysis] domainRankOverview failed for ${domain} / ${locationCode}:`,
-      err,
-    )
+    const msg = `domainRankOverview(${domain}, loc=${locationCode}): ${describeError(err)}`
+    errors.push(msg)
+    console.warn(`[api/comp-analysis] ${msg}`)
   }
-  return { ...counts, organicTrafficRaw, failed }
+  return { ...counts, organicTrafficRaw, failed, errors }
 }
 
 async function mapWithConcurrency<T, U>(
@@ -196,7 +211,7 @@ function buildRow(params: {
   domain: string
   isPartner: boolean
   loc: LocationMetrics
-  dm: DomainMetrics & { failed?: boolean }
+  dm: DomainMetricsResult
 }): CompAnalysisDomainRow {
   const { domain, isPartner, loc, dm } = params
   return {
@@ -242,12 +257,11 @@ export async function POST(request: Request) {
 
   try {
     // Per-domain metrics (referring domains + pages indexed) — independent
-    // of location, so one call per domain.
-    const domainMetrics = new Map<
-      string,
-      DomainMetrics & { failed?: boolean }
-    >()
-    const metricsResults = await mapWithConcurrency(allDomains, 5, (d) =>
+    // of location, so one call per domain. Concurrency capped at 3 so the
+    // per-(domain × location) phase below has rate-limit headroom and we
+    // don't trip 429s on smaller DataForSEO accounts.
+    const domainMetrics = new Map<string, DomainMetricsResult>()
+    const metricsResults = await mapWithConcurrency(allDomains, 3, (d) =>
       fetchDomainMetrics(d),
     )
     for (let i = 0; i < allDomains.length; i++) {
@@ -262,7 +276,7 @@ export async function POST(request: Request) {
         tasks.push({ domain, locationIdx: li })
       }
     }
-    const taskResults = await mapWithConcurrency(tasks, 5, (t) =>
+    const taskResults = await mapWithConcurrency(tasks, 3, (t) =>
       fetchLocationMetrics(t.domain, body.targetLocations[t.locationIdx].location_code),
     )
 
@@ -301,12 +315,23 @@ export async function POST(request: Request) {
       })
     }
 
-    for (const r of rows) {
-      for (const d of r.domains) {
-        if (d.failed) {
-          warnings.push(
-            `Some DataForSEO calls failed for ${d.domain} in ${r.location} — figures shown are partial.`,
-          )
+    // Roll up the actual per-call error messages so the user can see
+    // *what* failed, not just that something did. Per-domain (referring
+    // domains / pages indexed) failures are surfaced once. Per-(domain ×
+    // location) failures are surfaced once per cell.
+    for (const [domain, dm] of domainMetrics) {
+      for (const e of dm.errors) {
+        warnings.push(`${domain} — ${e}`)
+      }
+    }
+    for (let li = 0; li < body.targetLocations.length; li++) {
+      const loc = body.targetLocations[li]
+      for (let di = 0; di < allDomains.length; di++) {
+        const taskIdx = di * body.targetLocations.length + li
+        const r = taskResults[taskIdx]
+        if (!r) continue
+        for (const e of r.errors) {
+          warnings.push(`${allDomains[di]} @ ${loc.location_name} — ${e}`)
         }
       }
     }
