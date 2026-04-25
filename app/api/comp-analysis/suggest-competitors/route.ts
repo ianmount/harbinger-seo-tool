@@ -17,15 +17,20 @@ export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 export const maxDuration = 120
 
-const targetLocationSchema = z.object({
-  city: z.string().min(1),
-  state: z.string().min(1),
+const dfsLocationSchema = z.object({
+  location_code: z.number().int().positive(),
+  location_name: z.string().min(1),
+  location_type: z.string().min(1),
 })
 
 const bodySchema = z.object({
   partnerUrl: z.string().min(3),
   seedKeywords: z.array(z.string().min(1)).min(1).max(20),
-  targetLocations: z.array(targetLocationSchema).min(1).max(10),
+  /**
+   * DataForSEO-validated locations (from `/api/dataforseo/locations`).
+   * Each carries a real DFS location_code that the SERP endpoint accepts.
+   */
+  targetLocations: z.array(dfsLocationSchema).min(1).max(10),
 })
 
 const NON_COMPETITOR_DOMAINS = new Set([
@@ -58,10 +63,6 @@ function cleanDomain(raw: string): string {
     .replace(/^www\./i, "")
     .replace(/\/.*$/, "")
     .toLowerCase()
-}
-
-function locationName(state: string): string {
-  return `${state.trim()},United States`
 }
 
 async function mapWithConcurrency<T, U>(
@@ -107,19 +108,10 @@ export async function POST(request: Request) {
 
   // Cap inputs so a careless user doesn't fan out to hundreds of calls.
   const seeds = seedKeywords.slice(0, 10)
-  const states = Array.from(
-    new Set(targetLocations.map((l) => l.state.trim().toLowerCase())),
-  )
-    .map((stateLower) => {
-      const orig = targetLocations.find(
-        (l) => l.state.trim().toLowerCase() === stateLower,
-      )
-      return orig ? orig.state.trim() : stateLower
-    })
-    .slice(0, 5)
+  const locations = targetLocations.slice(0, 5)
 
   const tasks = seeds.flatMap((seed) =>
-    states.map((state) => ({ seed, state })),
+    locations.map((loc) => ({ seed, loc })),
   )
 
   try {
@@ -127,12 +119,12 @@ export async function POST(request: Request) {
       try {
         return await serpCompetitors(
           t.seed,
-          { name: locationName(t.state) },
+          { code: t.loc.location_code },
           { depth: 20 },
         )
       } catch (err) {
         console.warn(
-          `[api/comp-analysis/suggest] serpCompetitors failed for "${t.seed}" / ${t.state}:`,
+          `[api/comp-analysis/suggest] serpCompetitors failed for "${t.seed}" / ${t.loc.location_name}:`,
           err,
         )
         return []

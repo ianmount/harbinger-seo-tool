@@ -3,6 +3,7 @@
 import { useCallback, useMemo, useState } from "react"
 import { Download, Loader2, Sparkles } from "lucide-react"
 import { toast } from "sonner"
+import { LocationAutocomplete } from "@/components/LocationAutocomplete"
 import { PageHeader } from "@/components/PageHeader"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -13,13 +14,18 @@ import { parseTargetLocationLines } from "@/lib/locations"
 import type {
   CompAnalysisDomainRow,
   CompAnalysisLocationRows,
+  DfsLabsLocation,
 } from "@/lib/types"
 
 /**
  * Competitive Analysis tab.
  *
- * Stateless. Inputs are pre-filled from the shared Assessment context if
- * the Audit tab was already run; otherwise the user fills them manually.
+ * Stateless. Pulls partner URL + competitor list from the shared
+ * Assessment context, but locations are picked from DataForSEO's own
+ * Labs taxonomy via `LocationAutocomplete` (same picker the Keyword
+ * Research tab uses). That guarantees every location_code passed to the
+ * backend is one DataForSEO already accepts — no city-vs-state probing.
+ *
  * Output is an on-screen table grouped by location plus a CSV export.
  */
 
@@ -38,21 +44,22 @@ export default function CompAnalysisPage() {
   const [running, setRunning] = useState(false)
   const [suggesting, setSuggesting] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  // Keep a local copy of the textarea so multi-line edits aren't fighting
-  // the array shape. Initialize from context once (Audit tab populates
-  // websiteUrl + targetLocations).
   const [partnerUrl, setPartnerUrl] = useState(state.websiteUrl)
-  const [targetLocationsText, setTargetLocationsText] = useState(
-    state.targetLocations,
-  )
   const [competitorText, setCompetitorText] = useState(
     state.competitorUrls.join("\n"),
   )
 
-  const targetLocations = useMemo(
-    () => parseTargetLocationLines(targetLocationsText),
-    [targetLocationsText],
-  )
+  // Seed the location-autocomplete search with the first parsed location
+  // from the Audit tab's freetext "Target locations" textarea, so the
+  // user can pick a DFS-validated match in one click. Once they've added
+  // any DFS location the seed is irrelevant.
+  const initialLocationQuery = useMemo(() => {
+    if (state.compDfsLocations.length > 0) return ""
+    const parsed = parseTargetLocationLines(state.targetLocations)
+    if (parsed.length === 0) return ""
+    return parsed[0].city
+  }, [state.compDfsLocations.length, state.targetLocations])
+
   const competitors = useMemo(
     () =>
       competitorText
@@ -72,7 +79,7 @@ export default function CompAnalysisPage() {
   const canRun =
     !running &&
     partnerUrl.trim().length > 0 &&
-    targetLocations.length > 0 &&
+    state.compDfsLocations.length > 0 &&
     competitors.length > 0
 
   const seedKeywordsFromContext = useMemo(() => {
@@ -88,13 +95,35 @@ export default function CompAnalysisPage() {
       .filter((s) => s.length > 0)
   }, [state.auditResult, state.existingTargetKeywords])
 
+  const addLocation = useCallback(
+    (loc: DfsLabsLocation) => {
+      const next = state.compDfsLocations.some(
+        (l) => l.location_code === loc.location_code,
+      )
+        ? state.compDfsLocations
+        : [...state.compDfsLocations, loc]
+      setField("compDfsLocations", next)
+    },
+    [state.compDfsLocations, setField],
+  )
+
+  const removeLocation = useCallback(
+    (code: number) => {
+      setField(
+        "compDfsLocations",
+        state.compDfsLocations.filter((l) => l.location_code !== code),
+      )
+    },
+    [state.compDfsLocations, setField],
+  )
+
   const autoSuggest = useCallback(async () => {
     if (!partnerUrl.trim()) {
       toast.error("Enter a partner URL first.")
       return
     }
-    if (targetLocations.length === 0) {
-      toast.error("Enter at least one target location.")
+    if (state.compDfsLocations.length === 0) {
+      toast.error("Add at least one DataForSEO location first.")
       return
     }
     if (seedKeywordsFromContext.length === 0) {
@@ -112,7 +141,7 @@ export default function CompAnalysisPage() {
         body: JSON.stringify({
           partnerUrl: partnerUrl.trim(),
           seedKeywords: seedKeywordsFromContext,
-          targetLocations,
+          targetLocations: state.compDfsLocations,
         }),
       })
       if (!res.ok) {
@@ -132,7 +161,9 @@ export default function CompAnalysisPage() {
       if (suggested.length === 0) {
         toast.info("No competitors found. Try different seed keywords.")
       } else {
-        toast.success(`Added ${suggested.length} suggested competitor${suggested.length === 1 ? "" : "s"}.`)
+        toast.success(
+          `Added ${suggested.length} suggested competitor${suggested.length === 1 ? "" : "s"}.`,
+        )
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error"
@@ -143,7 +174,7 @@ export default function CompAnalysisPage() {
     }
   }, [
     partnerUrl,
-    targetLocations,
+    state.compDfsLocations,
     seedKeywordsFromContext,
     competitors,
     setField,
@@ -153,11 +184,8 @@ export default function CompAnalysisPage() {
     if (!canRun) return
     setRunning(true)
     setErrorMessage(null)
-    // Sync textareas back into shared state so subsequent runs / tab
-    // navigation see the latest values.
     setMany({
       websiteUrl: partnerUrl.trim(),
-      targetLocations: targetLocationsText,
       competitorUrls: competitors,
     })
     try {
@@ -166,7 +194,7 @@ export default function CompAnalysisPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           partnerUrl: partnerUrl.trim(),
-          targetLocations,
+          targetLocations: state.compDfsLocations,
           competitorUrls: competitors,
         }),
       })
@@ -198,8 +226,7 @@ export default function CompAnalysisPage() {
   }, [
     canRun,
     partnerUrl,
-    targetLocationsText,
-    targetLocations,
+    state.compDfsLocations,
     competitors,
     setMany,
   ])
@@ -253,25 +280,32 @@ export default function CompAnalysisPage() {
           />
         </div>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="targetLocations">
-            Target locations (one per line — &ldquo;City, State&rdquo;)
-          </Label>
-          <Textarea
-            id="targetLocations"
-            placeholder={"Sarasota, FL\nBradenton, FL"}
-            value={targetLocationsText}
-            onChange={(e) => setTargetLocationsText(e.target.value)}
+        <div className="space-y-2">
+          <LocationAutocomplete
+            initialQuery={initialLocationQuery}
+            selected={state.compDfsLocations}
+            onAdd={addLocation}
+            onRemove={removeLocation}
             disabled={running}
-            rows={3}
+            label="Target locations (search DataForSEO's taxonomy)"
+            inputId="comp-location-search"
+            helpText={
+              state.compDfsLocations.length === 0 ? (
+                <>
+                  Type a city, state, or zip — pick the location DataForSEO
+                  has indexed. The codes here come straight from the same
+                  taxonomy the Keyword Research tab uses, so the lookups
+                  are guaranteed valid.
+                </>
+              ) : (
+                <>
+                  {state.compDfsLocations.length} location
+                  {state.compDfsLocations.length === 1 ? "" : "s"} selected.
+                  Add more cities or states the prospect competes in.
+                </>
+              )
+            }
           />
-          <p className="text-xs text-ink-3">
-            Parsed {targetLocations.length} location
-            {targetLocations.length === 1 ? "" : "s"}. The analysis tries
-            city-level data first; if DataForSEO doesn&apos;t support a
-            given city it falls back to state level for that row (flagged
-            in the results table).
-          </p>
         </div>
 
         <div className="space-y-1.5">
@@ -288,7 +322,7 @@ export default function CompAnalysisPage() {
                 running ||
                 suggesting ||
                 !partnerUrl.trim() ||
-                targetLocations.length === 0
+                state.compDfsLocations.length === 0
               }
             >
               {suggesting ? (
@@ -395,7 +429,7 @@ function CompResults({
 
       <div className="space-y-6">
         {rows.map((loc) => (
-          <LocationTable key={loc.location} location={loc} />
+          <LocationTable key={loc.locationCode} location={loc} />
         ))}
       </div>
     </section>
@@ -407,21 +441,9 @@ function LocationTable({ location }: { location: CompAnalysisLocationRows }) {
     <div className="overflow-hidden rounded-lg border bg-card">
       <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2 font-sans text-[11px] font-extrabold uppercase tracking-[0.18em] text-ink-2">
         <span>{location.location}</span>
-        {location.granularity === "city" ? (
-          <span
-            className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold tracking-[0.16em] text-emerald-700 dark:text-emerald-300"
-            title="DataForSEO returned city-level metrics for this location."
-          >
-            city-level
-          </span>
-        ) : (
-          <span
-            className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-bold tracking-[0.16em] text-amber-700 dark:text-amber-300"
-            title="DataForSEO doesn't have city-level data for this city — metrics rolled up to state level."
-          >
-            state-level fallback
-          </span>
-        )}
+        <span className="rounded bg-secondary px-1.5 py-0.5 text-[9px] font-bold tracking-[0.16em] text-ink-3">
+          {location.locationType}
+        </span>
       </div>
       <div className="overflow-x-auto">
         <table className="min-w-full text-sm">

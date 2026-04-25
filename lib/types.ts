@@ -847,14 +847,12 @@ export interface CompAnalysisDomainRow {
 }
 
 export interface CompAnalysisLocationRows {
+  /** Display label, e.g. "Sarasota,Florida,United States". */
   location: string
-  /**
-   * Granularity actually used by DataForSEO for this location:
-   *   - "city"  — the Labs taxonomy accepted the city-level location code
-   *   - "state" — the city wasn't in the Labs taxonomy or DFS rejected it
-   *               with status 40501; metrics rolled up to state level
-   */
-  granularity: "city" | "state"
+  /** DataForSEO Labs taxonomy code that was used (City, State, etc.). */
+  locationCode: number
+  /** "City" / "State" / "County" / "Region" / "Country" — from the DFS row. */
+  locationType: string
   domains: CompAnalysisDomainRow[]
 }
 

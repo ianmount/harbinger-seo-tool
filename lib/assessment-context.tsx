@@ -11,6 +11,7 @@ import {
 import type {
   AssessmentAuditResult,
   CompAnalysisLocationRows,
+  DfsLabsLocation,
 } from "@/lib/types"
 
 /**
@@ -39,6 +40,13 @@ export interface AssessmentState {
   auditResult: AssessmentAuditResult | null
 
   // Comp Analysis tab inputs/outputs.
+  /**
+   * DataForSEO-validated locations selected for the comp analysis. These
+   * carry real `location_code`s from DFS's Google Ads US taxonomy, so the
+   * backend doesn't need to guess or probe — codes are passed straight
+   * through to ranked_keywords / domain_rank_overview.
+   */
+  compDfsLocations: DfsLabsLocation[]
   competitorUrls: string[]
   compAnalysisRows: CompAnalysisLocationRows[] | null
   compAnalysisCsv: string | null
@@ -54,6 +62,7 @@ const INITIAL_STATE: AssessmentState = {
   idealCustomer: "",
   targetLocations: "",
   auditResult: null,
+  compDfsLocations: [],
   competitorUrls: [],
   compAnalysisRows: null,
   compAnalysisCsv: null,
