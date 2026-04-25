@@ -256,6 +256,98 @@ export async function getTopPages(params: {
   }
 }
 
+/**
+ * Paginated wrapper for top-queries with [query] dimension. GSC's
+ * `searchanalytics.query` caps each call at 25,000 rows; for the audit we
+ * sometimes want the full long-tail (16-month rollup), so this helper
+ * walks startRow until the API returns fewer than `pageSize` rows.
+ *
+ * `maxRows` caps total pulled rows so a runaway brand-with-millions-of-queries
+ * site doesn't time out the function. Default 25,000 — one API call.
+ */
+export async function getTopQueriesPaginated(params: {
+  siteUrl: string
+  startDate: string
+  endDate: string
+  pageSize?: number
+  maxRows?: number
+}): Promise<GSCTopQueryRow[]> {
+  assertRefreshToken()
+  const auth = getOAuth2Client()
+  const webmasters = google.webmasters({ version: "v3", auth })
+  const pageSize = Math.min(params.pageSize ?? 25_000, 25_000)
+  const maxRows = params.maxRows ?? 25_000
+  const out: GSCTopQueryRow[] = []
+  try {
+    for (let startRow = 0; out.length < maxRows; startRow += pageSize) {
+      const response = await webmasters.searchanalytics.query({
+        siteUrl: params.siteUrl,
+        requestBody: {
+          startDate: params.startDate,
+          endDate: params.endDate,
+          dimensions: ["query"],
+          rowLimit: pageSize,
+          startRow,
+        },
+      })
+      const rows = response.data.rows ?? []
+      for (const row of rows) {
+        const r = row as RawRow
+        const query = r.keys?.[0]
+        if (!query) continue
+        out.push({ query, ...normalizeRow(r) })
+        if (out.length >= maxRows) break
+      }
+      if (rows.length < pageSize) break
+    }
+    return out
+  } catch (error: unknown) {
+    wrapApiError(error)
+  }
+}
+
+/** Same idea for [page] dimension — 16-month page-level rollup. */
+export async function getTopPagesPaginated(params: {
+  siteUrl: string
+  startDate: string
+  endDate: string
+  pageSize?: number
+  maxRows?: number
+}): Promise<GSCTopPageRow[]> {
+  assertRefreshToken()
+  const auth = getOAuth2Client()
+  const webmasters = google.webmasters({ version: "v3", auth })
+  const pageSize = Math.min(params.pageSize ?? 25_000, 25_000)
+  const maxRows = params.maxRows ?? 25_000
+  const out: GSCTopPageRow[] = []
+  try {
+    for (let startRow = 0; out.length < maxRows; startRow += pageSize) {
+      const response = await webmasters.searchanalytics.query({
+        siteUrl: params.siteUrl,
+        requestBody: {
+          startDate: params.startDate,
+          endDate: params.endDate,
+          dimensions: ["page"],
+          rowLimit: pageSize,
+          startRow,
+        },
+      })
+      const rows = response.data.rows ?? []
+      for (const row of rows) {
+        const r = row as RawRow
+        const page = r.keys?.[0]
+        if (!page) continue
+        out.push({ page, ...normalizeRow(r) })
+        if (out.length >= maxRows) break
+      }
+      if (rows.length < pageSize) break
+    }
+    return out
+  } catch (error: unknown) {
+    wrapApiError(error)
+  }
+}
+
 export async function getDailyClicks(params: {
   siteUrl: string
   startDate: string

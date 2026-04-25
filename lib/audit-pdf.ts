@@ -1031,7 +1031,774 @@ function RoadmapPage({ s }: { s: AuditSynthesis }) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Document assembly.
+// GSC-derived sections. Only rendered when synthesis.dataSources.gscIncluded
+// is true; the orchestrator is responsible for omitting these blocks from
+// the synthesis when GSC was unavailable.
+
+function pctOf(n: number): string {
+  return `${(n * 100).toFixed(2)}%`
+}
+
+function PositionDistributionPage({ s }: { s: AuditSynthesis }) {
+  const pd = s.positionDistribution
+  if (!pd) return null
+  const footer = pageFooterText(s)
+  return React.createElement(
+    Page,
+    { size: "LETTER", style: styles.page },
+    React.createElement(
+      Text,
+      { style: styles.sectionLabel },
+      "Position Distribution",
+    ),
+    React.createElement(
+      Text,
+      { style: styles.sectionTitle },
+      "How the keyword footprint splits by ranking position",
+    ),
+    React.createElement(Text, { style: styles.body }, pd.narrative),
+    React.createElement(
+      View,
+      { style: [styles.table, { marginTop: 12 }] },
+      React.createElement(
+        View,
+        { style: styles.tableHeaderRow },
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1.2 }] },
+          "Position Band",
+        ),
+        React.createElement(
+          Text,
+          {
+            style: [
+              styles.tableHeaderCell,
+              { flex: 1, textAlign: "right" },
+            ],
+          },
+          "Queries",
+        ),
+        React.createElement(
+          Text,
+          {
+            style: [
+              styles.tableHeaderCell,
+              { flex: 1.2, textAlign: "right" },
+            ],
+          },
+          "Clicks",
+        ),
+        React.createElement(
+          Text,
+          {
+            style: [
+              styles.tableHeaderCell,
+              { flex: 1.4, textAlign: "right" },
+            ],
+          },
+          "Impressions",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1, textAlign: "right" }] },
+          "CTR",
+        ),
+      ),
+      ...pd.bands.map((b) =>
+        React.createElement(
+          View,
+          { key: b.band, style: styles.tableRow },
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1.2 }] },
+            `Pos ${b.band}`,
+          ),
+          React.createElement(
+            Text,
+            {
+              style: [styles.tableCell, { flex: 1, textAlign: "right" }],
+            },
+            b.queryCount.toLocaleString(),
+          ),
+          React.createElement(
+            Text,
+            {
+              style: [styles.tableCell, { flex: 1.2, textAlign: "right" }],
+            },
+            b.clicks.toLocaleString(),
+          ),
+          React.createElement(
+            Text,
+            {
+              style: [styles.tableCell, { flex: 1.4, textAlign: "right" }],
+            },
+            b.impressions.toLocaleString(),
+          ),
+          React.createElement(
+            Text,
+            {
+              style: [styles.tableCell, { flex: 1, textAlign: "right" }],
+            },
+            pctOf(b.ctr),
+          ),
+        ),
+      ),
+    ),
+    React.createElement(
+      View,
+      { style: styles.pageFooter, fixed: true },
+      React.createElement(Text, null, footer.left),
+      React.createElement(Text, null, footer.right),
+    ),
+  )
+}
+
+function CtrBenchmarksPage({ s }: { s: AuditSynthesis }) {
+  const cb = s.observedCtrBenchmarks
+  if (!cb) return null
+  const footer = pageFooterText(s)
+  return React.createElement(
+    Page,
+    { size: "LETTER", style: styles.page },
+    React.createElement(
+      Text,
+      { style: styles.sectionLabel },
+      "Calibration Baseline",
+    ),
+    React.createElement(
+      Text,
+      { style: styles.sectionTitle },
+      "Your own observed click-through rates at top-3",
+    ),
+    React.createElement(Text, { style: styles.body }, cb.narrative),
+    React.createElement(
+      View,
+      { style: [styles.table, { marginTop: 12 }] },
+      React.createElement(
+        View,
+        { style: styles.tableHeaderRow },
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1.2 }] },
+          "Impression Tier",
+        ),
+        React.createElement(
+          Text,
+          {
+            style: [styles.tableHeaderCell, { flex: 1, textAlign: "right" }],
+          },
+          "Queries",
+        ),
+        React.createElement(
+          Text,
+          {
+            style: [styles.tableHeaderCell, { flex: 1, textAlign: "right" }],
+          },
+          "Mean CTR",
+        ),
+        React.createElement(
+          Text,
+          {
+            style: [styles.tableHeaderCell, { flex: 1, textAlign: "right" }],
+          },
+          "Median CTR",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1.2 }] },
+          "Confidence",
+        ),
+      ),
+      ...cb.tiers.map((t) =>
+        React.createElement(
+          View,
+          { key: t.tier, style: styles.tableRow },
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1.2 }] },
+            t.tier,
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1, textAlign: "right" }] },
+            t.queryCount.toLocaleString(),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1, textAlign: "right" }] },
+            pctOf(t.meanCtr),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1, textAlign: "right" }] },
+            pctOf(t.medianCtr),
+          ),
+          React.createElement(
+            Text,
+            {
+              style: [
+                styles.tableCell,
+                { flex: 1.2, color: t.lowConfidence ? COLORS.risk : COLORS.ink },
+              ],
+            },
+            t.lowConfidence ? "low (n<5)" : "ok",
+          ),
+        ),
+      ),
+    ),
+    React.createElement(
+      View,
+      { style: styles.narrativeBox },
+      React.createElement(
+        Text,
+        null,
+        "These are the calibration baseline used in every uplift estimate later in this report. We deliberately do not use industry CTR averages (Backlinko, Sistrix etc.) — those studies pre-date AI Overviews and overstate CTR on high-impression queries.",
+      ),
+    ),
+    React.createElement(
+      View,
+      { style: styles.pageFooter, fixed: true },
+      React.createElement(Text, null, footer.left),
+      React.createElement(Text, null, footer.right),
+    ),
+  )
+}
+
+function CtrOpportunityPage({ s }: { s: AuditSynthesis }) {
+  const o = s.ctrOpportunity
+  if (!o) return null
+  const footer = pageFooterText(s)
+  return React.createElement(
+    Page,
+    { size: "LETTER", style: styles.page },
+    React.createElement(Text, { style: styles.sectionLabel }, "CTR Opportunity"),
+    React.createElement(
+      Text,
+      { style: styles.sectionTitle },
+      "What's recoverable if we move queries to top-3",
+    ),
+    React.createElement(
+      View,
+      { style: styles.kpiRow },
+      React.createElement(
+        View,
+        { style: [styles.kpiCard, styles.kpiCardLast] },
+        React.createElement(
+          Text,
+          { style: styles.kpiLabel },
+          "Calibrated annual click uplift",
+        ),
+        React.createElement(
+          Text,
+          { style: styles.kpiValue },
+          formatNumberCompact(o.estimatedAnnualClickUplift),
+        ),
+        React.createElement(
+          Text,
+          { style: { fontSize: 9, color: COLORS.muted } },
+          `Across ${o.contributingQueryCount.toLocaleString()} queries currently at positions 4–10`,
+        ),
+      ),
+    ),
+    React.createElement(Text, { style: styles.body }, o.narrative),
+    React.createElement(
+      View,
+      { style: styles.pageFooter, fixed: true },
+      React.createElement(Text, null, footer.left),
+      React.createElement(Text, null, footer.right),
+    ),
+  )
+}
+
+function QuickWinsPage({ s }: { s: AuditSynthesis }) {
+  const q = s.quickWins
+  if (!q || q.queries.length === 0) return null
+  const footer = pageFooterText(s)
+  return React.createElement(
+    Page,
+    { size: "LETTER", style: styles.page },
+    React.createElement(Text, { style: styles.sectionLabel }, "Quick Wins"),
+    React.createElement(
+      Text,
+      { style: styles.sectionTitle },
+      "Queries currently at positions 4–6 worth chasing",
+    ),
+    React.createElement(Text, { style: styles.body }, q.narrative),
+    React.createElement(
+      View,
+      { style: [styles.table, { marginTop: 12 }] },
+      React.createElement(
+        View,
+        { style: styles.tableHeaderRow },
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 3 }] },
+          "Query",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 0.7, textAlign: "right" }] },
+          "Pos",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1.1, textAlign: "right" }] },
+          "Impr",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 0.9, textAlign: "right" }] },
+          "Now",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 0.9, textAlign: "right" }] },
+          "Top-3",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1.2, textAlign: "right" }] },
+          "Annual ↑",
+        ),
+      ),
+      ...q.queries.slice(0, 15).map((qw, i) =>
+        React.createElement(
+          View,
+          { key: `qw-${i}`, style: styles.tableRow },
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 3 }] },
+            qw.query,
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 0.7, textAlign: "right" }] },
+            qw.currentPosition.toFixed(1),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1.1, textAlign: "right" }] },
+            formatNumberCompact(qw.currentImpressions),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 0.9, textAlign: "right" }] },
+            pctOf(qw.currentCtr),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 0.9, textAlign: "right" }] },
+            pctOf(qw.projectedTopThreeCtr),
+          ),
+          React.createElement(
+            Text,
+            {
+              style: [
+                styles.tableCell,
+                {
+                  flex: 1.2,
+                  textAlign: "right",
+                  color: COLORS.success,
+                  fontFamily: "Helvetica-Bold",
+                },
+              ],
+            },
+            `+${formatNumberCompact(qw.upliftAnnualClicks)}`,
+          ),
+        ),
+      ),
+    ),
+    React.createElement(
+      View,
+      { style: styles.pageFooter, fixed: true },
+      React.createElement(Text, null, footer.left),
+      React.createElement(Text, null, footer.right),
+    ),
+  )
+}
+
+function MegaHubsPage({ s }: { s: AuditSynthesis }) {
+  const m = s.megaImpressionHubs
+  if (!m || m.pages.length === 0) return null
+  const footer = pageFooterText(s)
+  return React.createElement(
+    Page,
+    { size: "LETTER", style: styles.page },
+    React.createElement(
+      Text,
+      { style: styles.sectionLabel },
+      "Mega-Impression Hubs",
+    ),
+    React.createElement(
+      Text,
+      { style: styles.sectionTitle },
+      "Pages serving huge impression volume at low CTR",
+    ),
+    React.createElement(Text, { style: styles.body }, m.narrative),
+    React.createElement(
+      View,
+      { style: [styles.table, { marginTop: 12 }] },
+      React.createElement(
+        View,
+        { style: styles.tableHeaderRow },
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 4 }] },
+          "Page",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1.2, textAlign: "right" }] },
+          "Impr",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 0.9, textAlign: "right" }] },
+          "Now",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 0.9, textAlign: "right" }] },
+          "Target",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1.2, textAlign: "right" }] },
+          "Annual ↑",
+        ),
+      ),
+      ...m.pages.slice(0, 10).map((h, i) =>
+        React.createElement(
+          View,
+          { key: `mh-${i}`, style: styles.tableRow },
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 4 }] },
+            h.page,
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1.2, textAlign: "right" }] },
+            formatNumberCompact(h.impressions),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 0.9, textAlign: "right" }] },
+            pctOf(h.ctr),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 0.9, textAlign: "right" }] },
+            pctOf(h.projectedCtr),
+          ),
+          React.createElement(
+            Text,
+            {
+              style: [
+                styles.tableCell,
+                {
+                  flex: 1.2,
+                  textAlign: "right",
+                  color: COLORS.success,
+                  fontFamily: "Helvetica-Bold",
+                },
+              ],
+            },
+            `+${formatNumberCompact(h.projectedAdditionalClicks)}`,
+          ),
+        ),
+      ),
+    ),
+    React.createElement(
+      View,
+      { style: styles.pageFooter, fixed: true },
+      React.createElement(Text, null, footer.left),
+      React.createElement(Text, null, footer.right),
+    ),
+  )
+}
+
+function PageConcentrationPage({ s }: { s: AuditSynthesis }) {
+  const c = s.pageConcentration
+  if (!c) return null
+  const footer = pageFooterText(s)
+  return React.createElement(
+    Page,
+    { size: "LETTER", style: styles.page },
+    React.createElement(Text, { style: styles.sectionLabel }, "Page Concentration"),
+    React.createElement(
+      Text,
+      { style: styles.sectionTitle },
+      "How concentrated organic clicks are across the site",
+    ),
+    React.createElement(Text, { style: styles.body }, c.narrative),
+    React.createElement(
+      View,
+      { style: [styles.table, { marginTop: 12 }] },
+      React.createElement(
+        View,
+        { style: styles.tableHeaderRow },
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1 }] },
+          "Top N pages",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1.2, textAlign: "right" }] },
+          "Clicks",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1, textAlign: "right" }] },
+          "Share",
+        ),
+      ),
+      ...c.bands.map((b) =>
+        React.createElement(
+          View,
+          { key: `pc-${b.topN}`, style: styles.tableRow },
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1 }] },
+            `Top ${b.topN}`,
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1.2, textAlign: "right" }] },
+            formatNumberCompact(b.clicks),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1, textAlign: "right" }] },
+            `${b.sharePct.toFixed(1)}%`,
+          ),
+        ),
+      ),
+    ),
+    React.createElement(
+      View,
+      { style: styles.narrativeBox },
+      React.createElement(
+        Text,
+        null,
+        `It takes ${c.pagesToHalfOfClicks.toLocaleString()} pages to reach 50% of organic clicks. Lower numbers signal higher concentration risk.`,
+      ),
+    ),
+    React.createElement(
+      View,
+      { style: styles.pageFooter, fixed: true },
+      React.createElement(Text, null, footer.left),
+      React.createElement(Text, null, footer.right),
+    ),
+  )
+}
+
+function TopicClustersPage({ s }: { s: AuditSynthesis }) {
+  const tc = s.topicClusters
+  if (!tc || tc.clusters.length === 0) return null
+  const footer = pageFooterText(s)
+  return React.createElement(
+    Page,
+    { size: "LETTER", style: styles.page },
+    React.createElement(Text, { style: styles.sectionLabel }, "Topic Clusters"),
+    React.createElement(
+      Text,
+      { style: styles.sectionTitle },
+      "Where the keyword footprint clusters today",
+    ),
+    React.createElement(Text, { style: styles.body }, tc.narrative),
+    React.createElement(
+      View,
+      { style: [styles.table, { marginTop: 12 }] },
+      React.createElement(
+        View,
+        { style: styles.tableHeaderRow },
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 2 }] },
+          "Cluster",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1, textAlign: "right" }] },
+          "Queries",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1, textAlign: "right" }] },
+          "Clicks",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1.2, textAlign: "right" }] },
+          "Impr",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 0.9, textAlign: "right" }] },
+          "CTR",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 0.9, textAlign: "right" }] },
+          "Pos",
+        ),
+      ),
+      ...tc.clusters.map((cl, i) =>
+        React.createElement(
+          View,
+          {
+            key: `cl-${i}`,
+            style:
+              cl.name === tc.highestLeverageCluster
+                ? [styles.tableRow, styles.tableRowProspect]
+                : styles.tableRow,
+          },
+          React.createElement(
+            Text,
+            {
+              style: [
+                cl.name === tc.highestLeverageCluster
+                  ? styles.tableCellStrong
+                  : styles.tableCell,
+                { flex: 2 },
+              ],
+            },
+            cl.name,
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1, textAlign: "right" }] },
+            cl.queryCount.toLocaleString(),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1, textAlign: "right" }] },
+            formatNumberCompact(cl.totalClicks),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1.2, textAlign: "right" }] },
+            formatNumberCompact(cl.totalImpressions),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 0.9, textAlign: "right" }] },
+            pctOf(cl.averageCtr),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 0.9, textAlign: "right" }] },
+            cl.averagePosition.toFixed(1),
+          ),
+        ),
+      ),
+    ),
+    React.createElement(
+      View,
+      { style: styles.narrativeBox },
+      React.createElement(
+        Text,
+        null,
+        `Highest-leverage cluster: ${tc.highestLeverageCluster}`,
+      ),
+    ),
+    React.createElement(
+      View,
+      { style: styles.pageFooter, fixed: true },
+      React.createElement(Text, null, footer.left),
+      React.createElement(Text, null, footer.right),
+    ),
+  )
+}
+
+function LocalPerformancePage({ s }: { s: AuditSynthesis }) {
+  const lp = s.localPerformance
+  if (!lp || lp.rows.length === 0) return null
+  const footer = pageFooterText(s)
+  return React.createElement(
+    Page,
+    { size: "LETTER", style: styles.page },
+    React.createElement(Text, { style: styles.sectionLabel }, "Local Performance"),
+    React.createElement(
+      Text,
+      { style: styles.sectionTitle },
+      "How each target market is performing",
+    ),
+    React.createElement(Text, { style: styles.body }, lp.narrative),
+    React.createElement(
+      View,
+      { style: [styles.table, { marginTop: 12 }] },
+      React.createElement(
+        View,
+        { style: styles.tableHeaderRow },
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 2 }] },
+          "Market",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1, textAlign: "right" }] },
+          "Rankings",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1, textAlign: "right" }] },
+          "Top-3",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1, textAlign: "right" }] },
+          "Clicks",
+        ),
+        React.createElement(
+          Text,
+          { style: [styles.tableHeaderCell, { flex: 1.2, textAlign: "right" }] },
+          "Impr",
+        ),
+      ),
+      ...lp.rows.map((r, i) =>
+        React.createElement(
+          View,
+          { key: `lp-${i}`, style: styles.tableRow },
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 2 }] },
+            `${r.city}${r.state ? `, ${r.state}` : ""}`,
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1, textAlign: "right" }] },
+            r.rankingsCount.toLocaleString(),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1, textAlign: "right" }] },
+            r.topThreeCount.toLocaleString(),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1, textAlign: "right" }] },
+            formatNumberCompact(r.totalClicks),
+          ),
+          React.createElement(
+            Text,
+            { style: [styles.tableCell, { flex: 1.2, textAlign: "right" }] },
+            formatNumberCompact(r.totalImpressions),
+          ),
+        ),
+      ),
+    ),
+    React.createElement(
+      View,
+      { style: styles.pageFooter, fixed: true },
+      React.createElement(Text, null, footer.left),
+      React.createElement(Text, null, footer.right),
+    ),
+  )
+}
 
 export async function renderAuditPdf(synthesis: AuditSynthesis): Promise<Buffer> {
   const doc = React.createElement(
@@ -1039,11 +1806,25 @@ export async function renderAuditPdf(synthesis: AuditSynthesis): Promise<Buffer>
     {
       title: `SEO Audit — ${synthesis.prospectDomain}`,
       author: "Harbinger Marketing",
-      subject: "Pre-sales SEO audit",
+      subject: "SEO audit",
     },
     CoverPage({ s: synthesis }),
     ExecutiveSummaryPage({ s: synthesis }),
     synthesis.trafficAnalysis ? TrafficPage({ s: synthesis }) : null,
+    synthesis.positionDistribution
+      ? PositionDistributionPage({ s: synthesis })
+      : null,
+    synthesis.observedCtrBenchmarks
+      ? CtrBenchmarksPage({ s: synthesis })
+      : null,
+    synthesis.ctrOpportunity ? CtrOpportunityPage({ s: synthesis }) : null,
+    synthesis.quickWins ? QuickWinsPage({ s: synthesis }) : null,
+    synthesis.megaImpressionHubs ? MegaHubsPage({ s: synthesis }) : null,
+    synthesis.pageConcentration
+      ? PageConcentrationPage({ s: synthesis })
+      : null,
+    synthesis.topicClusters ? TopicClustersPage({ s: synthesis }) : null,
+    synthesis.localPerformance ? LocalPerformancePage({ s: synthesis }) : null,
     CompetitivePage({ s: synthesis }),
     TechnicalPage({ s: synthesis }),
     BacklinkPage({ s: synthesis }),

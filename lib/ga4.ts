@@ -4,7 +4,9 @@ import { google } from "googleapis"
 import { env } from "@/lib/env"
 import { getOAuth2Client } from "@/lib/gsc"
 import type {
+  GA4ChannelRow,
   GA4LandingPage,
+  GA4MonthlyOrganicRow,
   GA4PageConversion,
   GA4PropertyInfo,
   GA4SeoReport,
@@ -403,6 +405,112 @@ export async function getSeoReport(params: {
     }
   } catch (error: unknown) {
     wrapApiError(error, "getSeoReport")
+  }
+}
+
+/**
+ * Month-by-month organic-search sessions for the audit's seasonality
+ * commentary. Returns YYYY-MM bucketed rows for the supplied range.
+ *
+ * Filtered to `sessionDefaultChannelGroup = "Organic Search"` so the trend
+ * line isn't muddied by paid spikes. Conversions and engagement duration
+ * come along for free since we're already in the report.
+ */
+export async function getMonthlyOrganic(params: {
+  propertyId: string
+  startDate: string
+  endDate: string
+}): Promise<GA4MonthlyOrganicRow[]> {
+  assertRefreshToken()
+  assertIsoDate(params.startDate, "startDate")
+  assertIsoDate(params.endDate, "endDate")
+  const property = normalizePropertyId(params.propertyId)
+  const client = getDataClient()
+  try {
+    const [resp] = await client.runReport({
+      property,
+      dateRanges: [{ startDate: params.startDate, endDate: params.endDate }],
+      dimensions: [{ name: "yearMonth" }],
+      metrics: [
+        { name: "sessions" },
+        { name: "conversions" },
+        { name: "userEngagementDuration" },
+      ],
+      dimensionFilter: {
+        filter: {
+          fieldName: "sessionDefaultChannelGroup",
+          stringFilter: { matchType: "EXACT", value: "Organic Search" },
+        },
+      },
+      orderBys: [{ dimension: { dimensionName: "yearMonth" } }],
+      limit: 24,
+    })
+    const rows = resp.rows ?? []
+    return rows.flatMap((row): GA4MonthlyOrganicRow[] => {
+      const yearMonthRaw = row.dimensionValues?.[0]?.value
+      if (!yearMonthRaw) return []
+      // GA4 returns yearMonth as "YYYYMM"; reformat to "YYYY-MM" for clarity.
+      const month =
+        yearMonthRaw.length === 6
+          ? `${yearMonthRaw.slice(0, 4)}-${yearMonthRaw.slice(4)}`
+          : yearMonthRaw
+      return [
+        {
+          month,
+          sessions: toNumber(row.metricValues?.[0]?.value),
+          conversions: toNumber(row.metricValues?.[1]?.value),
+          engagementDurationSec: toNumber(row.metricValues?.[2]?.value),
+        },
+      ]
+    })
+  } catch (error: unknown) {
+    wrapApiError(error, "getMonthlyOrganic")
+  }
+}
+
+/**
+ * Sessions / users / conversions broken out by GA4's default channel
+ * grouping (Organic Search, Direct, Paid Search, Referral, etc.) — used
+ * by the audit to call out how dependent the partner is on organic.
+ */
+export async function getChannelBreakdown(params: {
+  propertyId: string
+  startDate: string
+  endDate: string
+}): Promise<GA4ChannelRow[]> {
+  assertRefreshToken()
+  assertIsoDate(params.startDate, "startDate")
+  assertIsoDate(params.endDate, "endDate")
+  const property = normalizePropertyId(params.propertyId)
+  const client = getDataClient()
+  try {
+    const [resp] = await client.runReport({
+      property,
+      dateRanges: [{ startDate: params.startDate, endDate: params.endDate }],
+      dimensions: [{ name: "sessionDefaultChannelGroup" }],
+      metrics: [
+        { name: "sessions" },
+        { name: "totalUsers" },
+        { name: "conversions" },
+      ],
+      orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
+      limit: 25,
+    })
+    const rows = resp.rows ?? []
+    return rows.flatMap((row): GA4ChannelRow[] => {
+      const channel = row.dimensionValues?.[0]?.value
+      if (!channel) return []
+      return [
+        {
+          channel,
+          sessions: toNumber(row.metricValues?.[0]?.value),
+          users: toNumber(row.metricValues?.[1]?.value),
+          conversions: toNumber(row.metricValues?.[2]?.value),
+        },
+      ]
+    })
+  } catch (error: unknown) {
+    wrapApiError(error, "getChannelBreakdown")
   }
 }
 

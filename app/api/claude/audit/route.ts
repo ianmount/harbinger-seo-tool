@@ -17,14 +17,16 @@ export const maxDuration = 300
 /**
  * Audit synthesis route.
  *
- * Model: `claude-sonnet-4-6`. Opus 4.7 was hitting stream-idle timeouts on
- * the large audit payload (crawl + competitive + backlinks + optional GSC/GA4
- * can be 30-40k input tokens); Sonnet 4.6 streams faster and has been
- * sufficient for this structured-output task in our testing. Keep an eye on
- * finding quality — if it regresses, swap back to Opus and solve the
- * timeout a different way (shorter prompt, chunked synthesis, etc.).
+ * Model: `claude-opus-4-7`. The audit is a long-form judgment-heavy
+ * deliverable and the cost lift over Sonnet is justified for the quality
+ * gain, especially on the calibrated CTR-uplift narratives where Opus is
+ * noticeably better at honoring the "use partner's own data, not industry
+ * averages" instruction. We bumped max_tokens to fit ~10K tokens of
+ * finished prose. If we hit stream-idle timeouts on very large 16-month
+ * payloads, the fallback is shrinking the input (cap topQueries to fewer
+ * rows) rather than swapping models.
  */
-const AUDIT_MODEL = "claude-sonnet-4-6"
+const AUDIT_MODEL = "claude-opus-4-7"
 
 // ────────────────────────────────────────────────────────────────────────────
 // Request schema. Each sub-object is validated loosely (passthrough) because
@@ -44,20 +46,24 @@ const prospectSchema = z.object({
 
 const bodySchema = z.object({
   prospect: prospectSchema,
+  partnerDriven: z.boolean().optional(),
   crawl: z.unknown(),
   competitive: z.unknown(),
   backlinks: z.unknown(),
-  gsc: z.unknown().optional(),
-  ga4: z.unknown().optional(),
+  gsc: z.unknown().optional().nullable(),
+  ga4: z.unknown().optional().nullable(),
+  gscShortHistory: z.boolean().optional(),
 })
 
 interface ParsedBody {
   prospect: Prospect
+  partnerDriven: boolean
   crawl: CrawlReport
   competitive: CompetitiveReport
   backlinks: BacklinkReport
   gsc?: AuditGscSlice
   ga4?: AuditGa4Slice
+  gscShortHistory: boolean
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -161,62 +167,194 @@ function buildBacklinkBlock(b: BacklinkReport): string {
 
 function buildGscBlock(gsc: AuditGscSlice): string {
   const lines: string[] = []
-  lines.push(`# Google Search Console (${gsc.dateRange.startDate} → ${gsc.dateRange.endDate})`)
+  lines.push(`# Google Search Console`)
   lines.push(`Site: ${gsc.siteUrl}`)
-  lines.push(`Totals: ${gsc.totalClicks.toLocaleString()} clicks, ${gsc.totalImpressions.toLocaleString()} impressions`)
+  lines.push(
+    `Long-range window: ${gsc.longRange.dateRange.startDate} → ${gsc.longRange.dateRange.endDate}`,
+  )
+  lines.push(
+    `Recent window (calibration): ${gsc.recent.dateRange.startDate} → ${gsc.recent.dateRange.endDate}`,
+  )
+  lines.push(
+    `Long-range totals: ${gsc.longRange.totalClicks.toLocaleString()} clicks, ${gsc.longRange.totalImpressions.toLocaleString()} impressions`,
+  )
   lines.push("")
-  lines.push(`## Top queries`)
-  for (const q of gsc.topQueries.slice(0, 15)) {
-    lines.push(`  - ${truncate(q.query, 80)} — ${q.clicks} clicks, ${q.impressions} impr, ${(q.ctr * 100).toFixed(2)}% CTR, pos ${q.position.toFixed(1)}`)
+
+  // Position distribution.
+  lines.push(`## Position Distribution (long-range)`)
+  for (const b of gsc.analyses.positionDistribution) {
+    lines.push(
+      `  - Pos ${b.band}: ${b.queryCount.toLocaleString()} queries, ${b.clicks.toLocaleString()} clicks, ${b.impressions.toLocaleString()} impr, ${(b.ctr * 100).toFixed(2)}% CTR`,
+    )
   }
   lines.push("")
-  lines.push(`## Top pages`)
-  for (const p of gsc.topPages.slice(0, 15)) {
-    lines.push(`  - ${truncate(p.page, 100)} — ${p.clicks} clicks, ${p.impressions} impr, ${(p.ctr * 100).toFixed(2)}% CTR`)
+
+  // Observed CTR benchmarks — the calibration baseline.
+  lines.push(
+    `## Partner's OWN observed CTR at top-3 (90-day, by impression tier) — USE THESE FOR EVERY UPLIFT ESTIMATE`,
+  )
+  for (const t of gsc.analyses.observedCtrTiers) {
+    lines.push(
+      `  - ${t.tier} impressions: ${t.queryCount} queries, mean CTR ${(t.meanCtr * 100).toFixed(2)}%, median CTR ${(t.medianCtr * 100).toFixed(2)}%${t.lowConfidence ? " (LOW CONFIDENCE — fewer than 5 queries)" : ""}`,
+    )
+  }
+  lines.push("")
+
+  // Page concentration.
+  lines.push(`## Power-Page Concentration (long-range)`)
+  lines.push(
+    `Total pages with clicks: ${gsc.analyses.pageConcentration.totalPages.toLocaleString()} · total clicks: ${gsc.analyses.pageConcentration.totalClicks.toLocaleString()}`,
+  )
+  for (const b of gsc.analyses.pageConcentration.bands) {
+    lines.push(
+      `  - Top ${b.topN} pages = ${b.clicks.toLocaleString()} clicks (${b.sharePct.toFixed(1)}% of total)`,
+    )
+  }
+  lines.push(
+    `  - It takes ${gsc.analyses.pageConcentration.pagesToHalfOfClicks} pages to reach 50% of total organic clicks.`,
+  )
+  lines.push("")
+
+  // Quick wins (positions 4-10).
+  if (gsc.analyses.quickWins.length > 0) {
+    lines.push(
+      `## Quick-Win Queries (positions 4–10, calibrated against partner's own top-3 CTR)`,
+    )
+    for (const q of gsc.analyses.quickWins.slice(0, 25)) {
+      lines.push(
+        `  - "${truncate(q.query, 70)}" — pos ${q.currentPosition.toFixed(1)}, ${q.currentImpressions.toLocaleString()} impr, ${q.currentClicks} clicks (${(q.currentCtr * 100).toFixed(2)}% CTR), tier ${q.matchedTier}, projected top-3 CTR ${(q.projectedTopThreeCtr * 100).toFixed(2)}%, est. annual uplift +${Math.round(q.upliftAnnualClicks).toLocaleString()} clicks${q.page ? ` (page: ${truncate(q.page, 80)})` : ""}`,
+      )
+    }
+    lines.push("")
+  }
+
+  // Mega-impression hubs.
+  if (gsc.analyses.megaImpressionHubs.length > 0) {
+    lines.push(
+      `## Mega-Impression Hub Pages (>=100K impressions, sub-2% CTR)`,
+    )
+    for (const h of gsc.analyses.megaImpressionHubs) {
+      lines.push(
+        `  - ${truncate(h.page, 100)} — ${h.impressions.toLocaleString()} impr, ${h.clicks.toLocaleString()} clicks (${(h.ctr * 100).toFixed(2)}% CTR), pos ${h.position.toFixed(1)}, calibrated projected CTR ${(h.projectedCtr * 100).toFixed(2)}%, est. annual additional clicks +${Math.round(h.projectedAdditionalClicks).toLocaleString()}`,
+      )
+    }
+    lines.push("")
+  }
+
+  // Top queries (sample for clustering and finding generation).
+  lines.push(
+    `## Top queries by impressions (long-range, sample of ${Math.min(120, gsc.longRange.topQueries.length)})`,
+  )
+  const sortedByImpr = [...gsc.longRange.topQueries]
+    .sort((a, b) => b.impressions - a.impressions)
+    .slice(0, 120)
+  for (const q of sortedByImpr) {
+    lines.push(
+      `  - ${truncate(q.query, 70)} — ${q.clicks} clk, ${q.impressions.toLocaleString()} impr, ${(q.ctr * 100).toFixed(2)}% CTR, pos ${q.position.toFixed(1)}`,
+    )
+  }
+  lines.push("")
+
+  lines.push(`## Top pages by clicks (long-range)`)
+  for (const p of gsc.longRange.topPages.slice(0, 25)) {
+    lines.push(
+      `  - ${truncate(p.page, 100)} — ${p.clicks.toLocaleString()} clicks, ${p.impressions.toLocaleString()} impr, ${(p.ctr * 100).toFixed(2)}% CTR, pos ${p.position.toFixed(1)}`,
+    )
   }
   return lines.join("\n")
 }
 
 function buildGa4Block(ga4: AuditGa4Slice): string {
   const lines: string[] = []
-  const cur = ga4.current
-  lines.push(`# Google Analytics 4 — current quarter ${cur.dateRange.startDate} → ${cur.dateRange.endDate}`)
+  const cur = ga4.currentYear
+  lines.push(
+    `# Google Analytics 4 — last 12 months (${cur.dateRange.startDate} → ${cur.dateRange.endDate})`,
+  )
   lines.push(`Sessions: ${cur.sessions.toLocaleString()}`)
   lines.push(`Users: ${cur.users.toLocaleString()}`)
-  lines.push(`Conversions: ${cur.conversions.toLocaleString()} (conversions configured: ${cur.conversionsConfigured})`)
-  if (ga4.prior) {
-    const p = ga4.prior
-    lines.push("")
-    lines.push(`Prior-year quarter (${p.dateRange.startDate} → ${p.dateRange.endDate}): ${p.sessions.toLocaleString()} sessions, ${p.users.toLocaleString()} users, ${p.conversions.toLocaleString()} conversions`)
-    lines.push(`YoY deltas: sessions ${formatPct(pctDelta(cur.sessions, p.sessions))}, users ${formatPct(pctDelta(cur.users, p.users))}, conversions ${formatPct(pctDelta(cur.conversions, p.conversions))}`)
+  lines.push(
+    `Conversions: ${cur.conversions.toLocaleString()} (configured: ${cur.conversionsConfigured})`,
+  )
 
-    // Per-page YoY loss. Useful for "top pages to recover".
-    const priorByPage = new Map(p.topLandingPages.map((lp) => [lp.landingPage, lp]))
-    const losses: { page: string; current: number; prior: number; delta: number }[] = []
+  // Channel breakdown — useful for "how organic-dependent is this partner?".
+  if (ga4.channelBreakdown.length > 0) {
+    lines.push("")
+    lines.push(`## Sessions by default channel grouping (last 12 months)`)
+    const totalSess = ga4.channelBreakdown.reduce((s, c) => s + c.sessions, 0)
+    for (const c of ga4.channelBreakdown) {
+      const share = totalSess > 0 ? (c.sessions / totalSess) * 100 : 0
+      lines.push(
+        `  - ${c.channel}: ${c.sessions.toLocaleString()} sessions (${share.toFixed(1)}%), ${c.conversions.toLocaleString()} conversions`,
+      )
+    }
+  }
+
+  // Monthly organic — seasonality + recent trajectory.
+  if (ga4.monthlyOrganic.length > 0) {
+    lines.push("")
+    lines.push(`## Monthly organic sessions (for seasonality)`)
+    for (const m of ga4.monthlyOrganic) {
+      lines.push(
+        `  - ${m.month}: ${m.sessions.toLocaleString()} sessions, ${m.conversions.toLocaleString()} conversions`,
+      )
+    }
+  }
+
+  // YoY against prior 12 months.
+  if (ga4.priorYear) {
+    const p = ga4.priorYear
+    lines.push("")
+    lines.push(
+      `## YoY vs. prior year (${p.dateRange.startDate} → ${p.dateRange.endDate})`,
+    )
+    lines.push(
+      `Prior: ${p.sessions.toLocaleString()} sessions, ${p.users.toLocaleString()} users, ${p.conversions.toLocaleString()} conversions`,
+    )
+    lines.push(
+      `Deltas: sessions ${formatPct(pctDelta(cur.sessions, p.sessions))}, users ${formatPct(pctDelta(cur.users, p.users))}, conversions ${formatPct(pctDelta(cur.conversions, p.conversions))}`,
+    )
+
+    const priorByPage = new Map(
+      p.topLandingPages.map((lp) => [lp.landingPage, lp]),
+    )
+    const losses: {
+      page: string
+      current: number
+      prior: number
+      delta: number
+    }[] = []
     for (const lp of cur.topLandingPages) {
       const prior = priorByPage.get(lp.landingPage)
-      if (!prior) continue
-      if (prior.sessions <= 10) continue
+      if (!prior || prior.sessions <= 10) continue
       const delta = pctDelta(lp.sessions, prior.sessions)
       if (delta < -5) {
-        losses.push({ page: lp.landingPage, current: lp.sessions, prior: prior.sessions, delta })
+        losses.push({
+          page: lp.landingPage,
+          current: lp.sessions,
+          prior: prior.sessions,
+          delta,
+        })
       }
     }
     losses.sort((a, b) => a.delta - b.delta)
     if (losses.length > 0) {
       lines.push("")
-      lines.push(`## Top landing pages that LOST sessions YoY`)
+      lines.push(`### Top landing pages that LOST sessions YoY`)
       for (const l of losses.slice(0, 10)) {
-        lines.push(`  - ${truncate(l.page, 100)} — ${l.current} current vs. ${l.prior} prior (${formatPct(l.delta)})`)
+        lines.push(
+          `  - ${truncate(l.page, 100)} — ${l.current} current vs. ${l.prior} prior (${formatPct(l.delta)})`,
+        )
       }
     }
   }
 
   if (cur.organicOnly.length > 0) {
     lines.push("")
-    lines.push(`## Organic-search landing pages (current)`)
+    lines.push(`## Organic landing pages (current 12 months)`)
     for (const lp of cur.organicOnly.slice(0, 15)) {
-      lines.push(`  - ${truncate(lp.landingPage, 100)} — ${lp.sessions} sessions, ${lp.conversions} conv, ${(lp.conversionRate * 100).toFixed(2)}% conv rate`)
+      lines.push(
+        `  - ${truncate(lp.landingPage, 100)} — ${lp.sessions.toLocaleString()} sess, ${lp.conversions.toLocaleString()} conv, ${(lp.conversionRate * 100).toFixed(2)}% rate`,
+      )
     }
   }
   return lines.join("\n")
@@ -225,32 +363,57 @@ function buildGa4Block(ga4: AuditGa4Slice): string {
 // ────────────────────────────────────────────────────────────────────────────
 // The actual prompt.
 
-const SYSTEM_PROMPT = `You are a senior SEO analyst producing a pre-sales audit for a prospective client of Harbinger Marketing. The audit will be delivered as a polished PDF sent directly to the prospect and the MD running the sales call.
+const SYSTEM_PROMPT = `You are a senior SEO analyst producing an SEO audit for Harbinger Marketing. The audit is delivered as a polished PDF.
+
+The audit can run in two modes:
+  - PARTNER MODE: GSC + GA4 are connected and you have rich first-party data. Produce a calibrated, data-grounded audit with quantified uplift estimates. This is the default.
+  - PRE-SALES MODE: no GSC/GA4 access. Run on crawl + DataForSEO + competitor signals only. Clearly flag that the audit is running on third-party estimates and explicitly note the limitation in the executive summary.
 
 HARD CONSTRAINTS (violations cause the audit to be rejected):
-1. Produce EXACTLY 5–7 key findings. Not 8. Not 10. If more issues exist, pick the 7 with highest business impact and push the rest into appendix_issues as one-liners.
-2. Every finding MUST cite a specific URL, count, or percentage taken VERBATIM from the data provided. Generic statements are forbidden.
-3. At least ONE finding must reference a competitor domain by name to make the comparison concrete.
-4. The backlink_risk section must list 3–5 actual spammy domain examples from the data (use the exact domain strings provided). If fewer than 3 high-spam domains exist in the data, say so honestly and list what does exist.
-5. If GA4 conversion data is available and conversions are configured, traffic findings MUST translate to leads/revenue in plain language (e.g. "230 fewer organic sessions per month = roughly 9 fewer lead forms at the site's 4% conversion rate"). If GA4 is missing OR conversions are not configured, acknowledge the data gap rather than inventing a number.
-6. No H/M/L priority labels unless tied to a concrete number (e.g. "affects pages representing 40% of organic sessions").
-7. The 90-day roadmap must reference findings by number using the "#N" format (e.g. "Resolves Finding #3 — the 230 non-indexed pages").
-8. No generic recommendations. "Optimize images" is forbidden. Say which images on which URLs and what the specific problem is.
-9. If GA4 is not available: skip the traffic_analysis and top_pages_to_recover sections (set them to null) rather than fabricating data.
+1. Produce EXACTLY 5–7 key findings. If more exist, push extras into appendixIssues as one-liners.
+2. Every finding MUST cite a specific URL, count, percentage, or query taken VERBATIM from the data provided. Generic statements are forbidden.
+3. At least ONE finding must reference a competitor domain by name.
+4. backlinkRisk must list 3–5 actual spammy domain examples using exact domain strings from the data. If fewer than 3 exist, say so honestly.
+5. If GA4 conversions are configured: traffic findings MUST translate to leads/revenue in plain language (e.g. "230 fewer organic sessions/month ≈ 9 fewer lead forms at the site's 4% conversion rate"). If conversions are not configured or GA4 is absent, acknowledge the gap rather than inventing a number.
+6. The 90-day roadmap must reference findings by number using "#N" format.
+7. No generic recommendations. Specify the exact pages, queries, and metrics being addressed.
 
-OUTPUT FORMAT: return ONLY a single JSON object (no preamble, no trailing text, no markdown fences) matching the schema provided in the user message. Ensure JSON is valid and parseable.`
+CALIBRATION RULES (apply when GSC is connected):
+A. Every CTR uplift estimate MUST be calibrated against the partner's OWN observed CTR at top-3 by impression tier (provided in the GSC block under "Partner's OWN observed CTR at top-3"). DO NOT use industry CTR averages. DO NOT cite Backlinko / Sistrix / Advanced Web Ranking studies. The partner's data is the only source of truth.
+B. Be honest about AI Overview suppression: high-impression informational queries (10K+ impressions) will NOT earn 30%+ CTR at top-3 even with perfect titles. Numbers in your output must reflect that — a 6–12% top-3 CTR is realistic for high-impression queries today.
+C. Quick-win and mega-impression-hub uplift figures have already been pre-calculated server-side using the calibrated tiers. You may cite the calculated figures verbatim. If you produce additional uplift estimates of your own, calibrate them the same way.
+D. When GSC history is short (gscShortHistory=true), seasonality commentary MUST acknowledge the data limitation rather than fabricate a trend.
+
+TOPIC CLUSTERING:
+Cluster the long-range top-queries list into 5–10 topic groups based on user intent and subject matter. For each cluster report queryCount, totalClicks, totalImpressions, averageCtr, averagePosition (averages weighted by impressions). Identify ONE cluster as highestLeverageCluster — the one with high impressions and below-average CTR — and explain WHY in the narrative.
+
+LOCAL PERFORMANCE:
+For each target market (city + state in prospect.targetMarkets), report counts derived from filtering GSC queries by city tokens. If GSC is absent, report DataForSEO-derived counts instead and flag the source.
+
+OUTPUT FORMAT: return ONLY a single JSON object (no preamble, no trailing text, no markdown fences) matching the schema in the user message. JSON must be valid and parseable.`
 
 function buildUserPrompt(body: ParsedBody): string {
-  const { prospect, crawl, competitive, backlinks, gsc, ga4 } = body
+  const { prospect, partnerDriven, crawl, competitive, backlinks, gsc, ga4 } =
+    body
   const lines: string[] = []
 
-  lines.push(`# Prospect`)
+  lines.push(`# Audit subject`)
+  lines.push(`Mode: ${partnerDriven ? "PARTNER (auto-resolved GSC/GA4)" : "PRE-SALES (third-party data only unless GSC/GA4 supplied)"}`)
   lines.push(`Domain: ${prospect.domain}`)
-  if (prospect.contactName) lines.push(`Contact: ${prospect.contactName}`)
-  lines.push(`Target markets: ${prospect.targetMarkets.map((m) => `${m.city}, ${m.state}`).join("; ")}`)
-  lines.push(`Competitors provided: ${prospect.competitors.length > 0 ? prospect.competitors.join(", ") : "(none — auto-suggested)"}`)
-  lines.push(`GSC access: ${gsc ? "yes" : "no"}`)
-  lines.push(`GA4 access: ${ga4 ? "yes" : "no"}`)
+  if (prospect.contactName) lines.push(`Name: ${prospect.contactName}`)
+  lines.push(
+    `Target markets: ${prospect.targetMarkets.map((m) => `${m.city}, ${m.state}`).join("; ")}`,
+  )
+  lines.push(
+    `Competitors provided: ${prospect.competitors.length > 0 ? prospect.competitors.join(", ") : "(none — auto-suggested)"}`,
+  )
+  lines.push(`GSC access: ${gsc ? "yes" : "no — fall back to third-party estimates and FLAG the gap"}`)
+  lines.push(`GA4 access: ${ga4 ? "yes" : "no — fall back to third-party estimates and FLAG the gap"}`)
+  if (body.gscShortHistory) {
+    lines.push(
+      `GSC short-history flag: TRUE — long-range window covers <6 months. Cap seasonality commentary accordingly.`,
+    )
+  }
   lines.push("")
 
   lines.push(buildCrawlBlock(crawl))
@@ -347,17 +510,95 @@ function buildUserPrompt(body: ParsedBody): string {
             phase: "Month 1",
             title: "<short>",
             description:
-              "<what gets done. MUST reference findings by #N, e.g. 'Resolves Finding #3'>",
+              "<MUST reference findings by #N, e.g. 'Resolves Finding #3'>",
             findingRefs: [3],
           },
           { phase: "Month 2", title: "", description: "", findingRefs: [] },
           { phase: "Month 3", title: "", description: "", findingRefs: [] },
         ],
+        positionDistribution: gsc
+          ? {
+              bands: gsc.analyses.positionDistribution,
+              narrative:
+                "<2-3 sentences reading the table. Name the band that holds the most opportunity.>",
+            }
+          : null,
+        observedCtrBenchmarks: gsc
+          ? {
+              tiers: gsc.analyses.observedCtrTiers,
+              narrative:
+                "<2-3 sentences. Acknowledge AI Overview suppression on high-impression tiers explicitly. State that THESE are the calibration baseline used for every uplift estimate in this report.>",
+            }
+          : null,
+        ctrOpportunity: gsc
+          ? {
+              estimatedAnnualClickUplift: 0,
+              contributingQueryCount: 0,
+              narrative:
+                "<3-4 sentences. Total uplift from moving the quick-win queries to top-3, calibrated against the partner's own observed CTRs (NOT industry averages). Be honest: high-impression queries earn lower CTRs at top-3 due to AI Overview suppression. Cite the calibrated tier numbers.>",
+            }
+          : null,
+        pageConcentration: gsc
+          ? {
+              bands: gsc.analyses.pageConcentration.bands,
+              pagesToHalfOfClicks: gsc.analyses.pageConcentration.pagesToHalfOfClicks,
+              narrative:
+                "<2-3 sentences. Frame concentration as algorithm-update vulnerability if it's high. State the 'pages to 50%' number.>",
+            }
+          : null,
+        topicClusters: gsc
+          ? {
+              clusters: [
+                {
+                  name: "<cluster name, e.g. 'Drain repair'>",
+                  queryCount: 0,
+                  totalClicks: 0,
+                  totalImpressions: 0,
+                  averageCtr: 0,
+                  averagePosition: 0,
+                  notes: "<1 sentence read>",
+                },
+              ],
+              highestLeverageCluster: "<the cluster name with high impressions and below-avg CTR>",
+              narrative:
+                "<2-3 sentences. Why is the highest-leverage cluster underperforming? What content move resolves it?>",
+            }
+          : null,
+        quickWins: gsc
+          ? {
+              queries: gsc.analyses.quickWins.slice(0, 12),
+              narrative:
+                "<2-3 sentences. Why these specifically? What's the common bottleneck (title, intro, schema)?>",
+            }
+          : null,
+        megaImpressionHubs: gsc
+          ? {
+              pages: gsc.analyses.megaImpressionHubs,
+              narrative:
+                "<2-3 sentences. Why title/meta rewrites here are the highest-ROI move. Reference AI Overview reality.>",
+            }
+          : null,
+        localPerformance: gsc
+          ? {
+              rows: prospect.targetMarkets.map((m) => ({
+                city: m.city,
+                state: m.state,
+                rankingsCount: 0,
+                topThreeCount: 0,
+                totalClicks: 0,
+                totalImpressions: 0,
+              })),
+              narrative:
+                "<2-3 sentences naming the strongest and weakest market by GSC click volume.>",
+            }
+          : null,
         dataSources: {
           crawlPagesAnalyzed: 0,
           gscIncluded: Boolean(gsc),
           ga4Included: Boolean(ga4),
+          gscShortHistory: Boolean(body.gscShortHistory),
           competitorsAutoSuggested: competitive.competitorsAutoSuggested,
+          partnerDriven: Boolean(body.partnerDriven),
         },
       },
       null,
@@ -432,14 +673,21 @@ export async function POST(request: Request) {
     )
   }
 
-  const body = parsed.data as unknown as ParsedBody
+  const body = {
+    ...(parsed.data as unknown as ParsedBody),
+    partnerDriven: parsed.data.partnerDriven ?? false,
+    gscShortHistory: parsed.data.gscShortHistory ?? false,
+  } as ParsedBody
 
   try {
     const prompt = buildUserPrompt(body)
+    // Opus 4.7 — long-form deliverable, ~10K output tokens of finished prose
+    // plus the structured JSON wrapper. Cost is justified by the quality lift
+    // on calibrated-uplift narratives.
     const text = await callClaude(prompt, {
       model: AUDIT_MODEL,
       system: SYSTEM_PROMPT,
-      maxTokens: 6_000,
+      maxTokens: 16_000,
     })
 
     let parsedJson: unknown
