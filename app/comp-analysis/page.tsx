@@ -1,7 +1,7 @@
 "use client"
 
-import { useCallback, useMemo, useState } from "react"
-import { Download, Loader2, Sparkles } from "lucide-react"
+import { useCallback, useMemo, useRef, useState } from "react"
+import { Download, Loader2, Sparkles, Upload, X } from "lucide-react"
 import { toast } from "sonner"
 import { LocationAutocomplete } from "@/components/LocationAutocomplete"
 import { PageHeader } from "@/components/PageHeader"
@@ -18,25 +18,67 @@ import type {
 } from "@/lib/types"
 
 /**
- * Competitive Analysis tab.
+ * Competitive Analysis tab — SERP-based methodology.
  *
- * Stateless. Pulls partner URL + competitor list from the shared
- * Assessment context, but locations are picked from DataForSEO's own
- * Labs taxonomy via `LocationAutocomplete` (same picker the Keyword
- * Research tab uses). That guarantees every location_code passed to the
- * backend is one DataForSEO already accepts — no city-vs-state probing.
- *
- * Output is an on-screen table grouped by location plus a CSV export.
+ * For each (seed keyword × city × domain) we query DataForSEO's SERP
+ * endpoint at depth=100 and aggregate Top 3/10/20/100 buckets per
+ * (domain × city) from the resulting rank_absolute values. Numbers
+ * genuinely vary by city because the underlying SERPs do.
  */
+
+const SERP_COST_USD = 0.002
 
 interface RunResponse {
   rows: CompAnalysisLocationRows[]
   csv: string
   warnings: string[]
+  seedCount: number
+  estimatedSerpCost: number
 }
 
 interface SuggestResponse {
   suggestions: { domain: string; frequency: number }[]
+}
+
+/**
+ * Parse the first column of a CSV. Handles simple quoting; skips a
+ * header row when the first cell looks like a column name.
+ */
+function parseCsvFirstColumn(text: string): string[] {
+  const lines = text.split(/\r?\n/)
+  const out: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim()
+    if (!line) continue
+    let firstCol: string
+    if (line.startsWith('"')) {
+      const endQuote = line.indexOf('"', 1)
+      firstCol = endQuote > 0 ? line.slice(1, endQuote) : line.slice(1)
+    } else {
+      const commaIdx = line.indexOf(",")
+      firstCol = commaIdx >= 0 ? line.slice(0, commaIdx) : line
+    }
+    firstCol = firstCol.trim()
+    if (i === 0 && /^(keyword|search ?term|query|seed)s?$/i.test(firstCol)) {
+      continue
+    }
+    if (firstCol) out.push(firstCol)
+  }
+  return Array.from(new Set(out.map((s) => s.toLowerCase())))
+}
+
+function dedupeKeywords(text: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const line of text.split("\n")) {
+    const k = line.trim()
+    if (!k) continue
+    const lc = k.toLowerCase()
+    if (seen.has(lc)) continue
+    seen.add(lc)
+    out.push(k)
+  }
+  return out
 }
 
 export default function CompAnalysisPage() {
@@ -48,11 +90,18 @@ export default function CompAnalysisPage() {
   const [competitorText, setCompetitorText] = useState(
     state.competitorUrls.join("\n"),
   )
+  const [csvKeywords, setCsvKeywords] = useState<string[]>([])
+  const [csvFilename, setCsvFilename] = useState<string | null>(null)
+  const [manualText, setManualText] = useState("")
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
-  // Seed the location-autocomplete search with the first parsed location
-  // from the Audit tab's freetext "Target locations" textarea, so the
-  // user can pick a DFS-validated match in one click. Once they've added
-  // any DFS location the seed is irrelevant.
+  // CSV always wins when present; clearing it falls back to whatever the
+  // textarea has. Mutual exclusion is enforced when the user starts typing.
+  const seedKeywords = useMemo(() => {
+    if (csvKeywords.length > 0) return csvKeywords
+    return dedupeKeywords(manualText)
+  }, [csvKeywords, manualText])
+
   const initialLocationQuery = useMemo(() => {
     if (state.compDfsLocations.length > 0) return ""
     const parsed = parseTargetLocationLines(state.targetLocations)
@@ -76,24 +125,53 @@ export default function CompAnalysisPage() {
     [competitorText],
   )
 
+  const cityCount = state.compDfsLocations.length
+  const seedCount = seedKeywords.length
+  const estimatedCost = seedCount * cityCount * SERP_COST_USD
+
   const canRun =
     !running &&
     partnerUrl.trim().length > 0 &&
-    state.compDfsLocations.length > 0 &&
-    competitors.length > 0
+    cityCount > 0 &&
+    competitors.length > 0 &&
+    seedCount > 0
 
-  const seedKeywordsFromContext = useMemo(() => {
-    const fromGsc = state.auditResult?.gscData?.topQueries
-      ?.slice()
-      .sort((a, b) => b.impressions - a.impressions)
-      .slice(0, 10)
-      .map((q) => q.query)
-    if (fromGsc && fromGsc.length > 0) return fromGsc
-    return state.existingTargetKeywords
-      .split("\n")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0)
-  }, [state.auditResult, state.existingTargetKeywords])
+  const handleFile = useCallback(async (file: File) => {
+    try {
+      const text = await file.text()
+      const parsed = parseCsvFirstColumn(text)
+      if (parsed.length === 0) {
+        toast.error("No keywords found in CSV. Check that the first column has keywords.")
+        return
+      }
+      setCsvKeywords(parsed)
+      setCsvFilename(file.name)
+      setManualText("")
+      toast.success(`${parsed.length} keyword${parsed.length === 1 ? "" : "s"} loaded from CSV`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error"
+      toast.error("Failed to read CSV", { description: msg })
+    }
+  }, [])
+
+  const clearCsv = useCallback(() => {
+    setCsvKeywords([])
+    setCsvFilename(null)
+    if (fileInputRef.current) fileInputRef.current.value = ""
+  }, [])
+
+  const handleManualChange = useCallback(
+    (value: string) => {
+      setManualText(value)
+      // First keystroke after a CSV upload clears the CSV — mutual exclusion.
+      if (value.trim().length > 0 && csvKeywords.length > 0) {
+        setCsvKeywords([])
+        setCsvFilename(null)
+        if (fileInputRef.current) fileInputRef.current.value = ""
+      }
+    },
+    [csvKeywords.length],
+  )
 
   const addLocation = useCallback(
     (loc: DfsLabsLocation) => {
@@ -126,9 +204,9 @@ export default function CompAnalysisPage() {
       toast.error("Add at least one DataForSEO location first.")
       return
     }
-    if (seedKeywordsFromContext.length === 0) {
+    if (seedKeywords.length === 0) {
       setErrorMessage(
-        "No seed keywords available. Run the Audit first or paste competitor URLs manually.",
+        "Auto-suggest needs seed keywords. Upload a CSV or paste keywords first.",
       )
       return
     }
@@ -140,7 +218,7 @@ export default function CompAnalysisPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           partnerUrl: partnerUrl.trim(),
-          seedKeywords: seedKeywordsFromContext,
+          seedKeywords: seedKeywords.slice(0, 10),
           targetLocations: state.compDfsLocations,
         }),
       })
@@ -175,7 +253,7 @@ export default function CompAnalysisPage() {
   }, [
     partnerUrl,
     state.compDfsLocations,
-    seedKeywordsFromContext,
+    seedKeywords,
     competitors,
     setField,
   ])
@@ -196,6 +274,7 @@ export default function CompAnalysisPage() {
           partnerUrl: partnerUrl.trim(),
           targetLocations: state.compDfsLocations,
           competitorUrls: competitors,
+          seedKeywords,
         }),
       })
       if (!res.ok) {
@@ -228,6 +307,7 @@ export default function CompAnalysisPage() {
     partnerUrl,
     state.compDfsLocations,
     competitors,
+    seedKeywords,
     setMany,
   ])
 
@@ -254,16 +334,16 @@ export default function CompAnalysisPage() {
       <PageHeader
         eyebrow="Assessments / Competitive Analysis"
         title="Competitive Analysis"
-        tail="— DataForSEO ranking comparison"
+        tail="— SERP rank coverage by city"
         subtitle={
           <>
-            Compare a prospect&apos;s organic visibility against named
-            competitors across target locations. Counts are{" "}
+            For each seed keyword × city we query Google&apos;s SERP and
+            count how many of your{" "}
             <b className="font-sans font-extrabold not-italic text-foreground">
-              total domain rankings
+              approved target keywords
             </b>{" "}
-            in DataForSEO&apos;s database — not filtered to industry keywords.
-            Pre-fills inputs from the Audit tab if it was run first.
+            each domain ranks for at top 3 / 10 / 20 / 100 in that specific
+            city. Numbers vary by city because the SERPs do.
           </>
         }
       />
@@ -293,20 +373,29 @@ export default function CompAnalysisPage() {
               state.compDfsLocations.length === 0 ? (
                 <>
                   Type a city, state, or zip — pick the location DataForSEO
-                  has indexed. The codes here come straight from the same
-                  taxonomy the Keyword Research tab uses, so the lookups
-                  are guaranteed valid.
+                  has indexed. The SERP probes use these codes directly.
                 </>
               ) : (
                 <>
                   {state.compDfsLocations.length} location
                   {state.compDfsLocations.length === 1 ? "" : "s"} selected.
-                  Add more cities or states the prospect competes in.
                 </>
               )
             }
           />
         </div>
+
+        <SeedKeywordsInput
+          csvKeywords={csvKeywords}
+          csvFilename={csvFilename}
+          manualText={manualText}
+          onFile={handleFile}
+          onClearCsv={clearCsv}
+          onManualChange={handleManualChange}
+          fileInputRef={fileInputRef}
+          disabled={running}
+          parsedCount={seedKeywords.length}
+        />
 
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
@@ -322,7 +411,8 @@ export default function CompAnalysisPage() {
                 running ||
                 suggesting ||
                 !partnerUrl.trim() ||
-                state.compDfsLocations.length === 0
+                state.compDfsLocations.length === 0 ||
+                seedKeywords.length === 0
               }
             >
               {suggesting ? (
@@ -349,9 +439,9 @@ export default function CompAnalysisPage() {
           <p className="text-xs text-ink-3">
             {competitors.length} competitor
             {competitors.length === 1 ? "" : "s"}
-            {seedKeywordsFromContext.length > 0
-              ? ` · auto-suggest will use ${seedKeywordsFromContext.length} seed keyword${seedKeywordsFromContext.length === 1 ? "" : "s"} (from ${state.auditResult?.gscData ? "GSC top queries" : "existing target keywords"})`
-              : " · run the Audit first or paste keywords to enable auto-suggest"}
+            {seedKeywords.length === 0
+              ? " · auto-suggest needs seed keywords"
+              : ""}
           </p>
         </div>
 
@@ -361,7 +451,24 @@ export default function CompAnalysisPage() {
           </p>
         )}
 
-        <div className="flex justify-end border-t pt-4">
+        <div className="flex flex-col items-stretch gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs text-ink-3">
+            {seedCount > 0 && cityCount > 0 ? (
+              <>
+                This will run ~
+                <b className="font-sans font-extrabold not-italic text-foreground">
+                  {seedCount * cityCount}
+                </b>{" "}
+                SERP queries (~
+                <b className="font-sans font-extrabold not-italic text-foreground">
+                  ${estimatedCost.toFixed(2)}
+                </b>
+                ).
+              </>
+            ) : (
+              "Add seed keywords + at least one location to enable Run."
+            )}
+          </p>
           <Button type="button" onClick={runAnalysis} disabled={!canRun}>
             {running ? (
               <>
@@ -379,6 +486,7 @@ export default function CompAnalysisPage() {
         <CompResults
           rows={state.compAnalysisRows}
           warnings={state.compAnalysisWarnings}
+          seedCount={seedKeywords.length || state.compAnalysisRows[0]?.domains[0]?.top100 ? seedKeywords.length : 0}
           onDownload={downloadCsv}
         />
       )}
@@ -386,13 +494,107 @@ export default function CompAnalysisPage() {
   )
 }
 
+function SeedKeywordsInput({
+  csvKeywords,
+  csvFilename,
+  manualText,
+  onFile,
+  onClearCsv,
+  onManualChange,
+  fileInputRef,
+  disabled,
+  parsedCount,
+}: {
+  csvKeywords: string[]
+  csvFilename: string | null
+  manualText: string
+  onFile: (file: File) => void
+  onClearCsv: () => void
+  onManualChange: (value: string) => void
+  fileInputRef: React.MutableRefObject<HTMLInputElement | null>
+  disabled: boolean
+  parsedCount: number
+}) {
+  const csvLoaded = csvKeywords.length > 0
+  return (
+    <div className="space-y-2">
+      <Label>Seed keywords</Label>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".csv,text/csv"
+          className="sr-only"
+          id="seed-csv-upload"
+          disabled={disabled}
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            if (file) onFile(file)
+          }}
+        />
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          asChild
+          disabled={disabled}
+        >
+          <label htmlFor="seed-csv-upload" className="cursor-pointer">
+            <Upload className="mr-1.5 h-3.5 w-3.5" /> Upload CSV
+          </label>
+        </Button>
+        {csvLoaded ? (
+          <span className="inline-flex items-center gap-1 rounded-full border bg-secondary px-2 py-0.5 text-xs">
+            <span className="font-mono">{csvFilename}</span>
+            <button
+              type="button"
+              onClick={onClearCsv}
+              disabled={disabled}
+              aria-label="Clear CSV"
+              className="ml-0.5 rounded-full px-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </span>
+        ) : (
+          <span className="text-xs text-ink-3">or paste below</span>
+        )}
+      </div>
+
+      {!csvLoaded && (
+        <Textarea
+          id="manualKeywords"
+          placeholder={"kitchen remodel\nbathroom remodeling near me\ncustom cabinetry"}
+          value={manualText}
+          onChange={(e) => onManualChange(e.target.value)}
+          disabled={disabled}
+          rows={6}
+        />
+      )}
+
+      <p className="text-xs text-ink-3">
+        {parsedCount > 0
+          ? `${parsedCount} keyword${parsedCount === 1 ? "" : "s"} ${
+              csvLoaded ? "loaded from CSV" : "parsed"
+            } · duplicates removed`
+          : csvLoaded
+            ? "CSV had no usable keywords in the first column"
+            : "One keyword per line. CSV upload reads the first column."}
+      </p>
+    </div>
+  )
+}
+
 function CompResults({
   rows,
   warnings,
+  seedCount,
   onDownload,
 }: {
   rows: CompAnalysisLocationRows[]
   warnings: string[]
+  seedCount: number
   onDownload: () => void
 }) {
   return (
@@ -409,6 +611,19 @@ function CompResults({
         <Button type="button" onClick={onDownload}>
           <Download className="mr-2 h-4 w-4" /> Download CSV
         </Button>
+      </div>
+
+      <div className="rounded-md border border-line-strong/40 bg-brand-paper/40 p-3 text-xs text-ink-2">
+        <strong className="font-sans font-extrabold uppercase tracking-[0.16em] text-[10px] text-ink-3">
+          Methodology
+        </strong>
+        <p className="mt-1">
+          Top 3/10/20/100 reflects how many of your
+          {seedCount > 0 ? ` ${seedCount} ` : " "}
+          approved target keywords each domain ranks for in the specified
+          city. Numbers vary by city because rankings are measured against
+          city-level Google SERPs.
+        </p>
       </div>
 
       {warnings.length > 0 && (
@@ -431,8 +646,10 @@ function CompResults({
       )}
 
       <p className="text-xs text-ink-3">
-        Note: &ldquo;Pages Indexed&rdquo; uses Google&apos;s <code>site:</code>
-        {" "}operator and is approximate.
+        Note: &ldquo;Pages Indexed&rdquo; uses Google&apos;s <code>site:</code>{" "}
+        operator at the city level and is approximate. &ldquo;Organic
+        Traffic&rdquo; is country-wide (Labs domain_rank_overview accepts
+        country codes only).
       </p>
 
       <div className="space-y-6">

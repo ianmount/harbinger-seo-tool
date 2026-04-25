@@ -2,10 +2,12 @@ import { NextResponse } from "next/server"
 import { z } from "zod"
 import {
   DataForSEOError,
+  DFS_LABS_COUNTRY_CODE_US,
   domainRankOverview,
   indexedPageCount,
-  rankedKeywordPositionCounts,
   referringDomainCount,
+  serpRankedDomains,
+  type SerpRankedDomain,
 } from "@/lib/dataforseo"
 import type {
   CompAnalysisDomainRow,
@@ -13,18 +15,20 @@ import type {
 } from "@/lib/types"
 
 /**
- * Competitive Analysis endpoint.
+ * Competitive Analysis endpoint — SERP-based methodology.
  *
- * Stateless. Accepts the prospect's domain, a list of DataForSEO-validated
- * locations (each with a real `location_code` from DFS's taxonomy), and a
- * list of competitor domains. Runs DataForSEO ranked_keywords +
- * domain_rank_overview + backlinks/summary + site:domain SERP per
- * (domain × location); aggregates the position bucket counts; returns a
- * JSON shape grouped by location plus a pre-rendered CSV string.
+ * For each (seed keyword × city), we query DataForSEO's SERP endpoint
+ * with depth=100 and check whether each domain in the analysis (partner +
+ * competitors) appears in the top 100 organic results, recording its best
+ * rank. After all seeds for a city resolve, we aggregate per (domain ×
+ * city) into Top 3 / 10 / 20 / 100 buckets — these are counts of seeds
+ * the domain ranks for at each cutoff in that specific city.
  *
- * Locations come from the same `/api/dataforseo/locations` lookup the
- * Keyword Research tab uses, so every code passed here is one DFS already
- * accepts — no city-vs-state probing needed on the server side.
+ * Numbers genuinely vary across cities because the underlying SERPs do.
+ *
+ * Per-domain metrics (referring domains, organic traffic at country
+ * level, pages indexed at city level) are pulled separately and stay the
+ * same shape as before.
  *
  * No GSC/GA4 — DataForSEO only.
  */
@@ -42,20 +46,30 @@ const bodySchema = z.object({
   partnerUrl: z.string().min(3),
   /**
    * DataForSEO-validated locations (from `/api/dataforseo/locations`).
-   * Each carries a real DFS Labs location_code that ranked_keywords /
-   * domain_rank_overview accept directly.
+   * The SERP endpoint accepts city-level Google Ads codes directly.
    */
   targetLocations: z.array(dfsLocationSchema).min(1).max(10),
   competitorUrls: z.array(z.string().min(3)).min(1).max(20),
+  /**
+   * Seed keywords the user explicitly approved. Each (seed × city) is a
+   * SERP probe; cost scales linearly with this list, so the UI caps it
+   * and shows an estimate before submission.
+   */
+  seedKeywords: z.array(z.string().min(1)).min(1).max(200),
 })
 
 type Body = z.infer<typeof bodySchema>
+
+const SERP_CONCURRENCY = 5
+/** Approximate cost of `serp/google/organic/live/advanced` per call, USD. */
+const SERP_COST_USD = 0.002
 
 function cleanDomain(raw: string): string {
   return raw
     .trim()
     .replace(/^https?:\/\//i, "")
-    .replace(/\/+$/, "")
+    .replace(/^www\./i, "")
+    .replace(/\/.*$/, "")
     .toLowerCase()
 }
 
@@ -66,20 +80,41 @@ function compactThousands(n: number): string {
   return String(Math.round(n))
 }
 
+/**
+ * Match a SERP-returned domain to one of the analysis target domains.
+ * Treats the target as a "root" — any subdomain match counts. So
+ * "blog.example.com" returned from SERP matches target "example.com",
+ * but "fakeexample.com" does not (boundary check via the leading dot).
+ */
+function domainMatchesRoot(serpDomain: string, rootDomain: string): boolean {
+  const s = serpDomain.toLowerCase().replace(/^www\./, "")
+  const r = rootDomain.toLowerCase().replace(/^www\./, "")
+  if (!s || !r) return false
+  return s === r || s.endsWith("." + r)
+}
+
+/** Lowest rank_absolute at which `targetDomain` appears in the result list. */
+function bestRank(hits: SerpRankedDomain[], targetDomain: string): number | null {
+  let best: number | null = null
+  for (const h of hits) {
+    if (!domainMatchesRoot(h.domain, targetDomain)) continue
+    if (best == null || h.rankAbsolute < best) best = h.rankAbsolute
+  }
+  return best
+}
+
 interface DomainMetrics {
   referringDomains: number
-  pagesIndexed: number
+  organicTrafficRaw: number
 }
 
 interface DomainMetricsResult extends DomainMetrics {
   failed?: boolean
-  /** Specific error messages collected per call so the user can see them. */
   errors: string[]
 }
 
 function describeError(err: unknown): string {
   if (err instanceof Error) {
-    // Cap message length so a 500-char DFS body doesn't dominate the UI.
     return err.message.length > 220
       ? `${err.message.slice(0, 217)}…`
       : err.message
@@ -87,11 +122,17 @@ function describeError(err: unknown): string {
   return String(err)
 }
 
+/**
+ * Per-domain metrics: referring domains (location-independent) + organic
+ * traffic at country level (Labs domain_rank_overview accepts country
+ * codes only). Pages indexed is per-(domain × city) and lives in the
+ * location loop below.
+ */
 async function fetchDomainMetrics(
   domain: string,
 ): Promise<DomainMetricsResult> {
   let referringDomains = 0
-  let pagesIndexed = 0
+  let organicTrafficRaw = 0
   let failed = false
   const errors: string[] = []
   try {
@@ -103,54 +144,17 @@ async function fetchDomainMetrics(
     console.warn(`[api/comp-analysis] ${msg}`)
   }
   try {
-    pagesIndexed = await indexedPageCount(domain)
-  } catch (err) {
-    failed = true
-    const msg = `indexedPageCount(${domain}): ${describeError(err)}`
-    errors.push(msg)
-    console.warn(`[api/comp-analysis] ${msg}`)
-  }
-  return { referringDomains, pagesIndexed, failed, errors }
-}
-
-interface LocationMetrics {
-  top3: number
-  top10: number
-  top20: number
-  top100: number
-  organicTrafficRaw: number
-  failed?: boolean
-  errors: string[]
-}
-
-async function fetchLocationMetrics(
-  domain: string,
-  locationCode: number,
-): Promise<LocationMetrics> {
-  const dfsLoc = { code: locationCode }
-  let counts = { top3: 0, top10: 0, top20: 0, top100: 0 }
-  let organicTrafficRaw = 0
-  let failed = false
-  const errors: string[] = []
-  try {
-    const c = await rankedKeywordPositionCounts(domain, dfsLoc)
-    counts = { top3: c.top3, top10: c.top10, top20: c.top20, top100: c.top100 }
-  } catch (err) {
-    failed = true
-    const msg = `rankedKeywords(${domain}, loc=${locationCode}): ${describeError(err)}`
-    errors.push(msg)
-    console.warn(`[api/comp-analysis] ${msg}`)
-  }
-  try {
-    const overview = await domainRankOverview(domain, dfsLoc)
+    const overview = await domainRankOverview(domain, {
+      code: DFS_LABS_COUNTRY_CODE_US,
+    })
     organicTrafficRaw = Math.round(overview.organicTraffic)
   } catch (err) {
     failed = true
-    const msg = `domainRankOverview(${domain}, loc=${locationCode}): ${describeError(err)}`
+    const msg = `domainRankOverview(${domain}, country): ${describeError(err)}`
     errors.push(msg)
     console.warn(`[api/comp-analysis] ${msg}`)
   }
-  return { ...counts, organicTrafficRaw, failed, errors }
+  return { referringDomains, organicTrafficRaw, failed, errors }
 }
 
 async function mapWithConcurrency<T, U>(
@@ -181,8 +185,16 @@ function csvEscape(v: string): string {
   return v
 }
 
-function buildCsv(rows: CompAnalysisLocationRows[]): string {
+function buildCsv(
+  rows: CompAnalysisLocationRows[],
+  seedCount: number,
+): string {
   const lines: string[] = []
+  // Methodology comment — # prefix is a widely understood CSV
+  // convention (Excel, pandas all import it cleanly as a text row).
+  lines.push(
+    `# Top 3/10/20/100 reflects how many of your ${seedCount} approved target keywords each domain ranks for in the specified city. Numbers vary by city because rankings are measured against city-level Google SERPs.`,
+  )
   lines.push(
     "Website,Top 3,Top 10,Top 20,Top 100,Referring Domains,Pages Indexed,Organic Traffic",
   )
@@ -210,22 +222,24 @@ function buildCsv(rows: CompAnalysisLocationRows[]): string {
 function buildRow(params: {
   domain: string
   isPartner: boolean
-  loc: LocationMetrics
+  buckets: { top3: number; top10: number; top20: number; top100: number }
+  pagesIndexed: number
   dm: DomainMetricsResult
+  failed: boolean
 }): CompAnalysisDomainRow {
-  const { domain, isPartner, loc, dm } = params
+  const { domain, isPartner, buckets, pagesIndexed, dm, failed } = params
   return {
     domain,
     isPartner,
-    top3: loc.top3,
-    top10: loc.top10,
-    top20: loc.top20,
-    top100: loc.top100,
+    top3: buckets.top3,
+    top10: buckets.top10,
+    top20: buckets.top20,
+    top100: buckets.top100,
     referringDomains: dm.referringDomains,
-    pagesIndexed: dm.pagesIndexed,
-    organicTraffic: compactThousands(loc.organicTrafficRaw),
-    organicTrafficRaw: loc.organicTrafficRaw,
-    failed: loc.failed || dm.failed,
+    pagesIndexed,
+    organicTraffic: compactThousands(dm.organicTrafficRaw),
+    organicTrafficRaw: dm.organicTrafficRaw,
+    failed: failed || dm.failed,
   }
 }
 
@@ -253,60 +267,147 @@ export async function POST(request: Request) {
     .map(cleanDomain)
     .filter((d) => d.length > 0 && d !== partnerDomain)
   const allDomains = [partnerDomain, ...competitorDomains]
+
+  const seeds = Array.from(
+    new Set(
+      body.seedKeywords
+        .map((k) => k.trim())
+        .filter((k) => k.length > 0)
+        .map((k) => k.toLowerCase()),
+    ),
+  )
+  if (seeds.length === 0) {
+    return NextResponse.json(
+      { error: "At least one seed keyword is required." },
+      { status: 400 },
+    )
+  }
+
   const warnings: string[] = []
+  const startedAt = Date.now()
 
   try {
-    // Per-domain metrics (referring domains + pages indexed) — independent
-    // of location, so one call per domain. Concurrency capped at 3 so the
-    // per-(domain × location) phase below has rate-limit headroom and we
-    // don't trip 429s on smaller DataForSEO accounts.
+    // 1. Per-domain metrics (referring domains + organic traffic at
+    //    country level). One pass, location-independent.
     const domainMetrics = new Map<string, DomainMetricsResult>()
-    const metricsResults = await mapWithConcurrency(allDomains, 3, (d) =>
+    const dmResults = await mapWithConcurrency(allDomains, 3, (d) =>
       fetchDomainMetrics(d),
     )
     for (let i = 0; i < allDomains.length; i++) {
-      domainMetrics.set(allDomains[i], metricsResults[i])
+      domainMetrics.set(allDomains[i], dmResults[i])
     }
 
-    // Per-(domain × location) metrics. All codes are pre-validated by
-    // DataForSEO so we just pass them straight through.
-    const tasks: Array<{ domain: string; locationIdx: number }> = []
+    // 2. Per-(domain × city) pages indexed via site: SERP probe.
+    const indexedTasks: Array<{ domain: string; locationIdx: number }> = []
     for (const domain of allDomains) {
       for (let li = 0; li < body.targetLocations.length; li++) {
-        tasks.push({ domain, locationIdx: li })
+        indexedTasks.push({ domain, locationIdx: li })
       }
     }
-    const taskResults = await mapWithConcurrency(tasks, 3, (t) =>
-      fetchLocationMetrics(t.domain, body.targetLocations[t.locationIdx].location_code),
+    const indexedResults = await mapWithConcurrency(
+      indexedTasks,
+      SERP_CONCURRENCY,
+      async (t) => {
+        try {
+          return {
+            value: await indexedPageCount(
+              t.domain,
+              body.targetLocations[t.locationIdx].location_code,
+            ),
+            error: null as string | null,
+          }
+        } catch (err) {
+          const msg = `indexedPageCount(${t.domain}, loc=${body.targetLocations[t.locationIdx].location_code}): ${describeError(err)}`
+          console.warn(`[api/comp-analysis] ${msg}`)
+          return { value: 0, error: msg }
+        }
+      },
     )
 
-    // Group by location, partner first, competitors sorted by Top 10 desc.
+    // 3. Per-(seed × city) SERP probes — the heart of the new
+    //    methodology. concurrency capped at SERP_CONCURRENCY so a 40-seed
+    //    × 3-city run doesn't fan out 120 simultaneous calls.
+    const serpTasks: Array<{ seed: string; locationIdx: number }> = []
+    for (const seed of seeds) {
+      for (let li = 0; li < body.targetLocations.length; li++) {
+        serpTasks.push({ seed, locationIdx: li })
+      }
+    }
+    interface SerpProbeResult {
+      hits: SerpRankedDomain[]
+      error: string | null
+    }
+    const serpResults = await mapWithConcurrency(
+      serpTasks,
+      SERP_CONCURRENCY,
+      async (t): Promise<SerpProbeResult> => {
+        const loc = body.targetLocations[t.locationIdx]
+        try {
+          const hits = await serpRankedDomains(
+            t.seed,
+            { code: loc.location_code },
+            { depth: 100 },
+          )
+          return { hits, error: null }
+        } catch (err) {
+          const msg = `serp("${t.seed}", loc=${loc.location_code} ${loc.location_name}): ${describeError(err)}`
+          console.warn(`[api/comp-analysis] ${msg}`)
+          return { hits: [], error: msg }
+        }
+      },
+    )
+
+    // Build a lookup: city index → seed → hits.
+    const serpByCity: Array<Map<string, SerpRankedDomain[]>> =
+      body.targetLocations.map(() => new Map())
+    const serpErrors: Array<string[]> = body.targetLocations.map(() => [])
+    for (let i = 0; i < serpTasks.length; i++) {
+      const { seed, locationIdx } = serpTasks[i]
+      const r = serpResults[i]
+      serpByCity[locationIdx].set(seed, r.hits)
+      if (r.error) serpErrors[locationIdx].push(r.error)
+    }
+
+    // 4. Aggregate Top 3/10/20/100 buckets per (domain × city) and build rows.
     const rows: CompAnalysisLocationRows[] = []
     for (let li = 0; li < body.targetLocations.length; li++) {
       const loc = body.targetLocations[li]
-      const partnerIdx = tasks.findIndex(
+
+      const partnerBuckets = bucketize(
+        partnerDomain,
+        seeds,
+        serpByCity[li],
+      )
+      const partnerIndexedIdx = indexedTasks.findIndex(
         (t) => t.domain === partnerDomain && t.locationIdx === li,
       )
       const partnerRow = buildRow({
         domain: partnerDomain,
         isPartner: true,
-        loc: taskResults[partnerIdx],
+        buckets: partnerBuckets,
+        pagesIndexed: indexedResults[partnerIndexedIdx]?.value ?? 0,
         dm: domainMetrics.get(partnerDomain)!,
+        failed: indexedResults[partnerIndexedIdx]?.error != null,
       })
+
       const competitorRows: CompAnalysisDomainRow[] = competitorDomains.map(
         (d) => {
-          const idx = tasks.findIndex(
+          const buckets = bucketize(d, seeds, serpByCity[li])
+          const indexedIdx = indexedTasks.findIndex(
             (t) => t.domain === d && t.locationIdx === li,
           )
           return buildRow({
             domain: d,
             isPartner: false,
-            loc: taskResults[idx],
+            buckets,
+            pagesIndexed: indexedResults[indexedIdx]?.value ?? 0,
             dm: domainMetrics.get(d)!,
+            failed: indexedResults[indexedIdx]?.error != null,
           })
         },
       )
       competitorRows.sort((a, b) => b.top10 - a.top10)
+
       rows.push({
         location: loc.location_name,
         locationCode: loc.location_code,
@@ -315,33 +416,67 @@ export async function POST(request: Request) {
       })
     }
 
-    // Roll up the actual per-call error messages so the user can see
-    // *what* failed, not just that something did. Per-domain (referring
-    // domains / pages indexed) failures are surfaced once. Per-(domain ×
-    // location) failures are surfaced once per cell.
+    // 5. Surface real per-call error messages so failed cells are explained.
     for (const [domain, dm] of domainMetrics) {
       for (const e of dm.errors) {
         warnings.push(`${domain} — ${e}`)
       }
     }
+    for (let i = 0; i < indexedTasks.length; i++) {
+      const r = indexedResults[i]
+      if (r.error) {
+        const t = indexedTasks[i]
+        const loc = body.targetLocations[t.locationIdx]
+        warnings.push(`${t.domain} @ ${loc.location_name} — ${r.error}`)
+      }
+    }
     for (let li = 0; li < body.targetLocations.length; li++) {
       const loc = body.targetLocations[li]
-      for (let di = 0; di < allDomains.length; di++) {
-        const taskIdx = di * body.targetLocations.length + li
-        const r = taskResults[taskIdx]
-        if (!r) continue
-        for (const e of r.errors) {
-          warnings.push(`${allDomains[di]} @ ${loc.location_name} — ${e}`)
-        }
+      const errs = Array.from(new Set(serpErrors[li]))
+      for (const e of errs) {
+        warnings.push(`${loc.location_name} — ${e}`)
       }
     }
 
-    const csv = buildCsv(rows)
-    return NextResponse.json({ rows, csv, warnings })
+    const csv = buildCsv(rows, seeds.length)
+    const durationMs = Date.now() - startedAt
+    console.log(
+      `[api/comp-analysis/run] domains=${allDomains.length} cities=${body.targetLocations.length} seeds=${seeds.length} duration=${(durationMs / 1000).toFixed(1)}s warnings=${warnings.length}`,
+    )
+
+    return NextResponse.json({
+      rows,
+      csv,
+      warnings,
+      seedCount: seeds.length,
+      estimatedSerpCost: seeds.length * body.targetLocations.length * SERP_COST_USD,
+    })
   } catch (error) {
     console.error("[api/comp-analysis/run] failed:", error)
     const status = error instanceof DataForSEOError ? 502 : 500
     const message = error instanceof Error ? error.message : "Unknown error"
     return NextResponse.json({ error: message }, { status })
   }
+}
+
+function bucketize(
+  domain: string,
+  seeds: string[],
+  hitsBySeed: Map<string, SerpRankedDomain[]>,
+): { top3: number; top10: number; top20: number; top100: number } {
+  let top3 = 0
+  let top10 = 0
+  let top20 = 0
+  let top100 = 0
+  for (const seed of seeds) {
+    const hits = hitsBySeed.get(seed)
+    if (!hits || hits.length === 0) continue
+    const rank = bestRank(hits, domain)
+    if (rank == null) continue
+    if (rank <= 3) top3++
+    if (rank <= 10) top10++
+    if (rank <= 20) top20++
+    if (rank <= 100) top100++
+  }
+  return { top3, top10, top20, top100 }
 }
