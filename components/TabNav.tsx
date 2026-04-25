@@ -30,7 +30,6 @@ const CATEGORIES: Category[] = [
     key: "ongoing",
     label: "Ongoing",
     tabs: [
-      { href: "/keyword-research", label: "Keyword Research" },
       { href: "/strategy", label: "Strategy" },
       { href: "/content", label: "Content" },
       { href: "/backlinks", label: "Backlinks" },
@@ -38,6 +37,11 @@ const CATEGORIES: Category[] = [
     ],
   },
 ]
+
+const UTILITY_TAB: Tab = {
+  href: "/keyword-research",
+  label: "Keyword Research",
+}
 
 function activeCategory(pathname: string): Category["key"] | null {
   if (pathname === "/onboarding") return "onboarding"
@@ -47,12 +51,18 @@ function activeCategory(pathname: string): Category["key"] | null {
   return null
 }
 
+function isUtilityActive(pathname: string): boolean {
+  return pathname === UTILITY_TAB.href
+}
+
 export function TabNav() {
   const pathname = usePathname()
   const searchParams = useSearchParams()
   const query = searchParams.toString()
   const suffix = query ? `?${query}` : ""
   const currentCategory = activeCategory(pathname)
+
+  const utilityActive = isUtilityActive(pathname)
 
   return (
     <nav
@@ -116,6 +126,30 @@ export function TabNav() {
             </div>
           )
         })}
+        <div className="ml-auto flex min-w-0 flex-col py-2 border-l border-line-strong/50 pl-6 sm:pl-8">
+          <span
+            className={cn(
+              "px-1 pb-0.5 font-sans text-[9.5px] font-extrabold uppercase tracking-[0.22em] transition-colors",
+              utilityActive ? "text-brand-red" : "text-ink-3",
+            )}
+          >
+            Tools
+          </span>
+          <div className="-mb-px flex items-stretch gap-1">
+            <Link
+              href={`${UTILITY_TAB.href}${suffix}`}
+              aria-current={utilityActive ? "page" : undefined}
+              className={cn(
+                "relative whitespace-nowrap border-b-2 px-3 py-2 font-sans text-[11.5px] font-bold uppercase tracking-[0.14em] transition-colors",
+                utilityActive
+                  ? "border-brand-red text-foreground"
+                  : "border-transparent text-ink-3 hover:text-foreground",
+              )}
+            >
+              {UTILITY_TAB.label}
+            </Link>
+          </div>
+        </div>
       </div>
     </nav>
   )

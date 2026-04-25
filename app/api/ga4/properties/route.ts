@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server"
 import { GA4Error, listProperties } from "@/lib/ga4"
+import type { GoogleAccount } from "@/lib/google-auth"
 
 export const dynamic = "force-dynamic"
+
+function parseAccount(value: string | null): GoogleAccount {
+  return value === "assessments" ? "assessments" : "partners"
+}
 
 function statusFromGA4Error(error: GA4Error): number {
   switch (error.code) {
@@ -17,9 +22,11 @@ function statusFromGA4Error(error: GA4Error): number {
 export async function GET(request: Request) {
   // ?refresh=1 bypasses the in-memory cache. Useful right after a new
   // property is provisioned in Google Analytics.
-  const forceRefresh = new URL(request.url).searchParams.get("refresh") === "1"
+  const url = new URL(request.url)
+  const forceRefresh = url.searchParams.get("refresh") === "1"
+  const account = parseAccount(url.searchParams.get("account"))
   try {
-    const properties = await listProperties({ account: "partners", forceRefresh })
+    const properties = await listProperties({ account, forceRefresh })
     return NextResponse.json({ properties })
   } catch (error: unknown) {
     console.error("[api/ga4/properties] failed:", error)

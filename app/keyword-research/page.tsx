@@ -5,6 +5,7 @@ import { DownloadIcon, ArrowUpDown, ArrowDown, ArrowUp } from "lucide-react"
 import { LocationAutocomplete } from "@/components/LocationAutocomplete"
 import { PageHeader } from "@/components/PageHeader"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
@@ -23,18 +24,17 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs"
 import { useSelectedPartner } from "@/lib/use-selected-partner"
-import { findBestGscSite } from "@/lib/gsc-site-match"
-import { findBestGa4Property } from "@/lib/ga4-site-match"
 import { findSuggestedDfsLocation } from "@/lib/locations"
 import { cn } from "@/lib/utils"
 import type {
   DfsLabsLocation,
-  GA4PageConversion,
-  GA4PropertyInfo,
-  GSCQueryRow,
-  GSCSiteInfo,
-  GSCTopQueryRow,
   KeywordCluster,
   KeywordIntent,
   KeywordRecommendation,
@@ -44,24 +44,34 @@ import type {
 } from "@/lib/types"
 
 type Stage =
-  | "gsc"
   | "dfs-ideas"
   | "dfs-difficulty"
-  | "dfs-local-volume"
+  | "dfs-volume"
   | "claude"
+  | "dfs-serp-rank"
   | "done"
+
+type LocationResult = {
+  location: DfsLabsLocation
+  rows: ScoredKeyword[]
+  clusters: KeywordCluster[]
+  truncated: number
+  /** SERP probe failed for this location entirely; ranks are absent. */
+  rankProbeFailed: boolean
+}
 
 type Phase =
   | { status: "idle" }
   | { status: "running"; stage: Stage; note?: string }
-  | {
-      status: "done"
-      rows: ScoredKeyword[]
-      clusters: KeywordCluster[]
-      truncated: number
-      conversionSignalActive: boolean
-    }
+  | { status: "done"; results: LocationResult[]; domain: string }
   | { status: "error"; message: string }
+
+type Mode = "partner" | "prospect"
+
+type ProspectForm = {
+  domain: string
+  contextNotes: string
+}
 
 type SortKey =
   | "keyword"
@@ -71,7 +81,7 @@ type SortKey =
   | "fitScore"
   | "intent"
   | "recommendation"
-  | "pageConversionSignal"
+  | "currentRanking"
 
 interface SortState {
   key: SortKey
@@ -118,16 +128,16 @@ function dedupeByKeyword(rows: KeywordResult[]): KeywordResult[] {
 
 function stageLabel(stage: Stage): string {
   switch (stage) {
-    case "gsc":
-      return "Pulling Google Search Console baseline…"
     case "dfs-ideas":
       return "Fetching keyword ideas & suggestions from DataForSEO…"
     case "dfs-difficulty":
-      return "Measuring keyword difficulty…"
-    case "dfs-local-volume":
-      return "Fetching city-level search volume…"
+      return "Measuring national keyword difficulty…"
+    case "dfs-volume":
+      return "Fetching city-level search volume per location…"
     case "claude":
-      return "Clustering and scoring with Claude…"
+      return "Clustering and scoring per location with Claude…"
+    case "dfs-serp-rank":
+      return "Probing live SERPs for current rankings per location…"
     case "done":
       return "Done."
   }
@@ -135,11 +145,11 @@ function stageLabel(stage: Stage): string {
 
 function stageIndex(stage: Stage): number {
   return [
-    "gsc",
     "dfs-ideas",
     "dfs-difficulty",
-    "dfs-local-volume",
+    "dfs-volume",
     "claude",
+    "dfs-serp-rank",
     "done",
   ].indexOf(stage)
 }
@@ -153,21 +163,19 @@ function csvEscape(value: unknown): string {
   return s
 }
 
-function buildCsv(rows: ScoredKeyword[], includeSignal: boolean): string {
+function buildCsv(rows: ScoredKeyword[]): string {
   const headers = [
     "Keyword",
     "Cluster",
-    "Volume",
-    "Difficulty",
+    "Volume (city)",
+    "Difficulty (national)",
+    "Current Ranking",
     "Fit Score",
     "Intent",
     "Recommendation",
     "CPC",
     "Competition",
   ]
-  if (includeSignal) {
-    headers.push("Page Conversion Signal", "Landing Page")
-  }
   const lines = [headers.join(",")]
   for (const r of rows) {
     const cols = [
@@ -175,18 +183,13 @@ function buildCsv(rows: ScoredKeyword[], includeSignal: boolean): string {
       csvEscape(r.cluster),
       csvEscape(r.search_volume ?? ""),
       csvEscape(r.keyword_difficulty ?? ""),
+      csvEscape(r.currentRanking ?? ""),
       csvEscape(r.fitScore),
       csvEscape(r.intent),
       csvEscape(r.recommendation),
       csvEscape(r.cpc ?? ""),
       csvEscape(r.competition_level ?? ""),
     ]
-    if (includeSignal) {
-      cols.push(
-        csvEscape(r.pageConversionSignal ? "high-converter" : ""),
-        csvEscape(r.landingPage ?? ""),
-      )
-    }
     lines.push(cols.join(","))
   }
   return lines.join("\n")
@@ -194,24 +197,71 @@ function buildCsv(rows: ScoredKeyword[], includeSignal: boolean): string {
 
 function downloadCsv(
   rows: ScoredKeyword[],
-  partnerName: string,
-  includeSignal: boolean,
+  slugSource: string,
+  locationLabel: string,
 ) {
-  const csv = buildCsv(rows, includeSignal)
+  const csv = buildCsv(rows)
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" })
   const url = URL.createObjectURL(blob)
   const a = document.createElement("a")
-  const slug = partnerName
+  const slug = slugSource
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+  const locSlug = locationLabel
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
   const stamp = new Date().toISOString().slice(0, 10)
   a.href = url
-  a.download = `${slug || "partner"}-keywords-${stamp}.csv`
+  a.download = `${slug || "subject"}-keywords-${locSlug || "location"}-${stamp}.csv`
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
   URL.revokeObjectURL(url)
+}
+
+function normalizeDomainInput(raw: string): string {
+  let d = raw.trim().toLowerCase()
+  if (!d) return ""
+  d = d.replace(/^https?:\/\//, "")
+  d = d.replace(/^www\./, "")
+  d = d.replace(/\/.*$/, "")
+  return d
+}
+
+const DOMAIN_REGEX = /^[\w-]+(\.[\w-]+)+$/
+
+/**
+ * The Claude scoring route requires a Partner-shaped object. In Prospect
+ * mode we don't have one, so synthesize a minimal stand-in from the
+ * domain + selected locations. Claude's relevance filtering will lean on
+ * the seed keywords (which are user-supplied) and the candidate pool;
+ * the Partner shape is just a structural fit for the existing route.
+ */
+function buildProspectPartner(
+  domain: string,
+  locations: DfsLabsLocation[],
+  contextNotes: string,
+): Partner {
+  const trimmed = contextNotes.trim()
+  return {
+    id: `prospect-${domain}`,
+    name: domain,
+    services: trimmed || "(see seed keywords for service scope)",
+    serviceAreas: locations.map((l) => l.location_name).join("\n"),
+    website: `https://${domain}`,
+  }
+}
+
+function locationKeyOf(loc: DfsLabsLocation): string {
+  return String(loc.location_code)
+}
+
+/** Short label for tabs / progress: "Atlanta" from "Atlanta,Georgia,…". */
+function shortLocationLabel(loc: DfsLabsLocation): string {
+  const first = loc.location_name.split(",")[0]?.trim()
+  return first || loc.location_name
 }
 
 async function fetchJson<T>(
@@ -236,8 +286,16 @@ async function fetchJson<T>(
 export default function KeywordResearchPage() {
   const { partner, loading: partnerLoading, error: partnerError } =
     useSelectedPartner()
+  const [mode, setMode] = useState<Mode>("partner")
+  const [prospectForm, setProspectForm] = useState<ProspectForm>({
+    domain: "",
+    contextNotes: "",
+  })
   const [seedsText, setSeedsText] = useState("")
   const [phase, setPhase] = useState<Phase>({ status: "idle" })
+  const [activeLocationKey, setActiveLocationKey] = useState<string | null>(
+    null,
+  )
   const [clusterFilter, setClusterFilter] = useState<string>(FILTER_ALL)
   const [recFilter, setRecFilter] = useState<string>(FILTER_ALL)
   const [sort, setSort] = useState<SortState>({
@@ -252,16 +310,23 @@ export default function KeywordResearchPage() {
   )
 
   useEffect(() => {
-    // Reset state when partner changes. The URL param drives partner selection,
-    // so this is a sync from external state into component state.
+    // Reset run-scoped state when the partner changes. Mode/seeds/locations
+    // are kept so the engineer can run the same query against a different
+    // partner without re-typing.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPhase({ status: "idle" })
+    setActiveLocationKey(null)
     setClusterFilter(FILTER_ALL)
     setRecFilter(FILTER_ALL)
-    setSeedsText("")
-    setSelectedLocations([])
-    setMaxKeywordsInput(String(DEFAULT_MAX_KEYWORDS))
   }, [partner?.id])
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPhase({ status: "idle" })
+    setActiveLocationKey(null)
+    setClusterFilter(FILTER_ALL)
+    setRecFilter(FILTER_ALL)
+  }, [mode])
 
   const addLocation = useCallback((loc: DfsLabsLocation) => {
     setSelectedLocations((prev) =>
@@ -278,12 +343,13 @@ export default function KeywordResearchPage() {
   }, [])
 
   const initialLocationQuery = useMemo(
-    () => (partner ? findSuggestedDfsLocation(partner.serviceAreas) : ""),
-    [partner],
+    () =>
+      mode === "partner" && partner
+        ? findSuggestedDfsLocation(partner.serviceAreas)
+        : "",
+    [mode, partner],
   )
 
-  // Seeds come from the textarea only — we no longer auto-generate from the
-  // partner's Airtable Services. The Run button requires at least one.
   const effectiveSeeds = useMemo(
     () => parseSeedsFromTextarea(seedsText),
     [seedsText],
@@ -291,8 +357,47 @@ export default function KeywordResearchPage() {
 
   const running = phase.status === "running"
 
+  /**
+   * Resolve the run subject — either the selected Partner or the typed
+   * Prospect. Returns null when the form is incomplete; the Run button
+   * disables in that case. The `partnerForClaude` field is what we send
+   * to /api/claude/keywords (which requires a Partner shape) — for
+   * prospects this is a synthesized minimal Partner.
+   */
+  const subject = useMemo<
+    | {
+        kind: "partner"
+        domain: string
+        partnerForClaude: Partner
+      }
+    | {
+        kind: "prospect"
+        domain: string
+        partnerForClaude: Partner
+      }
+    | null
+  >(() => {
+    if (mode === "partner") {
+      if (!partner) return null
+      const domain = normalizeDomainInput(partner.website)
+      if (!domain) return null
+      return { kind: "partner", domain, partnerForClaude: partner }
+    }
+    const domain = normalizeDomainInput(prospectForm.domain)
+    if (!domain || !DOMAIN_REGEX.test(domain)) return null
+    return {
+      kind: "prospect",
+      domain,
+      partnerForClaude: buildProspectPartner(
+        domain,
+        selectedLocations,
+        prospectForm.contextNotes,
+      ),
+    }
+  }, [mode, partner, prospectForm, selectedLocations])
+
   const handleRun = useCallback(async () => {
-    if (!partner) return
+    if (!subject) return
     const seeds = effectiveSeeds.slice(0, MAX_SEEDS)
     if (seeds.length === 0) {
       setPhase({
@@ -302,11 +407,6 @@ export default function KeywordResearchPage() {
       })
       return
     }
-    const parsedMax = parseInt(maxKeywordsInput, 10)
-    const maxKeywords =
-      Number.isFinite(parsedMax) && parsedMax > 0
-        ? Math.min(parsedMax, MAX_KEYWORDS_CEILING)
-        : DEFAULT_MAX_KEYWORDS
     if (selectedLocations.length === 0) {
       setPhase({
         status: "error",
@@ -315,128 +415,19 @@ export default function KeywordResearchPage() {
       })
       return
     }
+    const parsedMax = parseInt(maxKeywordsInput, 10)
+    const maxKeywords =
+      Number.isFinite(parsedMax) && parsedMax > 0
+        ? Math.min(parsedMax, MAX_KEYWORDS_CEILING)
+        : DEFAULT_MAX_KEYWORDS
 
-    // Labs-level calls (ideas/suggestions/difficulty) run at US country level
-    // regardless; Google Ads search_volume fans out across all selected
-    // locations and volumes are summed per keyword downstream.
-    const locationLabels = selectedLocations.map((l) => l.location_name)
+    // Country-shared stages: ideas/suggestions/difficulty are inherently
+    // national in DataForSEO's Labs API. We use the first selected location's
+    // country (always US for this tool's scope) by passing that locationCode
+    // to the proxy, which collapses to US country code internally.
     const primaryLocationCode = selectedLocations[0].location_code
 
-    // Stage 1: GSC + GA4 (both non-fatal — continue without them if they fail)
-    setPhase({ status: "running", stage: "gsc" })
-    let gscHistorical: GSCTopQueryRow[] = []
-    let gscQueryPages: GSCQueryRow[] = []
-    let ga4Conversions: GA4PageConversion[] = []
-    const today = new Date()
-    const start90 = new Date()
-    start90.setDate(today.getDate() - 90)
-    const iso = (d: Date) => d.toISOString().slice(0, 10)
-    const startDate = iso(start90)
-    const endDate = iso(today)
-    try {
-      const sitesBody = await fetchJson<{ sites: GSCSiteInfo[] }>(
-        "/api/gsc/sites",
-        { method: "GET" },
-        "GSC sites list",
-      )
-      const siteUrl = findBestGscSite(partner.website, sitesBody.sites ?? [])
-      if (siteUrl) {
-        // Run the two GSC calls in parallel — top queries (for Claude's
-        // "recent searches" context) and query+page rows (for the GA4
-        // high-converting-page signal). The latter only matters when the
-        // partner has a GA4 property; we fetch unconditionally because it's
-        // cheap and the extra data helps debug missing signals later.
-        const [reportBody, queriesBody] = await Promise.all([
-          fetchJson<{ topQueries: GSCTopQueryRow[] }>(
-            "/api/gsc/report-data",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                siteUrl,
-                startDate,
-                endDate,
-                rowLimit: 200,
-              }),
-            },
-            "GSC report data",
-          ),
-          fetchJson<{ rows: GSCQueryRow[] }>(
-            "/api/gsc/queries",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                siteUrl,
-                startDate,
-                endDate,
-                rowLimit: 1000,
-              }),
-            },
-            "GSC query+page rows",
-          ),
-        ])
-        gscHistorical = reportBody.topQueries ?? []
-        gscQueryPages = queriesBody.rows ?? []
-      }
-    } catch (err) {
-      console.warn("[keyword-research] GSC fetch failed, continuing:", err)
-    }
-
-    // Resolve the GA4 property: Airtable override wins, otherwise auto-detect
-    // by hostname-matching against /api/ga4/properties. The signal is
-    // optional — every branch that fails just skips the boost.
-    let ga4PropertyId: string | null = null
-    if (partner.ga4PropertyId) {
-      ga4PropertyId = partner.ga4PropertyId.startsWith("properties/")
-        ? partner.ga4PropertyId
-        : `properties/${partner.ga4PropertyId}`
-    } else {
-      try {
-        const propsBody = await fetchJson<{ properties: GA4PropertyInfo[] }>(
-          "/api/ga4/properties",
-          { method: "GET" },
-          "GA4 properties list",
-        )
-        const match = findBestGa4Property(
-          partner.website,
-          propsBody.properties ?? [],
-        )
-        ga4PropertyId = match?.propertyId ?? null
-      } catch (err) {
-        console.warn(
-          "[keyword-research] GA4 property lookup failed, continuing without page-signal boost:",
-          err,
-        )
-      }
-    }
-
-    if (ga4PropertyId) {
-      try {
-        const convBody = await fetchJson<{ results: GA4PageConversion[] }>(
-          "/api/ga4/conversions",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              propertyId: ga4PropertyId,
-              startDate,
-              endDate,
-            }),
-          },
-          "GA4 conversions",
-        )
-        ga4Conversions = convBody.results ?? []
-      } catch (err) {
-        // Signal is optional — a missing/empty array just means no boost fires.
-        console.warn(
-          "[keyword-research] GA4 conversions fetch failed, continuing without page-signal boost:",
-          err,
-        )
-      }
-    }
-
-    // Stage 2: DFS ideas + suggestions (parallel)
+    // ── Stage 1: candidate pool ──────────────────────────────────────────
     setPhase({
       status: "running",
       stage: "dfs-ideas",
@@ -504,23 +495,16 @@ export default function KeywordResearchPage() {
       })
       return
     }
+    const deduped = dedupeByKeyword(dfsCombined)
 
-    // Also include top GSC queries as candidate keywords (historical winners).
-    const gscCandidates: KeywordResult[] = gscHistorical
-      .slice(0, 50)
-      .map((q) => ({ keyword: q.query }))
-
-    const deduped = dedupeByKeyword([...dfsCombined, ...gscCandidates])
-
-    // Stage 3: DFS bulk keyword difficulty
+    // ── Stage 2: national difficulty ─────────────────────────────────────
     setPhase({
       status: "running",
       stage: "dfs-difficulty",
-      note: `${deduped.length} keywords`,
+      note: `${deduped.length} keywords (US national)`,
     })
-    let enriched: KeywordResult[] = deduped
+    let withDifficulty: KeywordResult[] = deduped
     try {
-      // Bulk endpoint caps at 1000; safety-clamp anyway.
       const keywordList = deduped.map((r) => r.keyword).slice(0, 1000)
       const diffBody = await fetchJson<{ results: KeywordResult[] }>(
         "/api/dataforseo/keywords",
@@ -538,175 +522,255 @@ export default function KeywordResearchPage() {
       const diffByKw = new Map(
         (diffBody.results ?? []).map((r) => [r.keyword.toLowerCase(), r]),
       )
-      enriched = deduped.map((r) => {
+      withDifficulty = deduped.map((r) => {
         const d = diffByKw.get(r.keyword.toLowerCase())
         if (!d) return r
         return {
           ...r,
           keyword_difficulty: d.keyword_difficulty ?? r.keyword_difficulty,
-          // bulk endpoint may also refresh volume/cpc when available
-          search_volume: d.search_volume ?? r.search_volume,
-          cpc: d.cpc ?? r.cpc,
-          competition: d.competition ?? r.competition,
-          competition_level: d.competition_level ?? r.competition_level,
         }
       })
     } catch (err) {
-      // Difficulty is nice-to-have — continue without it, but warn.
       console.warn("[keyword-research] difficulty fetch failed:", err)
     }
 
-    // Stage 4: Local volume enrichment. Labs' keyword_ideas/suggestions only
-    // give country-level volume; we overlay city-level volume from Google
-    // Ads search_volume so the user actually sees local demand. When the
-    // user picked multiple locations, we fan out in parallel and sum the
-    // per-keyword volumes — that's the total addressable demand across the
-    // partner's service footprint. CPC/competition come from the first
-    // location that has a value.
-    const cityLevelLocations = selectedLocations.filter(
-      (l) => l.location_type !== "Country",
+    // ── Stage 3: per-location volume (parallel) ──────────────────────────
+    setPhase({
+      status: "running",
+      stage: "dfs-volume",
+      note: `${selectedLocations.length} location${
+        selectedLocations.length === 1 ? "" : "s"
+      }`,
+    })
+    type EnrichedByLoc = Map<string, KeywordResult[]>
+    const enrichedByLoc: EnrichedByLoc = new Map()
+    await Promise.all(
+      selectedLocations.map(async (loc) => {
+        const key = locationKeyOf(loc)
+        if (loc.location_type === "Country") {
+          // No city-level volume to fetch — just use the difficulty-enriched
+          // pool with whatever country-level volume came back from Labs.
+          enrichedByLoc.set(key, withDifficulty)
+          return
+        }
+        try {
+          const keywordList = withDifficulty
+            .map((r) => r.keyword)
+            .slice(0, 1000)
+          const volBody = await fetchJson<{ results: KeywordResult[] }>(
+            "/api/dataforseo/keywords",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                mode: "volume",
+                keywords: keywordList,
+                locationCode: loc.location_code,
+              }),
+            },
+            `DataForSEO search volume for ${loc.location_name}`,
+          )
+          const byKw = new Map(
+            (volBody.results ?? []).map((r) => [r.keyword.toLowerCase(), r]),
+          )
+          const enriched = withDifficulty.map((r) => {
+            const v = byKw.get(r.keyword.toLowerCase())
+            if (!v) return r
+            return {
+              ...r,
+              search_volume: v.search_volume ?? r.search_volume,
+              cpc: v.cpc ?? r.cpc,
+              competition: v.competition ?? r.competition,
+              competition_level: v.competition_level ?? r.competition_level,
+            }
+          })
+          enrichedByLoc.set(key, enriched)
+        } catch (err) {
+          console.warn(
+            `[keyword-research] volume fetch failed for ${loc.location_name}:`,
+            err,
+          )
+          enrichedByLoc.set(key, withDifficulty)
+        }
+      }),
     )
-    if (cityLevelLocations.length > 0) {
-      setPhase({
-        status: "running",
-        stage: "dfs-local-volume",
-        note: `${enriched.length} keywords × ${cityLevelLocations.length} location${
-          cityLevelLocations.length === 1 ? "" : "s"
-        }`,
-      })
-      try {
-        const keywordList = enriched.map((r) => r.keyword).slice(0, 1000)
-        const volResponses = await Promise.all(
-          cityLevelLocations.map((loc) =>
-            fetchJson<{ results: KeywordResult[] }>(
-              "/api/dataforseo/keywords",
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  mode: "volume",
-                  keywords: keywordList,
-                  locationCode: loc.location_code,
-                }),
-              },
-              `DataForSEO local search volume for ${loc.location_name}`,
-            ),
-          ),
-        )
 
-        type LocalAgg = {
-          volumeSum: number
-          hasVolume: boolean
-          cpc?: number
-          competition?: number
-          competition_level?: KeywordResult["competition_level"]
-        }
-        const aggByKw = new Map<string, LocalAgg>()
-        for (const resp of volResponses) {
-          for (const r of resp.results ?? []) {
-            const key = r.keyword.trim().toLowerCase()
-            if (!key) continue
-            const agg = aggByKw.get(key) ?? {
-              volumeSum: 0,
-              hasVolume: false,
-            }
-            if (r.search_volume != null) {
-              agg.volumeSum += r.search_volume
-              agg.hasVolume = true
-            }
-            if (agg.cpc == null && r.cpc != null) agg.cpc = r.cpc
-            if (agg.competition == null && r.competition != null)
-              agg.competition = r.competition
-            if (!agg.competition_level && r.competition_level)
-              agg.competition_level = r.competition_level
-            aggByKw.set(key, agg)
-          }
-        }
-
-        enriched = enriched.map((r) => {
-          const agg = aggByKw.get(r.keyword.toLowerCase())
-          if (!agg) return r
-          return {
-            ...r,
-            search_volume: agg.hasVolume ? agg.volumeSum : r.search_volume,
-            cpc: agg.cpc ?? r.cpc,
-            competition: agg.competition ?? r.competition,
-            competition_level: agg.competition_level ?? r.competition_level,
-          }
-        })
-      } catch (err) {
-        console.warn(
-          "[keyword-research] local volume fetch failed, using country-level:",
-          err,
-        )
-      }
-    }
-
-    // Stage 5: Claude clustering + scoring
+    // ── Stage 4: per-location Claude scoring (parallel) ──────────────────
     setPhase({
       status: "running",
       stage: "claude",
-      note: `${enriched.length} keywords`,
+      note: `${selectedLocations.length} location${
+        selectedLocations.length === 1 ? "" : "s"
+      }`,
     })
-    try {
-      const body = await fetchJson<{
-        clusters: KeywordCluster[]
-        truncated?: number
-        conversionSignalActive?: boolean
-      }>(
-        "/api/claude/keywords",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            partner,
-            rawKeywords: enriched,
-            gscHistorical,
-            gscQueryPages,
-            ga4Conversions,
-            maxKeywords,
-            allowedLocations: locationLabels,
-          }),
-        },
-        "Claude clustering",
-      )
-      const rows = (body.clusters ?? []).flatMap((c) => c.keywords)
-      setPhase({
-        status: "done",
-        rows,
-        clusters: body.clusters ?? [],
-        truncated: body.truncated ?? 0,
-        conversionSignalActive: Boolean(body.conversionSignalActive),
-      })
-    } catch (err) {
+    type ClaudeOut = {
+      rows: ScoredKeyword[]
+      clusters: KeywordCluster[]
+      truncated: number
+    }
+    const claudeByLoc = new Map<string, ClaudeOut>()
+    const claudeFailures: { location: string; message: string }[] = []
+    await Promise.all(
+      selectedLocations.map(async (loc) => {
+        const key = locationKeyOf(loc)
+        const enriched = enrichedByLoc.get(key) ?? withDifficulty
+        try {
+          const body = await fetchJson<{
+            clusters: KeywordCluster[]
+            truncated?: number
+          }>(
+            "/api/claude/keywords",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                partner: subject.partnerForClaude,
+                rawKeywords: enriched,
+                maxKeywords,
+                allowedLocations: [loc.location_name],
+              }),
+            },
+            `Claude clustering for ${loc.location_name}`,
+          )
+          const rows = (body.clusters ?? []).flatMap((c) => c.keywords)
+          claudeByLoc.set(key, {
+            rows,
+            clusters: body.clusters ?? [],
+            truncated: body.truncated ?? 0,
+          })
+        } catch (err) {
+          claudeFailures.push({
+            location: loc.location_name,
+            message: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }),
+    )
+    if (claudeByLoc.size === 0) {
       setPhase({
         status: "error",
         message:
-          err instanceof Error ? err.message : "Claude clustering failed",
+          claudeFailures.length > 0
+            ? `Claude scoring failed for every location. First error (${claudeFailures[0].location}): ${claudeFailures[0].message}`
+            : "Claude scoring returned no results.",
+      })
+      return
+    }
+
+    // ── Stage 5: per-location SERP rank probes (parallel) ────────────────
+    setPhase({
+      status: "running",
+      stage: "dfs-serp-rank",
+      note: `${claudeByLoc.size} location${claudeByLoc.size === 1 ? "" : "s"}`,
+    })
+    type RankRow = { keyword: string; position: number | null }
+    type RankOut = { ranks: Map<string, number>; failed: boolean }
+    const rankByLoc = new Map<string, RankOut>()
+    await Promise.all(
+      selectedLocations.map(async (loc) => {
+        const key = locationKeyOf(loc)
+        const claudeOut = claudeByLoc.get(key)
+        if (!claudeOut || claudeOut.rows.length === 0) {
+          rankByLoc.set(key, { ranks: new Map(), failed: false })
+          return
+        }
+        const keywords = claudeOut.rows.map((r) => r.keyword)
+        try {
+          const body = await fetchJson<{ rows: RankRow[] }>(
+            "/api/dataforseo/serp-rank",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                keywords,
+                locationCode: loc.location_code,
+                domain: subject.domain,
+              }),
+            },
+            `SERP rank probes for ${loc.location_name}`,
+          )
+          const ranks = new Map<string, number>()
+          for (const row of body.rows ?? []) {
+            if (row.position != null) {
+              ranks.set(row.keyword.toLowerCase(), row.position)
+            }
+          }
+          rankByLoc.set(key, { ranks, failed: false })
+        } catch (err) {
+          console.warn(
+            `[keyword-research] SERP rank probe failed for ${loc.location_name}:`,
+            err,
+          )
+          rankByLoc.set(key, { ranks: new Map(), failed: true })
+        }
+      }),
+    )
+
+    // ── Assemble per-location results ────────────────────────────────────
+    const results: LocationResult[] = []
+    for (const loc of selectedLocations) {
+      const key = locationKeyOf(loc)
+      const claudeOut = claudeByLoc.get(key)
+      if (!claudeOut) continue
+      const rankOut = rankByLoc.get(key) ?? { ranks: new Map(), failed: false }
+      const decorate = <T extends ScoredKeyword>(r: T): T => ({
+        ...r,
+        currentRanking: rankOut.ranks.get(r.keyword.toLowerCase()),
+      })
+      const rows = claudeOut.rows.map(decorate)
+      const clusters: KeywordCluster[] = claudeOut.clusters.map((c) => ({
+        ...c,
+        keywords: c.keywords.map(decorate),
+      }))
+      results.push({
+        location: loc,
+        rows,
+        clusters,
+        truncated: claudeOut.truncated,
+        rankProbeFailed: rankOut.failed,
       })
     }
-  }, [partner, effectiveSeeds, selectedLocations, maxKeywordsInput])
 
-  const rows = useMemo<ScoredKeyword[]>(
-    () => (phase.status === "done" ? phase.rows : []),
+    setPhase({ status: "done", results, domain: subject.domain })
+    setActiveLocationKey(locationKeyOf(selectedLocations[0]))
+  }, [subject, effectiveSeeds, selectedLocations, maxKeywordsInput])
+
+  const results = useMemo<LocationResult[]>(
+    () => (phase.status === "done" ? phase.results : []),
     [phase],
   )
-  const signalActive = phase.status === "done" && phase.conversionSignalActive
+
+  const activeResult = useMemo<LocationResult | null>(() => {
+    if (results.length === 0) return null
+    if (activeLocationKey) {
+      const hit = results.find(
+        (r) => locationKeyOf(r.location) === activeLocationKey,
+      )
+      if (hit) return hit
+    }
+    return results[0]
+  }, [results, activeLocationKey])
+
+  const activeRows = useMemo<ScoredKeyword[]>(
+    () => activeResult?.rows ?? [],
+    [activeResult],
+  )
+
   const clusterNames = useMemo(() => {
     const names = new Set<string>()
-    for (const r of rows) names.add(r.cluster)
+    for (const r of activeRows) names.add(r.cluster)
     return Array.from(names).sort()
-  }, [rows])
+  }, [activeRows])
 
   const filtered = useMemo(() => {
-    return rows.filter((r) => {
+    return activeRows.filter((r) => {
       if (clusterFilter !== FILTER_ALL && r.cluster !== clusterFilter)
         return false
       if (recFilter !== FILTER_ALL && r.recommendation !== recFilter)
         return false
       return true
     })
-  }, [rows, clusterFilter, recFilter])
+  }, [activeRows, clusterFilter, recFilter])
 
   const sorted = useMemo(() => {
     const copy = filtered.slice()
@@ -715,6 +779,17 @@ export default function KeywordResearchPage() {
     copy.sort((a, b) => {
       const av = a[key]
       const bv = b[key]
+      // currentRanking is special: lower is better, and undefined means
+      // "not ranked in top 100" — those should sort to the bottom regardless
+      // of direction so the ranked keywords stay grouped together.
+      if (key === "currentRanking") {
+        const aMissing = av == null
+        const bMissing = bv == null
+        if (aMissing && bMissing) return 0
+        if (aMissing) return 1
+        if (bMissing) return -1
+        return sign * ((av as number) - (bv as number))
+      }
       if (av == null && bv == null) return 0
       if (av == null) return 1
       if (bv == null) return -1
@@ -729,30 +804,39 @@ export default function KeywordResearchPage() {
   const toggleSort = useCallback((key: SortKey) => {
     setSort((prev) => {
       if (prev.key !== key) {
+        // currentRanking defaults to ascending (best rank first); other
+        // numeric columns default to descending (highest first).
+        const defaultAsc = key === "currentRanking"
         const defaultDesc =
-          key === "search_volume" ||
-          key === "keyword_difficulty" ||
-          key === "fitScore" ||
-          key === "pageConversionSignal"
+          !defaultAsc &&
+          (key === "search_volume" ||
+            key === "keyword_difficulty" ||
+            key === "fitScore")
         return { key, direction: defaultDesc ? "desc" : "asc" }
       }
       return { key, direction: prev.direction === "asc" ? "desc" : "asc" }
     })
   }, [])
 
+  const csvSlugSource =
+    mode === "partner" && partner ? partner.name : subject?.domain ?? "subject"
+
+  const subjectReady = subject != null
+  const partnerModeBlocked =
+    mode === "partner" &&
+    !partnerLoading &&
+    !partnerError &&
+    !partner
+
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow="Workflow / Keyword Research"
+        eyebrow="Tool / Keyword Research"
         title="Keyword Research"
         tail="— score the long list."
         subtitle={
           <>
             Pull{" "}
-            <b className="font-sans font-extrabold not-italic text-foreground">
-              GSC
-            </b>{" "}
-            history and{" "}
             <b className="font-sans font-extrabold not-italic text-foreground">
               DataForSEO
             </b>{" "}
@@ -760,25 +844,38 @@ export default function KeywordResearchPage() {
             <b className="font-sans font-extrabold not-italic text-foreground">
               Claude
             </b>{" "}
-            cluster and score them for fit.
+            cluster and score them per location, with live SERP rank
+            probes against the target domain.
           </>
         }
       />
 
-      {partnerLoading ? (
-        <p className="text-sm text-muted-foreground">Loading partner…</p>
-      ) : partnerError ? (
-        <p className="text-sm text-destructive" role="alert">
-          {partnerError}
-        </p>
-      ) : !partner ? (
-        <p className="text-sm text-muted-foreground">
-          Please select a partner from the dropdown above.
-        </p>
-      ) : (
-        <>
-          <PartnerSummary partner={partner} />
+      <ModeToggle mode={mode} onChange={setMode} disabled={running} />
 
+      {mode === "partner" ? (
+        partnerLoading ? (
+          <p className="text-sm text-muted-foreground">Loading partner…</p>
+        ) : partnerError ? (
+          <p className="text-sm text-destructive" role="alert">
+            {partnerError}
+          </p>
+        ) : !partner ? (
+          <p className="text-sm text-muted-foreground">
+            Please select a partner from the dropdown above.
+          </p>
+        ) : (
+          <PartnerSummary partner={partner} />
+        )
+      ) : (
+        <ProspectFormSection
+          form={prospectForm}
+          onChange={setProspectForm}
+          disabled={running}
+        />
+      )}
+
+      {!partnerModeBlocked ? (
+        <>
           <section className="space-y-3 rounded-lg border p-4">
             <LocationAutocomplete
               initialQuery={initialLocationQuery}
@@ -786,22 +883,21 @@ export default function KeywordResearchPage() {
               onAdd={addLocation}
               onRemove={removeLocation}
               disabled={running}
-              label="DataForSEO locations — add every city / state the partner serves"
+              label="DataForSEO locations — one results tab per location"
               helpText={
                 selectedLocations.length === 0 ? (
                   <>
                     Start typing to find cities, counties, or states in
-                    DataForSEO&apos;s Google Ads taxonomy. Add every area
-                    the partner serves — local volume will be summed across
-                    them and Claude will drop keywords that reference cities
-                    outside this list.
+                    DataForSEO&apos;s Google Ads taxonomy. Each location you
+                    add gets its own results tab with location-specific
+                    search volume, current SERP rank for the target domain,
+                    and a Claude scoring pass scoped to that market.
                   </>
                 ) : (
                   <>
                     {selectedLocations.length} location
                     {selectedLocations.length === 1 ? "" : "s"} selected.
-                    Search + add more if the partner&apos;s service area
-                    covers additional cities.
+                    Each becomes its own tab in the results.
                   </>
                 )
               }
@@ -843,19 +939,22 @@ export default function KeywordResearchPage() {
                 className="h-9 w-[140px] rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
               />
               <p className="text-xs text-muted-foreground">
-                How many keywords Claude will surface in the results table.
-                Claude sees the full candidate pool from DataForSEO and picks
-                the best ones by relevance, volume, difficulty, and intent —
-                it may return fewer if the pool runs out of good fits.
-                Default {DEFAULT_MAX_KEYWORDS}, hard-capped at{" "}
-                {MAX_KEYWORDS_CEILING}.
+                How many keywords Claude surfaces per location. Each surfaced
+                keyword also gets a live SERP rank probe per location, so
+                this knob is the main cost lever. Default{" "}
+                {DEFAULT_MAX_KEYWORDS}, hard-capped at {MAX_KEYWORDS_CEILING}.
               </p>
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
               <Button
                 onClick={handleRun}
-                disabled={running || effectiveSeeds.length === 0}
+                disabled={
+                  running ||
+                  !subjectReady ||
+                  effectiveSeeds.length === 0 ||
+                  selectedLocations.length === 0
+                }
               >
                 {running ? "Running…" : "Run Research"}
               </Button>
@@ -865,185 +964,372 @@ export default function KeywordResearchPage() {
 
           <PhaseError phase={phase} />
 
-          {phase.status === "done" ? (
+          {phase.status === "done" && results.length > 0 ? (
             <section className="space-y-3">
-              <ColumnLegend signalActive={signalActive} />
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="flex flex-col gap-1">
-                  <span className="text-xs font-medium text-muted-foreground">
-                    Cluster
-                  </span>
-                  <Select value={clusterFilter} onValueChange={setClusterFilter}>
-                    <SelectTrigger className="w-[220px]" aria-label="Filter by cluster">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={FILTER_ALL}>All clusters</SelectItem>
-                      {clusterNames.map((c) => (
-                        <SelectItem key={c} value={c}>
-                          {c}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="flex flex-col gap-1">
-                  <span className="text-xs font-medium text-muted-foreground">
-                    Recommendation
-                  </span>
-                  <Select value={recFilter} onValueChange={setRecFilter}>
-                    <SelectTrigger className="w-[180px]" aria-label="Filter by recommendation">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={FILTER_ALL}>All</SelectItem>
-                      <SelectItem value="target">Target</SelectItem>
-                      <SelectItem value="monitor">Monitor</SelectItem>
-                      <SelectItem value="skip">Skip</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="ml-auto flex items-center gap-3">
-                  <span className="text-xs text-muted-foreground">
-                    {sorted.length} of {rows.length} keywords
-                    {phase.truncated > 0
-                      ? ` · ${phase.truncated} dropped by token budget`
-                      : ""}
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      downloadCsv(sorted, partner.name, signalActive)
-                    }
-                    disabled={sorted.length === 0}
-                  >
-                    <DownloadIcon className="mr-2 size-4" />
-                    Export CSV
-                  </Button>
-                </div>
-              </div>
-
-              <div className="rounded-lg border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <SortableHead
-                        sortKey="keyword"
-                        sort={sort}
-                        onToggle={toggleSort}
-                      >
-                        Keyword
-                      </SortableHead>
-                      <SortableHead
-                        sortKey="cluster"
-                        sort={sort}
-                        onToggle={toggleSort}
-                      >
-                        Cluster
-                      </SortableHead>
-                      <SortableHead
-                        sortKey="search_volume"
-                        sort={sort}
-                        onToggle={toggleSort}
-                        numeric
-                      >
-                        Volume
-                      </SortableHead>
-                      <SortableHead
-                        sortKey="keyword_difficulty"
-                        sort={sort}
-                        onToggle={toggleSort}
-                        numeric
-                      >
-                        Difficulty
-                      </SortableHead>
-                      <SortableHead
-                        sortKey="fitScore"
-                        sort={sort}
-                        onToggle={toggleSort}
-                        numeric
-                      >
-                        Fit
-                      </SortableHead>
-                      <SortableHead
-                        sortKey="intent"
-                        sort={sort}
-                        onToggle={toggleSort}
-                      >
-                        Intent
-                      </SortableHead>
-                      <SortableHead
-                        sortKey="recommendation"
-                        sort={sort}
-                        onToggle={toggleSort}
-                      >
-                        Recommendation
-                      </SortableHead>
-                      {signalActive ? (
-                        <SortableHead
-                          sortKey="pageConversionSignal"
+              <ColumnLegend />
+              <Tabs
+                value={
+                  activeResult
+                    ? locationKeyOf(activeResult.location)
+                    : locationKeyOf(results[0].location)
+                }
+                onValueChange={(v) => setActiveLocationKey(v)}
+              >
+                <TabsList variant="line" className="flex flex-wrap">
+                  {results.map((r) => (
+                    <TabsTrigger
+                      key={locationKeyOf(r.location)}
+                      value={locationKeyOf(r.location)}
+                    >
+                      {shortLocationLabel(r.location)}
+                    </TabsTrigger>
+                  ))}
+                </TabsList>
+                {results.map((r) => {
+                  const isActive =
+                    activeResult != null &&
+                    locationKeyOf(activeResult.location) ===
+                      locationKeyOf(r.location)
+                  return (
+                    <TabsContent
+                      key={locationKeyOf(r.location)}
+                      value={locationKeyOf(r.location)}
+                    >
+                      {isActive ? (
+                        <LocationResultPanel
+                          result={r}
+                          domain={phase.domain}
+                          sorted={sorted}
+                          totalRows={activeRows.length}
+                          clusterNames={clusterNames}
+                          clusterFilter={clusterFilter}
+                          recFilter={recFilter}
+                          onClusterFilter={setClusterFilter}
+                          onRecFilter={setRecFilter}
                           sort={sort}
-                          onToggle={toggleSort}
-                        >
-                          Page conversion signal
-                        </SortableHead>
+                          onToggleSort={toggleSort}
+                          onExport={() =>
+                            downloadCsv(
+                              sorted,
+                              csvSlugSource,
+                              shortLocationLabel(r.location),
+                            )
+                          }
+                        />
                       ) : null}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {sorted.length === 0 ? (
-                      <TableRow>
-                        <TableCell
-                          colSpan={signalActive ? 8 : 7}
-                          className="text-center text-sm text-muted-foreground"
-                        >
-                          No keywords match the current filters.
-                        </TableCell>
-                      </TableRow>
-                    ) : (
-                      sorted.map((r) => (
-                        <TableRow key={r.keyword}>
-                          <TableCell className="font-medium">
-                            {r.keyword}
-                          </TableCell>
-                          <TableCell className="text-xs text-muted-foreground">
-                            {r.cluster}
-                          </TableCell>
-                          <TableCell className="text-right tabular-nums">
-                            {r.search_volume != null
-                              ? r.search_volume.toLocaleString()
-                              : "—"}
-                          </TableCell>
-                          <TableCell className="text-right tabular-nums">
-                            {r.keyword_difficulty != null
-                              ? r.keyword_difficulty
-                              : "—"}
-                          </TableCell>
-                          <TableCell className="text-right tabular-nums">
-                            <FitBadge score={r.fitScore} />
-                          </TableCell>
-                          <TableCell>
-                            <IntentLabel intent={r.intent} />
-                          </TableCell>
-                          <TableCell>
-                            <RecommendationBadge value={r.recommendation} />
-                          </TableCell>
-                          {signalActive ? (
-                            <TableCell>
-                              <ConversionSignalCell row={r} />
-                            </TableCell>
-                          ) : null}
-                        </TableRow>
-                      ))
-                    )}
-                  </TableBody>
-                </Table>
-              </div>
+                    </TabsContent>
+                  )
+                })}
+              </Tabs>
             </section>
           ) : null}
         </>
-      )}
+      ) : null}
+    </div>
+  )
+}
+
+function ModeToggle({
+  mode,
+  onChange,
+  disabled,
+}: {
+  mode: Mode
+  onChange: (m: Mode) => void
+  disabled?: boolean
+}) {
+  return (
+    <div className="inline-flex overflow-hidden rounded-md border">
+      {(["partner", "prospect"] as const).map((value) => {
+        const active = mode === value
+        const label = value === "partner" ? "Partner" : "Prospect"
+        return (
+          <button
+            key={value}
+            type="button"
+            onClick={() => onChange(value)}
+            disabled={disabled}
+            aria-pressed={active}
+            className={cn(
+              "px-4 py-1.5 text-sm font-medium transition-colors",
+              active
+                ? "bg-foreground text-background"
+                : "text-muted-foreground hover:text-foreground",
+              disabled && "cursor-not-allowed opacity-50",
+            )}
+          >
+            {label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function ProspectFormSection({
+  form,
+  onChange,
+  disabled,
+}: {
+  form: ProspectForm
+  onChange: (next: ProspectForm) => void
+  disabled?: boolean
+}) {
+  return (
+    <section className="space-y-4 rounded-lg border p-4">
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="prospect-domain">
+          Prospect domain <span className="text-destructive">*</span>
+        </Label>
+        <Input
+          id="prospect-domain"
+          type="text"
+          placeholder="example.com"
+          value={form.domain}
+          onChange={(e) => onChange({ ...form, domain: e.target.value })}
+          disabled={disabled}
+        />
+        <p className="text-xs text-muted-foreground">
+          Bare hostname or full URL — used as the target for live SERP rank
+          probes per location. No GSC / GA4 access required.
+        </p>
+      </div>
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="prospect-context">Services / context (optional)</Label>
+        <Textarea
+          id="prospect-context"
+          placeholder="e.g. Residential plumbing — water heaters, drain cleaning, emergency repair."
+          value={form.contextNotes}
+          onChange={(e) => onChange({ ...form, contextNotes: e.target.value })}
+          disabled={disabled}
+          className="min-h-[80px]"
+        />
+        <p className="text-xs text-muted-foreground">
+          Helps Claude scope keyword relevance. If left blank, Claude relies
+          entirely on the seed keywords below.
+        </p>
+      </div>
+    </section>
+  )
+}
+
+function LocationResultPanel({
+  result,
+  domain,
+  sorted,
+  totalRows,
+  clusterNames,
+  clusterFilter,
+  recFilter,
+  onClusterFilter,
+  onRecFilter,
+  sort,
+  onToggleSort,
+  onExport,
+}: {
+  result: LocationResult
+  domain: string
+  sorted: ScoredKeyword[]
+  totalRows: number
+  clusterNames: string[]
+  clusterFilter: string
+  recFilter: string
+  onClusterFilter: (v: string) => void
+  onRecFilter: (v: string) => void
+  sort: SortState
+  onToggleSort: (k: SortKey) => void
+  onExport: () => void
+}) {
+  return (
+    <div className="space-y-3 pt-3">
+      <div className="flex flex-wrap items-center gap-3 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+        <span>
+          Location:{" "}
+          <span className="font-medium text-foreground">
+            {result.location.location_name}
+          </span>
+        </span>
+        <span>·</span>
+        <span>
+          Domain probed:{" "}
+          <span className="font-mono text-foreground">{domain}</span>
+        </span>
+        {result.rankProbeFailed ? (
+          <span className="ml-auto text-destructive">
+            SERP rank probes failed for this location — Current Ranking column
+            is empty.
+          </span>
+        ) : null}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-col gap-1">
+          <span className="text-xs font-medium text-muted-foreground">
+            Cluster
+          </span>
+          <Select value={clusterFilter} onValueChange={onClusterFilter}>
+            <SelectTrigger className="w-[220px]" aria-label="Filter by cluster">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={FILTER_ALL}>All clusters</SelectItem>
+              {clusterNames.map((c) => (
+                <SelectItem key={c} value={c}>
+                  {c}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-xs font-medium text-muted-foreground">
+            Recommendation
+          </span>
+          <Select value={recFilter} onValueChange={onRecFilter}>
+            <SelectTrigger
+              className="w-[180px]"
+              aria-label="Filter by recommendation"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={FILTER_ALL}>All</SelectItem>
+              <SelectItem value="target">Target</SelectItem>
+              <SelectItem value="monitor">Monitor</SelectItem>
+              <SelectItem value="skip">Skip</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="ml-auto flex items-center gap-3">
+          <span className="text-xs text-muted-foreground">
+            {sorted.length} of {totalRows} keywords
+            {result.truncated > 0
+              ? ` · ${result.truncated} dropped by token budget`
+              : ""}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onExport}
+            disabled={sorted.length === 0}
+          >
+            <DownloadIcon className="mr-2 size-4" />
+            Export CSV
+          </Button>
+        </div>
+      </div>
+
+      <div className="rounded-lg border">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <SortableHead
+                sortKey="keyword"
+                sort={sort}
+                onToggle={onToggleSort}
+              >
+                Keyword
+              </SortableHead>
+              <SortableHead
+                sortKey="cluster"
+                sort={sort}
+                onToggle={onToggleSort}
+              >
+                Cluster
+              </SortableHead>
+              <SortableHead
+                sortKey="search_volume"
+                sort={sort}
+                onToggle={onToggleSort}
+                numeric
+              >
+                Volume (city)
+              </SortableHead>
+              <SortableHead
+                sortKey="keyword_difficulty"
+                sort={sort}
+                onToggle={onToggleSort}
+                numeric
+              >
+                Difficulty (national)
+              </SortableHead>
+              <SortableHead
+                sortKey="currentRanking"
+                sort={sort}
+                onToggle={onToggleSort}
+                numeric
+              >
+                Current Ranking
+              </SortableHead>
+              <SortableHead
+                sortKey="fitScore"
+                sort={sort}
+                onToggle={onToggleSort}
+                numeric
+              >
+                Fit
+              </SortableHead>
+              <SortableHead
+                sortKey="intent"
+                sort={sort}
+                onToggle={onToggleSort}
+              >
+                Intent
+              </SortableHead>
+              <SortableHead
+                sortKey="recommendation"
+                sort={sort}
+                onToggle={onToggleSort}
+              >
+                Recommendation
+              </SortableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sorted.length === 0 ? (
+              <TableRow>
+                <TableCell
+                  colSpan={8}
+                  className="text-center text-sm text-muted-foreground"
+                >
+                  No keywords match the current filters.
+                </TableCell>
+              </TableRow>
+            ) : (
+              sorted.map((r) => (
+                <TableRow key={r.keyword}>
+                  <TableCell className="font-medium">{r.keyword}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {r.cluster}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {r.search_volume != null
+                      ? r.search_volume.toLocaleString()
+                      : "—"}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {r.keyword_difficulty != null
+                      ? r.keyword_difficulty
+                      : "—"}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    <CurrentRankingCell value={r.currentRanking} />
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    <FitBadge score={r.fitScore} />
+                  </TableCell>
+                  <TableCell>
+                    <IntentLabel intent={r.intent} />
+                  </TableCell>
+                  <TableCell>
+                    <RecommendationBadge value={r.recommendation} />
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </div>
     </div>
   )
 }
@@ -1074,7 +1360,7 @@ function PartnerSummary({ partner }: { partner: Partner }) {
  * value actually comes from. Helps the SEO engineer answer "why is this
  * keyword here?" without having to re-read the code.
  */
-function ColumnLegend({ signalActive }: { signalActive: boolean }) {
+function ColumnLegend() {
   return (
     <details className="group rounded-lg border bg-card p-0 text-sm">
       <summary className="cursor-pointer list-none px-4 py-2.5 text-xs font-medium text-muted-foreground hover:text-foreground">
@@ -1087,105 +1373,76 @@ function ColumnLegend({ signalActive }: { signalActive: boolean }) {
         <div>
           <dt className="font-medium text-foreground">Keyword</dt>
           <dd className="text-muted-foreground">
-            A candidate keyword. Sourced from DataForSEO&apos;s{" "}
-            <code className="font-mono">keyword_ideas</code> +{" "}
+            A candidate keyword. The candidate pool is shared across location
+            tabs because DataForSEO&apos;s{" "}
+            <code className="font-mono">keyword_ideas</code> /{" "}
             <code className="font-mono">keyword_suggestions</code> endpoints
-            run at US country level for each seed, plus the partner&apos;s
-            top 50 Google Search Console queries (last 90 days) as
-            historical winners. Deduplicated before scoring.
+            are country-level only. Locations differentiate downstream on
+            volume, current rank, and Claude&apos;s scoring.
           </dd>
         </div>
         <div>
           <dt className="font-medium text-foreground">Cluster</dt>
           <dd className="text-muted-foreground">
-            Topical grouping assigned by Claude. Short 2–4 word label
-            (e.g. &ldquo;Emergency Repair&rdquo;, &ldquo;Pricing &amp;
-            Estimates&rdquo;). Keywords in the same cluster target similar
-            customer intent and would typically share a landing page or
-            content piece.
+            Topical grouping assigned by Claude (per location). Short 2–4
+            word label (e.g. &ldquo;Emergency Repair&rdquo;, &ldquo;Pricing
+            &amp; Estimates&rdquo;).
           </dd>
         </div>
         <div>
-          <dt className="font-medium text-foreground">Volume</dt>
+          <dt className="font-medium text-foreground">Volume (city)</dt>
           <dd className="text-muted-foreground">
-            Monthly search volume. When you&apos;ve picked one or more
-            non-country locations, this is the{" "}
-            <strong>sum of Google Ads search_volume</strong> across every
-            selected city — the total addressable monthly demand across the
-            partner&apos;s service footprint. Falls back to country-level
-            volume from <code className="font-mono">keyword_ideas</code> /{" "}
-            <code className="font-mono">bulk_keyword_difficulty</code> when
-            city data is unavailable.
+            Monthly search volume from DataForSEO&apos;s{" "}
+            <code className="font-mono">google_ads/search_volume</code>{" "}
+            endpoint, scoped to <strong>this tab&apos;s location</strong>{" "}
+            (the only DataForSEO endpoint that supports city-level location
+            codes). Different tabs show different numbers for the same
+            keyword.
           </dd>
         </div>
         <div>
-          <dt className="font-medium text-foreground">Difficulty</dt>
+          <dt className="font-medium text-foreground">Difficulty (national)</dt>
           <dd className="text-muted-foreground">
             Keyword difficulty (0–100) from DataForSEO&apos;s{" "}
             <code className="font-mono">bulk_keyword_difficulty</code>{" "}
-            endpoint, run at US country level. Reflects how hard it is to
-            rank organically — a rough blend of top-10 domain authority,
-            backlink counts, and content strength. Higher is harder.
+            endpoint. This is country-level only — DataForSEO&apos;s Labs
+            API doesn&apos;t expose city-level difficulty — so the same
+            value is shown in every location tab.
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium text-foreground">Current Ranking</dt>
+          <dd className="text-muted-foreground">
+            Live SERP probe via{" "}
+            <code className="font-mono">/v3/serp/google/organic/live/advanced</code>{" "}
+            for each surfaced keyword in this tab&apos;s city. Shows the
+            target domain&apos;s 1-indexed position in organic results
+            (top 100). Empty when the domain isn&apos;t in the top 100.
           </dd>
         </div>
         <div>
           <dt className="font-medium text-foreground">Fit</dt>
           <dd className="text-muted-foreground">
-            Claude&apos;s 0–100 fit score for this partner. Combines four
-            criteria in priority order: (1) topical + geographic relevance
-            to the partner&apos;s services and selected locations,
-            (2) realistic difficulty for a local service business,
-            (3) meaningful volume, (4) intent. Since the output is already
-            pre-filtered to Claude&apos;s top picks, most scores land 50–90;
-            85+ is reserved for clear winners.
+            Claude&apos;s 0–100 fit score for this location. Combines (1)
+            topical + geographic relevance, (2) realistic difficulty for a
+            local service business, (3) meaningful volume, (4) intent.
           </dd>
         </div>
         <div>
           <dt className="font-medium text-foreground">Intent</dt>
           <dd className="text-muted-foreground">
-            Search intent classification by Claude.{" "}
-            <strong>Informational</strong> = researching / learning (how-to,
-            what is).{" "}
-            <strong>Commercial</strong> = evaluating options before buying
-            (best, reviews, comparison).{" "}
-            <strong>Transactional</strong> = ready to book / buy (near me,
-            same day, emergency).{" "}
-            <strong>Navigational</strong> = looking for a specific brand or
-            site.
+            <strong>Informational</strong>, <strong>Commercial</strong>,{" "}
+            <strong>Transactional</strong>, or <strong>Navigational</strong>.
           </dd>
         </div>
         <div>
           <dt className="font-medium text-foreground">Recommendation</dt>
           <dd className="text-muted-foreground">
-            Claude&apos;s action-oriented verdict.{" "}
-            <strong>Target</strong> = actively pursue now (good fit +
-            realistic difficulty + meaningful volume).{" "}
-            <strong>Monitor</strong> = worth tracking but not the immediate
-            priority (edge case, seasonal, lower volume).{" "}
-            <strong>Skip</strong> = rare in this output since off-topic and
-            out-of-area keywords are already dropped before scoring; used
-            only when a selected keyword turns out weak on closer
-            inspection.
+            <strong>Target</strong> = pursue now.{" "}
+            <strong>Monitor</strong> = track but not priority.{" "}
+            <strong>Skip</strong> = de-prioritize.
           </dd>
         </div>
-        {signalActive ? (
-          <div>
-            <dt className="font-medium text-foreground">
-              Page conversion signal
-            </dt>
-            <dd className="text-muted-foreground">
-              Shown only when the partner has a GA4 Property ID in Airtable and
-              the GA4 + GSC fetches both succeeded. A keyword is flagged as
-              <strong> High converter</strong> when its best-ranking GSC
-              landing page (last 90 days) is one of the partner&apos;s
-              top-converting pages in GA4 (last 90 days). Claude applies a
-              modest fit-score boost to these keywords in the prompt, and the
-              server reapplies the flag after Claude returns so the column
-              reflects the real page↔conversion match — not Claude&apos;s
-              self-report.
-            </dd>
-          </div>
-        ) : null}
       </dl>
     </details>
   )
@@ -1194,11 +1451,11 @@ function ColumnLegend({ signalActive }: { signalActive: boolean }) {
 function StageProgress({ phase }: { phase: Phase }) {
   if (phase.status !== "running") return null
   const stages: Stage[] = [
-    "gsc",
     "dfs-ideas",
     "dfs-difficulty",
-    "dfs-local-volume",
+    "dfs-volume",
     "claude",
+    "dfs-serp-rank",
   ]
   const currentIdx = stageIndex(phase.stage)
   return (
@@ -1283,22 +1540,21 @@ function IntentLabel({ intent }: { intent: KeywordIntent }) {
   )
 }
 
-function ConversionSignalCell({ row }: { row: ScoredKeyword }) {
-  if (row.pageConversionSignal) {
+function CurrentRankingCell({ value }: { value: number | undefined }) {
+  if (value == null) {
     return (
-      <Badge
-        variant="default"
-        className="bg-amber-500 text-white hover:bg-amber-500/90"
-        title={row.landingPage ? `Matches ${row.landingPage}` : undefined}
+      <span
+        className="text-xs text-muted-foreground"
+        title="Domain not found in the top 100 organic results for this keyword/location"
       >
-        High converter
-      </Badge>
+        —
+      </span>
     )
   }
-  // When the signal is off for this row but active for the run, still show
-  // an empty-state marker so the column isn't just blank. An actual "—" is
-  // clearer than silent whitespace.
-  return <span className="text-xs text-muted-foreground">—</span>
+  // Top 3 = green, top 10 = blue, top 30 = neutral, beyond = muted.
+  const variant: "default" | "secondary" | "outline" =
+    value <= 10 ? "default" : value <= 30 ? "secondary" : "outline"
+  return <Badge variant={variant}>{value}</Badge>
 }
 
 function RecommendationBadge({ value }: { value: KeywordRecommendation }) {

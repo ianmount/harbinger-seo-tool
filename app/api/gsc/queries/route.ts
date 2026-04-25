@@ -14,6 +14,7 @@ const bodySchema = z
     startDate: isoDate,
     endDate: isoDate,
     rowLimit: z.number().int().positive().max(25000).optional(),
+    account: z.enum(["partners", "assessments"]).default("partners"),
   })
   .refine((v) => v.startDate <= v.endDate, {
     message: "startDate must be on or before endDate",
@@ -39,7 +40,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const rows = await getQueries({ account: "partners", ...parsed.data })
+    const rows = await getQueries(parsed.data)
     return NextResponse.json({ rows })
   } catch (error: unknown) {
     console.error("[api/gsc/queries] failed:", error)

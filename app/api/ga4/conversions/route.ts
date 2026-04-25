@@ -13,6 +13,7 @@ const bodySchema = z
     propertyId: z.string().trim().min(1),
     startDate: isoDate,
     endDate: isoDate,
+    account: z.enum(["partners", "assessments"]).default("partners"),
   })
   .refine((v) => v.startDate <= v.endDate, {
     message: "startDate must be on or before endDate",
@@ -54,7 +55,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const results = await getConversionsByPage({ account: "partners", ...parsed.data })
+    const results = await getConversionsByPage(parsed.data)
     return NextResponse.json({ results })
   } catch (error: unknown) {
     console.error("[api/ga4/conversions] failed:", error)

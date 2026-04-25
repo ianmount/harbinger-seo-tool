@@ -1,11 +1,19 @@
 import { NextResponse } from "next/server"
 import { GSCError, listSites } from "@/lib/gsc"
+import type { GoogleAccount } from "@/lib/google-auth"
 
 export const dynamic = "force-dynamic"
 
-export async function GET() {
+function parseAccount(value: string | null): GoogleAccount {
+  return value === "assessments" ? "assessments" : "partners"
+}
+
+export async function GET(request: Request) {
+  const account = parseAccount(
+    new URL(request.url).searchParams.get("account"),
+  )
   try {
-    const sites = await listSites("partners")
+    const sites = await listSites(account)
     return NextResponse.json({ sites })
   } catch (error: unknown) {
     console.error("[api/gsc/sites] failed:", error)

@@ -19,6 +19,7 @@ const bodySchema = z
     startDate: isoDate,
     endDate: isoDate,
     rowLimit: z.number().int().positive().max(1000).optional(),
+    account: z.enum(["partners", "assessments"]).default("partners"),
   })
   .refine((v) => v.startDate <= v.endDate, {
     message: "startDate must be on or before endDate",
@@ -42,13 +43,13 @@ export async function POST(request: Request) {
       { status: 400 },
     )
   }
-  const { siteUrl, startDate, endDate, rowLimit } = parsed.data
+  const { siteUrl, startDate, endDate, rowLimit, account } = parsed.data
 
   try {
     const [topQueries, topPages, dailyClicks] = await Promise.all([
-      getTopQueries({ account: "partners", siteUrl, startDate, endDate, rowLimit: rowLimit ?? 100 }),
-      getTopPages({ account: "partners", siteUrl, startDate, endDate, rowLimit: rowLimit ?? 100 }),
-      getDailyClicks({ account: "partners", siteUrl, startDate, endDate }),
+      getTopQueries({ account, siteUrl, startDate, endDate, rowLimit: rowLimit ?? 100 }),
+      getTopPages({ account, siteUrl, startDate, endDate, rowLimit: rowLimit ?? 100 }),
+      getDailyClicks({ account, siteUrl, startDate, endDate }),
     ])
     return NextResponse.json({ topQueries, topPages, dailyClicks })
   } catch (error: unknown) {

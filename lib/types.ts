@@ -104,6 +104,15 @@ export interface ScoredKeyword extends KeywordResult {
    * debugging why a signal did or didn't fire. Path-only (no scheme/host).
    */
   landingPage?: string
+  /**
+   * Current organic SERP position (1-indexed) for the configured domain
+   * in the location this keyword was scored against. Populated post-Claude
+   * by probing DataForSEO `/v3/serp/google/organic/live/advanced` per
+   * (keyword, location). Undefined when the domain is not in the top
+   * `depth` (default 100) organic results, when no domain was provided,
+   * or when the SERP probe failed for that keyword.
+   */
+  currentRanking?: number
 }
 
 export interface KeywordCluster {
