@@ -20,8 +20,11 @@ export function TabNav() {
   const suffix = query ? `?${query}` : ""
 
   return (
-    <nav className="border-b bg-background">
-      <div className="mx-auto flex max-w-6xl gap-1 px-4 overflow-x-auto">
+    <nav
+      aria-label="Workflows"
+      className="border-b border-border bg-brand-paper"
+    >
+      <div className="mx-auto flex max-w-6xl gap-1 overflow-x-auto px-4 sm:px-6">
         {TABS.map((tab) => {
           const active = pathname === tab.href
           return (
@@ -30,10 +33,10 @@ export function TabNav() {
               href={`${tab.href}${suffix}`}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "whitespace-nowrap border-b-2 px-3 py-3 text-sm font-medium transition-colors",
+                "relative -mb-px whitespace-nowrap border-b-2 px-3 py-3.5 font-sans text-[11.5px] font-bold uppercase tracking-[0.14em] transition-colors",
                 active
-                  ? "border-foreground text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground",
+                  ? "border-brand-red text-foreground"
+                  : "border-transparent text-ink-3 hover:text-foreground",
               )}
             >
               {tab.label}

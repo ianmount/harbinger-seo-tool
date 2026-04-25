@@ -41,3 +41,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local design-brief working copy — canonical summary is in design/DESIGN_NOTES.md
+Harbinger Design Brief*.html

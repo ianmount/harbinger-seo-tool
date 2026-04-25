@@ -8,6 +8,7 @@ import {
   ExternalLinkIcon,
   MailIcon,
 } from "lucide-react"
+import { PageHeader } from "@/components/PageHeader"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -312,14 +313,24 @@ export default function BacklinksPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Backlinks</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Pull referring-domain lists from 3–5 competitors, filter for quality,
-          and have Claude categorize each prospect so you can prioritize
-          outreach.
-        </p>
-      </div>
+      <PageHeader
+        eyebrow="Workflow / Backlinks"
+        title="Backlinks"
+        tail="— prospects from competitor link graphs."
+        subtitle={
+          <>
+            Pull referring&#8209;domain lists from{" "}
+            <b className="font-sans font-extrabold not-italic text-foreground">
+              3–5 competitors
+            </b>
+            , filter for quality, and have{" "}
+            <b className="font-sans font-extrabold not-italic text-foreground">
+              Claude
+            </b>{" "}
+            categorize each prospect so you can prioritize outreach.
+          </>
+        }
+      />
 
       {partnerLoading ? (
         <p className="text-sm text-muted-foreground">Loading partner…</p>

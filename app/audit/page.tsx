@@ -3,6 +3,7 @@
 import { useCallback, useState } from "react"
 import { Check, Copy, Download, Loader2, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
+import { PageHeader } from "@/components/PageHeader"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -228,14 +229,28 @@ export default function AuditPage() {
 
   return (
     <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight">SEO Audit</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Generate a pre-sales audit PDF for a prospective partner. GSC and GA4
-          are optional — when absent, the audit runs on crawl + DataForSEO data
-          and is marked as a limited audit.
-        </p>
-      </header>
+      <PageHeader
+        eyebrow="Pre-sales / SEO Audit"
+        title="SEO Audit"
+        tail="— prospect deliverable"
+        subtitle={
+          <>
+            Generate a pre-sales audit PDF for a prospective partner.{" "}
+            <b className="font-sans font-extrabold not-italic text-foreground">
+              GSC
+            </b>{" "}
+            and{" "}
+            <b className="font-sans font-extrabold not-italic text-foreground">
+              GA4
+            </b>{" "}
+            are optional — when absent, the audit runs on{" "}
+            <b className="font-sans font-extrabold not-italic text-foreground">
+              crawl + DataForSEO
+            </b>{" "}
+            data and is marked as a limited audit.
+          </>
+        }
+      />
 
       <AuditForm
         form={form}

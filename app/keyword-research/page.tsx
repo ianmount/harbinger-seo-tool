@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { DownloadIcon, ArrowUpDown, ArrowDown, ArrowUp } from "lucide-react"
+import { PageHeader } from "@/components/PageHeader"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
@@ -740,13 +741,28 @@ export default function KeywordResearchPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Keyword Research</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Pull GSC history and DataForSEO keyword ideas, then have Claude cluster
-          and score them for fit.
-        </p>
-      </div>
+      <PageHeader
+        eyebrow="Workflow / Keyword Research"
+        title="Keyword Research"
+        tail="— score the long list."
+        subtitle={
+          <>
+            Pull{" "}
+            <b className="font-sans font-extrabold not-italic text-foreground">
+              GSC
+            </b>{" "}
+            history and{" "}
+            <b className="font-sans font-extrabold not-italic text-foreground">
+              DataForSEO
+            </b>{" "}
+            keyword ideas, then have{" "}
+            <b className="font-sans font-extrabold not-italic text-foreground">
+              Claude
+            </b>{" "}
+            cluster and score them for fit.
+          </>
+        }
+      />
 
       {partnerLoading ? (
         <p className="text-sm text-muted-foreground">Loading partner…</p>
