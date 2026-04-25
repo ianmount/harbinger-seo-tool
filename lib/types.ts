@@ -848,6 +848,13 @@ export interface CompAnalysisDomainRow {
 
 export interface CompAnalysisLocationRows {
   location: string
+  /**
+   * Granularity actually used by DataForSEO for this location:
+   *   - "city"  — the Labs taxonomy accepted the city-level location code
+   *   - "state" — the city wasn't in the Labs taxonomy or DFS rejected it
+   *               with status 40501; metrics rolled up to state level
+   */
+  granularity: "city" | "state"
   domains: CompAnalysisDomainRow[]
 }
 

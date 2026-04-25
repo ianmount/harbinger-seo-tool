@@ -498,6 +498,59 @@ export async function listLabsLocations(
   return locations
 }
 
+/**
+ * Resolve a "City, State" pair to a DataForSEO Labs city-level location_code.
+ *
+ * Uses the cached Google Ads US location list (location_type === "City")
+ * which DOES contain city codes — and a subset of those codes are
+ * accepted by the Labs ranked_keywords / domain_rank_overview endpoints.
+ * The "subset" caveat is important: smaller cities are rejected at the
+ * Labs layer with status 40501, which is why callers should attempt the
+ * city code first and fall back to state-level on failure.
+ *
+ * Match criteria: location_type === "City" AND location_name matches
+ * `<city>,<state>,United States` exactly (case-insensitive). Returns the
+ * first match or null.
+ */
+export async function resolveLabsCityCode(
+  city: string,
+  state: string,
+): Promise<number | null> {
+  const cityNorm = city.trim().toLowerCase()
+  const stateNorm = state.trim().toLowerCase()
+  if (!cityNorm || !stateNorm) return null
+  let locations: DfsLabsLocation[]
+  try {
+    locations = await listLabsLocations("US")
+  } catch (err) {
+    console.warn("[dataforseo] resolveLabsCityCode: locations fetch failed:", err)
+    return null
+  }
+  const target = `${cityNorm},${stateNorm},united states`
+  for (const loc of locations) {
+    if (loc.location_type !== "City") continue
+    if (loc.location_name.toLowerCase() === target) {
+      return loc.location_code
+    }
+  }
+  return null
+}
+
+/**
+ * True when an error from `dfsRequest` looks like the Labs taxonomy
+ * rejecting a city-level location code. We use this to decide whether to
+ * silently fall back to state-level (a useful workaround) or surface the
+ * error (a real problem). DataForSEO reports 40501 "Invalid Field" for
+ * location_code mismatches, occasionally 40400/40000-range for related
+ * validation issues — all are recoverable by retrying at state level.
+ */
+export function isLabsCityRejection(err: unknown): boolean {
+  if (!(err instanceof DataForSEOError)) return false
+  const s = err.dfsStatus
+  if (s == null) return false
+  return s === 40501 || s === 40400 || s === 40000 || s === 40601
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Audit tab wrappers.
 //

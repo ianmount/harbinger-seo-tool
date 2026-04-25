@@ -267,9 +267,10 @@ export default function CompAnalysisPage() {
           />
           <p className="text-xs text-ink-3">
             Parsed {targetLocations.length} location
-            {targetLocations.length === 1 ? "" : "s"}. DataForSEO Labs rolls
-            comparisons up to state level — the city is preserved as the
-            row label.
+            {targetLocations.length === 1 ? "" : "s"}. The analysis tries
+            city-level data first; if DataForSEO doesn&apos;t support a
+            given city it falls back to state level for that row (flagged
+            in the results table).
           </p>
         </div>
 
@@ -404,8 +405,23 @@ function CompResults({
 function LocationTable({ location }: { location: CompAnalysisLocationRows }) {
   return (
     <div className="overflow-hidden rounded-lg border bg-card">
-      <div className="border-b bg-muted/30 px-4 py-2 font-sans text-[11px] font-extrabold uppercase tracking-[0.18em] text-ink-2">
-        {location.location}
+      <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2 font-sans text-[11px] font-extrabold uppercase tracking-[0.18em] text-ink-2">
+        <span>{location.location}</span>
+        {location.granularity === "city" ? (
+          <span
+            className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold tracking-[0.16em] text-emerald-700 dark:text-emerald-300"
+            title="DataForSEO returned city-level metrics for this location."
+          >
+            city-level
+          </span>
+        ) : (
+          <span
+            className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-bold tracking-[0.16em] text-amber-700 dark:text-amber-300"
+            title="DataForSEO doesn't have city-level data for this city — metrics rolled up to state level."
+          >
+            state-level fallback
+          </span>
+        )}
       </div>
       <div className="overflow-x-auto">
         <table className="min-w-full text-sm">
