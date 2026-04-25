@@ -1,7 +1,15 @@
 import "server-only"
 import { google } from "googleapis"
-import type { OAuth2Client } from "google-auth-library"
-import { env, requireEnv } from "@/lib/env"
+import {
+  GoogleAuthError,
+  GOOGLE_SCOPES,
+  type GoogleAccount,
+  emailFor,
+  exchangeCodeForTokens as authExchangeCodeForTokens,
+  generateAuthUrl as authGenerateAuthUrl,
+  getGoogleAuthClient,
+  getRedirectUri,
+} from "@/lib/google-auth"
 import type {
   GSCDailyRow,
   GSCQueryRow,
@@ -11,48 +19,47 @@ import type {
 } from "@/lib/types"
 
 /**
- * OAuth scopes requested during the consent flow. analytics.readonly is
- * included so the same refresh token can also drive the GA4 Data / Admin APIs
- * (see lib/ga4.ts). Changing this list requires re-consenting — revoke the
- * existing grant at https://myaccount.google.com/permissions and re-run
- * /api/gsc/auth so Google mints a new refresh token with the full scope set.
+ * GSC client. All entry points take an explicit `account: GoogleAccount`
+ * so it's obvious at the call site which Google identity is being used:
+ *
+ *   - "partners"     — existing partner pipeline (Reporting, Keyword
+ *                      Research). Uses GOOGLE_REFRESH_TOKEN_PARTNERS.
+ *   - "assessments"  — Assessment workflow (Audit + Comp Analysis). Uses
+ *                      GOOGLE_REFRESH_TOKEN_ASSESSMENTS.
+ *
+ * The auth factory in `lib/google-auth.ts` is the only place that reads
+ * either refresh token env var.
  */
-export const GSC_SCOPES = [
-  "https://www.googleapis.com/auth/webmasters.readonly",
-  "https://www.googleapis.com/auth/analytics.readonly",
-] as const
+
+// Re-export auth scopes / helpers for backwards compatibility with consumers
+// that imported them from this module.
+export { GOOGLE_SCOPES as GSC_SCOPES, getRedirectUri }
+export const generateAuthUrl = authGenerateAuthUrl
+export const exchangeCodeForTokens = authExchangeCodeForTokens
 
 export class GSCError extends Error {
   readonly code: "NO_REFRESH_TOKEN" | "API_ERROR"
   readonly status: number | undefined
+  readonly account: GoogleAccount | undefined
   constructor(
     message: string,
     code: "NO_REFRESH_TOKEN" | "API_ERROR",
-    status?: number,
+    opts: { status?: number; account?: GoogleAccount } = {},
   ) {
     super(message)
     this.name = "GSCError"
     this.code = code
-    this.status = status
+    this.status = opts.status
+    this.account = opts.account
   }
 }
 
 /**
- * Build the OAuth redirect URI for the current environment.
+ * Normalize a freeform website URL into a GSC URL-prefix siteUrl.
  *
- * VERCEL_PROJECT_PRODUCTION_URL is the *stable* production domain (e.g.
- * "harbinger-seo-tool.vercel.app"). We prefer it over VERCEL_URL because
- * VERCEL_URL is unique per-deployment and wouldn't match what's configured
- * in Google Cloud Console. On preview deploys, this still resolves to the
- * production URL, which is fine because the refresh token lives in env vars,
- * not per-request state.
- */
-/**
- * Normalize a partner's freeform website URL into a GSC URL-prefix siteUrl.
- *
- * Ensures a protocol and a trailing slash. Partners stored as domain
- * properties ("sc-domain:example.com") would need a different derivation —
- * we'll add that once Airtable has a dedicated GSC field.
+ * Ensures a protocol and a trailing slash. Domain-property GSC sites
+ * ("sc-domain:example.com") would need a different derivation — only used
+ * when the partner has a dedicated GSC field.
  */
 export function partnerWebsiteToGscSiteUrl(website: string): string {
   let url = website.trim()
@@ -65,73 +72,38 @@ export function partnerWebsiteToGscSiteUrl(website: string): string {
   return url
 }
 
-export function getRedirectUri(): string {
-  const prodHost = process.env.VERCEL_PROJECT_PRODUCTION_URL
-  const base = prodHost ? `https://${prodHost}` : "http://localhost:3000"
-  return `${base}/api/gsc/callback`
-}
-
-let cachedClient: OAuth2Client | null = null
-
-/**
- * Return a configured OAuth2 client. If GOOGLE_REFRESH_TOKEN is set, the
- * client is pre-loaded with it so googleapis will auto-mint access tokens
- * on every call. Cached per-process because the client is stateless beyond
- * its credentials (fine for single-engineer MVP).
- */
-export function getOAuth2Client(): OAuth2Client {
-  if (cachedClient) return cachedClient
-  const clientId = requireEnv("GOOGLE_CLIENT_ID")
-  const clientSecret = requireEnv("GOOGLE_CLIENT_SECRET")
-  const redirectUri = getRedirectUri()
-
-  const client = new google.auth.OAuth2(clientId, clientSecret, redirectUri)
-  if (env.GOOGLE_REFRESH_TOKEN) {
-    client.setCredentials({ refresh_token: env.GOOGLE_REFRESH_TOKEN })
-  }
-  cachedClient = client
-  return client
-}
-
-/** URL the browser should be redirected to for the consent flow. */
-export function generateAuthUrl(): string {
-  const client = getOAuth2Client()
-  return client.generateAuthUrl({
-    access_type: "offline",
-    prompt: "consent",
-    scope: [...GSC_SCOPES],
-  })
-}
-
-/** Exchange an authorization code for tokens. */
-export async function exchangeCodeForTokens(code: string) {
-  const client = getOAuth2Client()
-  const { tokens } = await client.getToken(code)
-  return tokens
-}
-
-function assertRefreshToken(): void {
-  if (!env.GOOGLE_REFRESH_TOKEN) {
-    throw new GSCError(
-      "GOOGLE_REFRESH_TOKEN is not set. Complete the OAuth flow at /api/gsc/auth and set the refresh token in the environment.",
-      "NO_REFRESH_TOKEN",
-    )
+function getOAuth2(account: GoogleAccount) {
+  try {
+    return getGoogleAuthClient(account)
+  } catch (err) {
+    if (err instanceof GoogleAuthError) {
+      throw new GSCError(
+        `${err.message} (Google account: ${emailFor(account)})`,
+        "NO_REFRESH_TOKEN",
+        { account },
+      )
+    }
+    throw err
   }
 }
 
-function wrapApiError(error: unknown): never {
+function wrapApiError(error: unknown, account: GoogleAccount): never {
   if (error instanceof GSCError) throw error
   const status =
     typeof error === "object" && error !== null && "status" in error
       ? Number((error as { status: unknown }).status)
       : undefined
   const message = error instanceof Error ? error.message : "Unknown GSC error"
-  throw new GSCError(message, "API_ERROR", Number.isFinite(status) ? status : undefined)
+  throw new GSCError(message, "API_ERROR", {
+    status: Number.isFinite(status) ? status : undefined,
+    account,
+  })
 }
 
-export async function listSites(): Promise<GSCSiteInfo[]> {
-  assertRefreshToken()
-  const auth = getOAuth2Client()
+export async function listSites(
+  account: GoogleAccount,
+): Promise<GSCSiteInfo[]> {
+  const auth = getOAuth2(account)
   const webmasters = google.webmasters({ version: "v3", auth })
   try {
     const response = await webmasters.sites.list()
@@ -143,7 +115,7 @@ export async function listSites(): Promise<GSCSiteInfo[]> {
       ]
     })
   } catch (error: unknown) {
-    wrapApiError(error)
+    wrapApiError(error, account)
   }
 }
 
@@ -165,13 +137,13 @@ function normalizeRow(row: RawRow) {
 }
 
 export async function getQueries(params: {
+  account: GoogleAccount
   siteUrl: string
   startDate: string
   endDate: string
   rowLimit?: number
 }): Promise<GSCQueryRow[]> {
-  assertRefreshToken()
-  const auth = getOAuth2Client()
+  const auth = getOAuth2(params.account)
   const webmasters = google.webmasters({ version: "v3", auth })
   try {
     const response = await webmasters.searchanalytics.query({
@@ -192,18 +164,18 @@ export async function getQueries(params: {
       return [{ query, page, ...normalizeRow(row) }]
     })
   } catch (error: unknown) {
-    wrapApiError(error)
+    wrapApiError(error, params.account)
   }
 }
 
 export async function getTopQueries(params: {
+  account: GoogleAccount
   siteUrl: string
   startDate: string
   endDate: string
   rowLimit?: number
 }): Promise<GSCTopQueryRow[]> {
-  assertRefreshToken()
-  const auth = getOAuth2Client()
+  const auth = getOAuth2(params.account)
   const webmasters = google.webmasters({ version: "v3", auth })
   try {
     const response = await webmasters.searchanalytics.query({
@@ -222,18 +194,18 @@ export async function getTopQueries(params: {
       return [{ query, ...normalizeRow(row) }]
     })
   } catch (error: unknown) {
-    wrapApiError(error)
+    wrapApiError(error, params.account)
   }
 }
 
 export async function getTopPages(params: {
+  account: GoogleAccount
   siteUrl: string
   startDate: string
   endDate: string
   rowLimit?: number
 }): Promise<GSCTopPageRow[]> {
-  assertRefreshToken()
-  const auth = getOAuth2Client()
+  const auth = getOAuth2(params.account)
   const webmasters = google.webmasters({ version: "v3", auth })
   try {
     const response = await webmasters.searchanalytics.query({
@@ -252,7 +224,7 @@ export async function getTopPages(params: {
       return [{ page, ...normalizeRow(row) }]
     })
   } catch (error: unknown) {
-    wrapApiError(error)
+    wrapApiError(error, params.account)
   }
 }
 
@@ -266,14 +238,14 @@ export async function getTopPages(params: {
  * site doesn't time out the function. Default 25,000 — one API call.
  */
 export async function getTopQueriesPaginated(params: {
+  account: GoogleAccount
   siteUrl: string
   startDate: string
   endDate: string
   pageSize?: number
   maxRows?: number
 }): Promise<GSCTopQueryRow[]> {
-  assertRefreshToken()
-  const auth = getOAuth2Client()
+  const auth = getOAuth2(params.account)
   const webmasters = google.webmasters({ version: "v3", auth })
   const pageSize = Math.min(params.pageSize ?? 25_000, 25_000)
   const maxRows = params.maxRows ?? 25_000
@@ -302,20 +274,20 @@ export async function getTopQueriesPaginated(params: {
     }
     return out
   } catch (error: unknown) {
-    wrapApiError(error)
+    wrapApiError(error, params.account)
   }
 }
 
 /** Same idea for [page] dimension — 16-month page-level rollup. */
 export async function getTopPagesPaginated(params: {
+  account: GoogleAccount
   siteUrl: string
   startDate: string
   endDate: string
   pageSize?: number
   maxRows?: number
 }): Promise<GSCTopPageRow[]> {
-  assertRefreshToken()
-  const auth = getOAuth2Client()
+  const auth = getOAuth2(params.account)
   const webmasters = google.webmasters({ version: "v3", auth })
   const pageSize = Math.min(params.pageSize ?? 25_000, 25_000)
   const maxRows = params.maxRows ?? 25_000
@@ -344,17 +316,17 @@ export async function getTopPagesPaginated(params: {
     }
     return out
   } catch (error: unknown) {
-    wrapApiError(error)
+    wrapApiError(error, params.account)
   }
 }
 
 export async function getDailyClicks(params: {
+  account: GoogleAccount
   siteUrl: string
   startDate: string
   endDate: string
 }): Promise<GSCDailyRow[]> {
-  assertRefreshToken()
-  const auth = getOAuth2Client()
+  const auth = getOAuth2(params.account)
   const webmasters = google.webmasters({ version: "v3", auth })
   try {
     const response = await webmasters.searchanalytics.query({
@@ -372,6 +344,6 @@ export async function getDailyClicks(params: {
       return [{ date, ...normalizeRow(row) }]
     })
   } catch (error: unknown) {
-    wrapApiError(error)
+    wrapApiError(error, params.account)
   }
 }

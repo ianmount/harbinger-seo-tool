@@ -798,6 +798,88 @@ export interface AuditLocalPerformance {
   narrative: string
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Assessment workflow (Audit tab + Competitive Analysis tab) — stateless,
+// in-memory only. The shared frontend context in `components/AssessmentProvider.tsx`
+// lives until page refresh; there is no persistence layer.
+
+/** GSC slice the assessment Audit tab returns to the client. */
+export interface AssessmentGscData {
+  siteUrl: string
+  /** Last 16 months — the GSC retention max. */
+  dateRange: { startDate: string; endDate: string }
+  totalClicks: number
+  totalImpressions: number
+  topQueries: GSCTopQueryRow[]
+  topPages: GSCTopPageRow[]
+  dailyClicks: GSCDailyRow[]
+}
+
+/** GA4 slice the assessment Audit tab returns to the client. */
+export interface AssessmentGa4Data {
+  propertyId: string
+  dateRange: { startDate: string; endDate: string }
+  sessions: number
+  users: number
+  conversions: number
+  conversionsConfigured: boolean
+  organicLandingPages: GA4LandingPage[]
+  channelBreakdown: GA4ChannelRow[]
+  monthlyOrganic: GA4MonthlyOrganicRow[]
+}
+
+/** Single row of competitive comparison output (one row per domain × location). */
+export interface CompAnalysisDomainRow {
+  domain: string
+  isPartner: boolean
+  top3: number
+  top10: number
+  top20: number
+  top100: number
+  referringDomains: number
+  pagesIndexed: number
+  /** Pre-formatted compact-thousands string ("894", "1.2k", "22.4k"). */
+  organicTraffic: string
+  /** Raw integer value before formatting — useful for sorting. */
+  organicTrafficRaw: number
+  /** Set when DataForSEO calls failed for this (domain, location) pair. */
+  failed?: boolean
+}
+
+export interface CompAnalysisLocationRows {
+  /** Display label, e.g. "Sarasota,Florida,United States". */
+  location: string
+  /** DataForSEO Labs taxonomy code that was used (City, State, etc.). */
+  locationCode: number
+  /** "City" / "State" / "County" / "Region" / "Country" — from the DFS row. */
+  locationType: string
+  domains: CompAnalysisDomainRow[]
+}
+
+export interface AuditCrawlSummary {
+  domain: string
+  pagesAnalyzed: number
+  durationMs: number
+  missingTitles: number
+  missingDescriptions: number
+  duplicateTitles: number
+  duplicateDescriptions: number
+  thinContentPages: number
+  spaShellPages: number
+  schemaTypesPresent: string[]
+}
+
+export interface AssessmentAuditResult {
+  websiteUrl: string
+  generatedAt: string
+  auditMarkdown: string
+  warnings: string[]
+  gscData: AssessmentGscData | null
+  ga4Data: AssessmentGa4Data | null
+  crawlSummary: AuditCrawlSummary | null
+  durationSeconds: number
+}
+
 export interface AuditSynthesis {
   prospectDomain: string
   prospectName?: string

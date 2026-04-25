@@ -96,9 +96,13 @@ export async function dfsRequest<T = DfsEnvelope>(
     body: JSON.stringify(body),
   }
 
+  // Retry up to 3 times on 429 with exponential backoff + jitter so a
+  // burst of parallel calls doesn't all bunch up at the same retry instant.
   let response = await fetch(url, init)
-  if (response.status === 429) {
-    await new Promise((r) => setTimeout(r, RATE_LIMIT_RETRY_MS))
+  for (let attempt = 0; attempt < 3 && response.status === 429; attempt++) {
+    const backoffMs =
+      RATE_LIMIT_RETRY_MS * 2 ** attempt + Math.floor(Math.random() * 500)
+    await new Promise((r) => setTimeout(r, backoffMs))
     response = await fetch(url, init)
   }
 
@@ -498,6 +502,7 @@ export async function listLabsLocations(
   return locations
 }
 
+
 // ────────────────────────────────────────────────────────────────────────────
 // Audit tab wrappers.
 //
@@ -675,6 +680,58 @@ export async function rankedKeywords(
   return out
 }
 
+export interface SerpRankedDomain {
+  domain: string
+  rankAbsolute: number
+}
+
+/**
+ * /v3/serp/google/organic/live/advanced
+ *
+ * Like `serpCompetitors` but returns each organic result's rank position
+ * alongside its domain — used by the Comp Analysis tab to compute
+ * "domain ranks for X of N seed keywords in top 3/10/20/100 in city Y".
+ *
+ * Items are returned in SERP order. `rank_absolute` is the 1-indexed
+ * position across all SERP elements (organic + ads + map pack); we filter
+ * to `type === "organic"` so the position counts reflect organic
+ * rankings only.
+ *
+ * The SERP endpoint accepts city-level Google Ads location codes (unlike
+ * Labs endpoints which are country-only), so callers should pass the
+ * city code directly here.
+ */
+export async function serpRankedDomains(
+  keyword: string,
+  location: DfsLocation,
+  opts: { depth?: number } = {},
+): Promise<SerpRankedDomain[]> {
+  const envelope = await dfsRequest(
+    "/v3/serp/google/organic/live/advanced",
+    [
+      {
+        keyword,
+        ...locationAndLanguageParams(location),
+        depth: opts.depth ?? 100,
+      },
+    ],
+  )
+  const firstTask = envelope.tasks[0]
+  const result = firstTask?.result?.[0] as { items?: unknown[] } | undefined
+  const items = result?.items ?? []
+  const out: SerpRankedDomain[] = []
+  for (const raw of items) {
+    const parsed = serpItemSchema.safeParse(raw)
+    if (!parsed.success) continue
+    if (parsed.data.type !== "organic") continue
+    const domain = parsed.data.domain
+    const rankAbsolute = parsed.data.rank_absolute
+    if (!domain || rankAbsolute == null) continue
+    out.push({ domain: domain.toLowerCase(), rankAbsolute })
+  }
+  return out
+}
+
 const serpItemSchema = z
   .object({
     type: z.string().optional(),
@@ -800,6 +857,47 @@ const referringDomainItemSchema = z
  *
  * Returns a BacklinkReport by combining the summary data + sampled examples.
  */
+// ────────────────────────────────────────────────────────────────────────────
+// Competitive Analysis tab — indexed-page estimate. Used by /api/comp-analysis/run.
+
+/**
+ * site:<domain> SERP query — returns Google's claimed indexed-page count.
+ * Approximate; Google's site: count is well-known to be inaccurate, so the
+ * Comp Analysis CSV header notes this in a footnote.
+ *
+ * Defaults to the US country code; callers can pass a city-level Google
+ * Ads location code for a city-scoped probe (the SERP endpoint accepts
+ * city codes, unlike Labs endpoints).
+ */
+export async function indexedPageCount(
+  domain: string,
+  locationCode = DFS_LABS_COUNTRY_CODE_US,
+): Promise<number> {
+  const target = stripDomain(domain)
+  const envelope = await dfsRequest(
+    "/v3/serp/google/organic/live/advanced",
+    [
+      {
+        keyword: `site:${target}`,
+        location_code: locationCode,
+        language_code: DEFAULT_LANGUAGE_CODE,
+        depth: 1,
+      },
+    ],
+  )
+  const firstTask = envelope.tasks[0]
+  const first = firstTask?.result?.[0] as
+    | { se_results_count?: number; total_count?: number }
+    | undefined
+  return first?.se_results_count ?? first?.total_count ?? 0
+}
+
+/** Backlinks summary count of referring domains for a target. */
+export async function referringDomainCount(domain: string): Promise<number> {
+  const summary = await backlinksSummary(domain)
+  return summary.referringDomains
+}
+
 export async function referringDomainsWithSpamScore(
   domain: string,
   opts: { limit?: number } = {},

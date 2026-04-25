@@ -16,7 +16,10 @@ const CATEGORIES: Category[] = [
   {
     key: "assessments",
     label: "Assessments",
-    tabs: [{ href: "/audit", label: "Audit" }],
+    tabs: [
+      { href: "/audit", label: "Audit" },
+      { href: "/comp-analysis", label: "Comp Analysis" },
+    ],
   },
   {
     key: "onboarding",

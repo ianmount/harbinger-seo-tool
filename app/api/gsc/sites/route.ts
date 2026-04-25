@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic"
 
 export async function GET() {
   try {
-    const sites = await listSites()
+    const sites = await listSites("partners")
     return NextResponse.json({ sites })
   } catch (error: unknown) {
     console.error("[api/gsc/sites] failed:", error)

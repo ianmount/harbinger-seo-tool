@@ -54,7 +54,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const results = await getConversionsByPage(parsed.data)
+    const results = await getConversionsByPage({ account: "partners", ...parsed.data })
     return NextResponse.json({ results })
   } catch (error: unknown) {
     console.error("[api/ga4/conversions] failed:", error)

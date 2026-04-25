@@ -54,7 +54,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const report = await getSeoReport(parsed.data)
+    const report = await getSeoReport({ account: "partners", ...parsed.data })
     return NextResponse.json(report)
   } catch (error: unknown) {
     console.error("[api/ga4/report] failed:", error)

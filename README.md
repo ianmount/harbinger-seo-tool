@@ -48,3 +48,49 @@ The full list of env vars the app expects is in `.env.example`. Vercel exposes `
 ### Quick checks after a deploy
 
 - `GET /api/health` → `{ ok: true, envPresent: {...} }` reports whether each service's env keys are populated. Use this to confirm a redeploy picked up env-var changes.
+
+## Two-account Google OAuth
+
+The tool authenticates with two separate Google accounts that share **one** Google Cloud OAuth client (one `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`):
+
+| Account     | Email                              | Refresh-token env var               | Used by                                                |
+| ----------- | ---------------------------------- | ----------------------------------- | ------------------------------------------------------ |
+| Partners    | access@harbingermarketing.com      | `GOOGLE_REFRESH_TOKEN_PARTNERS`     | Existing partner pipeline (Reporting, Keyword Research) |
+| Assessments | audit@harbingermarketing.com       | `GOOGLE_REFRESH_TOKEN_ASSESSMENTS`  | Assessment workflow (Audit, Comp Analysis tabs)         |
+
+The auth factory in `lib/google-auth.ts` is the **only** place in the codebase that reads either refresh-token env var. Every GSC / GA4 call passes an `account: 'partners' | 'assessments'` parameter explicitly, so the call site is responsible for picking the right Google identity.
+
+### Minting a refresh token
+
+For each account you want to enable, run:
+
+```bash
+# 1. Make sure GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET are present in
+#    .env.local. Then run the OAuth setup script:
+node --env-file=.env.local scripts/oauth-setup.js --label partners
+# or:
+node --env-file=.env.local scripts/oauth-setup.js --label assessments
+```
+
+The script:
+
+1. Spins up a tiny HTTP server on `localhost:3000`.
+2. Opens your browser to Google's consent page.
+3. Sign in as the **matching** Google account (partners email vs. assessments email).
+4. Grants Search Console + GA4 read scope.
+5. Prints the resulting refresh token to your terminal and tells you which env var to set.
+
+Paste the printed token into Vercel (Settings → Environment Variables) **and** into your local `.env.local` if you want local dev to work. Trigger a redeploy on Vercel for the change to take effect.
+
+### Prospect onboarding (assessments account)
+
+Before running an Audit against a new prospect, the prospect must add `audit@harbingermarketing.com` to:
+
+- **Search Console** — Settings → Users and permissions → Add user → Restricted (or higher).
+- **GA4** — Admin → Property Access Management → Add user → Viewer (Property level).
+
+If neither is shared yet, the Audit will still run and surface a warning naming the assessments email; the audit will fall back to crawl data only.
+
+### Rotating a token
+
+Revoke at <https://myaccount.google.com/permissions> while signed in as the matching account, then re-run the script for that label.

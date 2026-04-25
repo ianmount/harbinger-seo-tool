@@ -47,7 +47,9 @@ Deployed app: set in Vercel dashboard (Settings → Environment Variables).
 Local dev: set in `.env.local` (never committed; template in `.env.example`).
 - `ANTHROPIC_API_KEY`
 - `DATAFORSEO_LOGIN`, `DATAFORSEO_PASSWORD`
-- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_REFRESH_TOKEN_PARTNERS` (existing partner pipeline) and `GOOGLE_REFRESH_TOKEN_ASSESSMENTS` (Assessment workflow — Audit + Competitive Analysis). Same OAuth client, two account-specific tokens. The auth factory in `lib/google-auth.ts` is the only place that reads either env var.
+- `GOOGLE_PARTNERS_EMAIL`, `GOOGLE_ASSESSMENTS_EMAIL` — surfaced in error messages so prospects know who to share GSC/GA4 access with
 - `AIRTABLE_PAT`, `AIRTABLE_BASE_ID`, `AIRTABLE_PARTNERS_TABLE`
 - `APP_PASSWORD`, `APP_AUTH_SECRET` (see Auth below)
 - `BLOB_READ_WRITE_TOKEN` (Audit tab only — Vercel Blob store; optional for the rest of the app)

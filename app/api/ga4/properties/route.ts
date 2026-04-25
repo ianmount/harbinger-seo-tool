@@ -19,7 +19,7 @@ export async function GET(request: Request) {
   // property is provisioned in Google Analytics.
   const forceRefresh = new URL(request.url).searchParams.get("refresh") === "1"
   try {
-    const properties = await listProperties({ forceRefresh })
+    const properties = await listProperties({ account: "partners", forceRefresh })
     return NextResponse.json({ properties })
   } catch (error: unknown) {
     console.error("[api/ga4/properties] failed:", error)
