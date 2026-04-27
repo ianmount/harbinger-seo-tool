@@ -85,6 +85,11 @@ const bodySchema = z
     partnerId: z.string().min(1).optional(),
     prospect: prospectInputSchema.optional(),
     seedServices: z.array(z.string().min(2)).max(5).optional(),
+    /**
+     * `"full"` (default) crawls every URL in the sitemap; `"sample"` caps at
+     * 50 prioritized URLs for fast testing.
+     */
+    crawlMode: z.enum(["full", "sample"]).optional(),
   })
   .refine((b) => Boolean(b.partnerId) !== Boolean(b.prospect), {
     message: "Provide either partnerId or prospect, not both",
@@ -426,6 +431,7 @@ async function runPipeline(params: {
   partnerDriven: boolean
   resolvedGscSiteUrl: string | null
   resolvedGa4PropertyId: string | null
+  crawlMode: "full" | "sample"
   baseUrl: string
   cookie: string | null
 }): Promise<PipelineResult> {
@@ -435,11 +441,15 @@ async function runPipeline(params: {
     partnerDriven,
     resolvedGscSiteUrl,
     resolvedGa4PropertyId,
+    crawlMode,
     baseUrl,
     cookie,
   } = params
 
-  const crawlPromise = crawlSite({ domain: prospect.domain })
+  const crawlPromise = crawlSite({
+    domain: prospect.domain,
+    options: { mode: crawlMode },
+  })
 
   const competitivePromise = internalPost<{ report: CompetitiveReport }>(
     "/api/audit/competitive",
@@ -632,6 +642,7 @@ export async function POST(request: Request) {
         partnerDriven,
         resolvedGscSiteUrl,
         resolvedGa4PropertyId,
+        crawlMode: parsed.data.crawlMode ?? "full",
         baseUrl,
         cookie,
       }),
