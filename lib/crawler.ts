@@ -34,6 +34,15 @@ const SITEMAP_FETCH_TIMEOUT_MS = 6_000
 const DEFAULT_MAX_PAGES = 50
 const DEFAULT_CONCURRENCY = 5
 const THIN_CONTENT_THRESHOLD = 300
+/**
+ * Hard ceiling for `unlimited: true` crawls. The Onboarding/Initial Strategy
+ * workflow needs every URL on the current site so it can build a redirect map,
+ * but a runaway crawl on a 50k-page site would blow Vercel's 300s timeout. At
+ * 5 concurrent fetches × 8s/page worst case we can afford ~150-200 pages
+ * comfortably; this ceiling is set well above that to give space for fast
+ * sites and below the function timeout for slow ones.
+ */
+const UNLIMITED_MAX_PAGES_CEILING = 2_000
 const RECOMMENDED_SCHEMA_TYPES = [
   "LocalBusiness",
   "Service",
@@ -44,10 +53,21 @@ const RECOMMENDED_SCHEMA_TYPES = [
 ] as const
 
 export interface CrawlOptions {
-  /** Max pages to fetch. Capped at 50. */
+  /** Max pages to fetch. Capped at 50 unless `unlimited: true`. */
   maxPages?: number
   /** Concurrent in-flight requests. Capped at 5. */
   concurrency?: number
+  /**
+   * Bypass the 50-page Audit cap. Used by the Onboarding/Initial Strategy
+   * workflow, which needs every URL on the current site to build a complete
+   * redirect map. Still honors `UNLIMITED_MAX_PAGES_CEILING` (2000) so a
+   * runaway crawl can't blow Vercel's 300s function timeout.
+   *
+   * In unlimited mode the URL prioritizer is disabled (we want the full set,
+   * not the most-interesting subset) and blog/tag/author archives are
+   * included rather than down-weighted.
+   */
+  unlimited?: boolean
 }
 
 export class CrawlError extends Error {
@@ -448,7 +468,11 @@ export async function crawlSite(params: {
   const startedAt = Date.now()
   const domain = normalizeDomain(params.domain)
   const origin = originFor(domain)
-  const maxPages = Math.min(params.options?.maxPages ?? DEFAULT_MAX_PAGES, 50)
+  const unlimited = params.options?.unlimited === true
+  const requestedMax = params.options?.maxPages ?? DEFAULT_MAX_PAGES
+  const maxPages = unlimited
+    ? Math.min(requestedMax, UNLIMITED_MAX_PAGES_CEILING)
+    : Math.min(requestedMax, 50)
   const concurrency = Math.min(
     params.options?.concurrency ?? DEFAULT_CONCURRENCY,
     5,
@@ -471,9 +495,14 @@ export async function crawlSite(params: {
     sitemapUrls.push(origin + "/")
   }
 
-  const toCrawl = prioritizeUrls(sitemapUrls, maxPages)
+  // In unlimited mode we want every URL the sitemap reports (the workflow is
+  // building a redirect map and the prioritizer would silently drop blog/tag
+  // archives). The ceiling still applies — past it, we just truncate.
+  const toCrawl = unlimited
+    ? [...new Set(sitemapUrls)].slice(0, maxPages)
+    : prioritizeUrls(sitemapUrls, maxPages)
   console.log(
-    `[crawler] domain=${domain} sitemap_urls=${sitemapUrls.length} crawling=${toCrawl.length} concurrency=${concurrency}`,
+    `[crawler] domain=${domain} sitemap_urls=${sitemapUrls.length} crawling=${toCrawl.length} concurrency=${concurrency}${unlimited ? " unlimited=true" : ""}`,
   )
 
   const pages = await mapLimit(toCrawl, concurrency, (url) =>

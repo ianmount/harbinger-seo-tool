@@ -1,24 +1,11 @@
-import { PageHeader } from "@/components/PageHeader"
+import { redirect } from "next/navigation"
 
+/**
+ * The Onboarding category currently has a single workflow (Initial Strategy).
+ * Visiting `/onboarding` directly forwards there so the URL doesn't dead-end
+ * on a placeholder. When more onboarding workflows ship, replace this with an
+ * index page listing them.
+ */
 export default function OnboardingPage() {
-  return (
-    <div className="space-y-10">
-      <PageHeader
-        eyebrow="Onboarding"
-        title="Partner kickoff workflows"
-        tail="— coming soon."
-        subtitle={
-          <>
-            This category will house the one-time setup flows new partners go
-            through before entering the recurring cycle.
-          </>
-        }
-      />
-      <div className="flex min-h-[40vh] items-center justify-center rounded-md border border-dashed border-line-strong/70 px-6 py-16 text-center">
-        <p className="font-serif text-[15px] italic text-ink-3">
-          No onboarding workflows yet — coming soon.
-        </p>
-      </div>
-    </div>
-  )
+  redirect("/onboarding/initial-strategy")
 }

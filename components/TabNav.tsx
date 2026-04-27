@@ -24,7 +24,7 @@ const CATEGORIES: Category[] = [
   {
     key: "onboarding",
     label: "Onboarding",
-    tabs: [],
+    tabs: [{ href: "/onboarding/initial-strategy", label: "Initial Strategy" }],
   },
   {
     key: "ongoing",
