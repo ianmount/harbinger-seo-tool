@@ -588,12 +588,47 @@ function buildPrompt(params: {
   lines.push(`Duplicate description groups: ${crawl.duplicateDescriptions.length}`)
   lines.push(`Thin content pages (<300 words): ${crawl.thinContentPages.length}`)
   lines.push(`SPA shells detected: ${crawl.spaShellPages.length}`)
+  lines.push("")
+  // Schema coverage matrix — replaces the legacy binary "present / missing"
+  // pair. Per-bucket gap detail with sample URLs so Claude can cite specific
+  // pages instead of waving at "schema is missing somewhere on the site".
+  const matrix = crawl.schemaCoverageMatrix
+  lines.push(`## Schema coverage matrix`)
   lines.push(
-    `Schema types present: ${crawl.schemaTypesPresent.join(", ") || "none"}`,
+    `Distinct @types in use sitewide: ${matrix.schemaTypesInUse.join(", ") || "none"}`,
   )
-  lines.push(
-    `Recommended schema types missing: ${crawl.schemaTypesRecommended.join(", ") || "none"}`,
-  )
+  for (const b of matrix.buckets) {
+    lines.push("")
+    lines.push(`### ${b.pageType} pages — ${b.pageCount} crawled`)
+    if (b.pageCount === 0) {
+      lines.push(`  (no pages classified into this bucket)`)
+      continue
+    }
+    lines.push(`  Expected: ${b.typesExpected.join(", ")}`)
+    lines.push(
+      `  Found:    ${b.typesFound.length > 0 ? b.typesFound.join(", ") : "none"}`,
+    )
+    lines.push(
+      `  Missing:  ${b.typesMissing.length > 0 ? b.typesMissing.join(", ") : "none"}`,
+    )
+    lines.push(
+      `  Pages with ZERO JSON-LD: ${b.pagesWithNoSchema}/${b.pageCount}`,
+    )
+    if (b.sampleUrls.length > 0) {
+      lines.push(`  Sample URLs:`)
+      for (const u of b.sampleUrls) lines.push(`    - ${truncate(u, 120)}`)
+    }
+  }
+  if (matrix.prioritizedRecommendations.length > 0) {
+    lines.push("")
+    lines.push(`### Prioritized schema additions (lower number = higher impact)`)
+    for (const r of matrix.prioritizedRecommendations) {
+      lines.push(
+        `  P${r.priority}. Add ${r.missingType} to ${r.pageType} pages (${r.pageCount} pages affected)`,
+      )
+    }
+  }
+  lines.push("")
   lines.push(`Image alt coverage: ${crawl.imageAltCoveragePercent}%`)
   lines.push("")
 
@@ -644,6 +679,7 @@ Rules for prioritization (apply silently — surface findings, not the rules):
    (d) name the indexation gap explicitly in the Executive Summary — this is the single highest-impact finding type for partner sites.
    When the rule is not triggered, only mention indexation if the data warrants it.
 8. Performance is a Core Web Vitals signal. When the "PageSpeed Insights" section reports "Performance section required: YES" you MUST include a "## Performance" section in the Markdown output, citing exact URLs and metrics from the PageSpeed block (mobile performance score, LCP in seconds, INP in ms when available, CLS). When that section reports "Tier 1 performance finding required: YES" (homepage mobile score < 50), the homepage performance issue MUST also appear in the Executive Summary AND as a numbered Key Finding with a bolded headline metric like "**Homepage mobile performance score: N/100**". When the PageSpeed section was skipped (no API key) or no page is below 70, omit the Performance section entirely.
+9. Schema coverage is rendered from a per-page-type matrix, NOT a binary present/missing check. The "Schema coverage matrix" block reports four buckets (homepage / service / location / blog) with Expected, Found, and Missing types per bucket plus sample URLs. You MUST include a "## Schema Coverage" section that renders the matrix as a Markdown table and follows the Prioritized schema additions order: LocalBusiness on homepage > Service on service pages > BreadcrumbList sitewide > FAQPage on service pages. Cite exact bucket counts (e.g. "12 of 12 service pages") and at least one sample URL per gap. Do NOT recommend types the matrix already shows as present, and do NOT invent buckets that aren't in the prompt. When a bucket is fully covered, say so positively rather than padding with non-issues. When a bucket has any missing required type AND at least one page exists, that gap MUST also appear as a numbered Key Finding with a bolded headline metric of the form "**X of Y <bucket> pages missing <type>**".
 
 Output format (Markdown):
 
@@ -660,6 +696,9 @@ Read of the GSC + GA4 data. Highlight the priority-service queries the site alre
 
 ## Technical Findings
 Specific issues from the crawl, ordered by impact. Cite exact pages.
+
+## Schema Coverage
+Render the matrix from the "Schema coverage matrix" block as a Markdown table with columns: Page Type, Pages Crawled, Expected, Found, Missing. After the table, list 1-3 prioritized recommendations in the order from the Prioritized schema additions block (P1 first), each citing exact bucket counts and at least one sample URL. If every bucket is fully covered, say so explicitly in one sentence and skip the recommendations list.
 
 ## Performance
 Include this section ONLY when the PageSpeed Insights block reports "Performance section required: YES". Lead with the average mobile performance score and call out the homepage score by itself. List the specific pages that scored below 50, and pages with mobile LCP > 2.5s or CLS > 0.1, citing the exact URLs and metric values verbatim from the PageSpeed block. Reference the top opportunities by name when they appear (e.g. "Eliminate render-blocking resources"). Do NOT cite generic Core Web Vitals advice; tie every recommendation to a specific page from the block.
