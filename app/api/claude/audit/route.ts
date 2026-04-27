@@ -139,9 +139,58 @@ function buildCrawlBlock(crawl: CrawlReport): string {
   }
   lines.push(`Client-rendered SPA shells detected: ${crawl.spaShellPages.length}`)
   for (const u of crawl.spaShellPages.slice(0, 5)) lines.push(`  - ${truncate(u, 120)}`)
-  lines.push(`Schema types present: ${crawl.schemaTypesPresent.join(", ") || "none"}`)
-  lines.push(`Recommended schema types missing: ${crawl.schemaTypesRecommended.join(", ") || "none"}`)
+  lines.push("")
+  lines.push(buildSchemaCoverageBlock(crawl.schemaCoverageMatrix))
   lines.push(`Image alt coverage: ${crawl.imageAltCoveragePercent}%`)
+  return lines.join("\n")
+}
+
+/**
+ * Render the schema coverage matrix as a labeled block. The buckets are
+ * shown one-per-section with their expected/found/missing types and a few
+ * sample URLs so Claude can cite real pages in the Schema Coverage section.
+ */
+function buildSchemaCoverageBlock(
+  matrix: CrawlReport["schemaCoverageMatrix"],
+): string {
+  const lines: string[] = []
+  lines.push(`## Schema coverage matrix`)
+  lines.push(
+    `Distinct @types in use sitewide: ${matrix.schemaTypesInUse.join(", ") || "none"}`,
+  )
+  for (const b of matrix.buckets) {
+    lines.push("")
+    lines.push(`### ${b.pageType} pages — ${b.pageCount} crawled`)
+    if (b.pageCount === 0) {
+      lines.push(`  (no pages classified into this bucket)`)
+      continue
+    }
+    lines.push(
+      `  Expected: ${b.typesExpected.join(", ")}`,
+    )
+    lines.push(
+      `  Found:    ${b.typesFound.length > 0 ? b.typesFound.join(", ") : "none"}`,
+    )
+    lines.push(
+      `  Missing:  ${b.typesMissing.length > 0 ? b.typesMissing.join(", ") : "none"}`,
+    )
+    lines.push(
+      `  Pages with ZERO JSON-LD: ${b.pagesWithNoSchema}/${b.pageCount}`,
+    )
+    if (b.sampleUrls.length > 0) {
+      lines.push(`  Sample URLs:`)
+      for (const u of b.sampleUrls) lines.push(`    - ${truncate(u, 120)}`)
+    }
+  }
+  if (matrix.prioritizedRecommendations.length > 0) {
+    lines.push("")
+    lines.push(`### Prioritized schema additions (lower number = higher impact)`)
+    for (const r of matrix.prioritizedRecommendations) {
+      lines.push(
+        `  P${r.priority}. Add ${r.missingType} to ${r.pageType} pages (${r.pageCount} pages affected)`,
+      )
+    }
+  }
   return lines.join("\n")
 }
 
@@ -567,6 +616,13 @@ B2. When the block reports "Tier 1 backlink-profile finding required: YES" (new-
 B3. When the block reports "Backlink Profile section required: no", set synthesis.backlinkProfile to null. Do NOT fabricate concern when the data does not warrant it.
 B4. Backlink-profile narrative MUST cite values from the block verbatim (low-quality count, new-link share, specific domain names). No generic "your backlink profile has some risk" prose.
 
+SCHEMA COVERAGE RULES (apply when the "Schema coverage matrix" block is present):
+S1. The audit MUST include a "Schema Coverage" section. In the structured JSON output it lives under synthesis.schemaCoverage. Echo the bucket rows verbatim (pageType, pageCount, typesExpected, typesFound, typesMissing) — do NOT omit a bucket because pageCount is 0; an empty bucket is meaningful evidence the site lacks that page type.
+S2. The narrative MUST cite specific bucket-level gaps using exact counts and at least one sample URL per cited gap. Generic statements like "some pages are missing schema" are forbidden — say "12 of 12 service pages are missing Service schema (e.g. /services/drain-cleaning, /services/water-heater-repair)".
+S3. Recommendations in the narrative MUST follow the priority order from the prioritizedRecommendations list: LocalBusiness on homepage > Service on service pages > BreadcrumbList sitewide > FAQPage where applicable. Do NOT recommend schema types the matrix already shows as present.
+S4. If the matrix shows a bucket fully covered (typesMissing is empty AND pagesWithNoSchema is 0), call it out positively rather than padding the section with non-issues.
+S5. When at least one bucket has a missing required type AND at least one page in that bucket exists, schema coverage MUST appear as a numbered Key Finding (in addition to the Schema Coverage section) with a headlineMetric of the form "X of Y <bucket> pages missing <type>".
+
 PERFORMANCE RULES (apply when the PageSpeed Insights block is present):
 P1. When the PageSpeed block reports "Performance section required: YES", populate the synthesis "performance" object with a 2-3 sentence narrative that names the worst-performing audited page by URL, calls out the average mobile score, and recommends 1-2 of the top opportunities returned for that page. Echo the server-computed lowScorePages / poorLcpPages / poorClsPages lists verbatim.
 P2. When the PageSpeed block reports "Tier 1 performance finding required: YES" (homepage mobile score < 50), the homepage performance issue MUST appear (a) in executiveSummary as one of the headline takeaways and (b) as a numbered Key Finding with a headlineMetric of the form "Homepage mobile score: N/100" citing the exact URL of the homepage. The Tier 1 rule is independent of the indexation Tier 1 rule — both can fire at once.
@@ -826,6 +882,14 @@ function buildUserPrompt(body: ParsedBody): string {
                 "<2-3 sentences naming the strongest and weakest market by GSC click volume.>",
             }
           : null,
+        schemaCoverage: {
+          schemaTypesInUse: crawl.schemaCoverageMatrix.schemaTypesInUse,
+          buckets: crawl.schemaCoverageMatrix.buckets,
+          prioritizedRecommendations:
+            crawl.schemaCoverageMatrix.prioritizedRecommendations,
+          narrative:
+            "<3-5 sentences. Read the matrix as a table. Lead with the highest-priority gap (P1 then P2 then P3). Cite bucket counts AND at least one sample URL per cited gap. If a bucket is fully covered, say so explicitly rather than inventing an issue.>",
+        },
         performance:
           pageSpeed &&
           !pageSpeed.skippedReason &&

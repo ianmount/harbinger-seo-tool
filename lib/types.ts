@@ -487,8 +487,73 @@ export interface CrawlResults {
    * BreadcrumbList, FAQPage, Review, Organization).
    */
   pagesMissingMeaningfulSchema: number
+  /**
+   * Per-page-type schema coverage for a local-service-business audit.
+   * Replaces the old binary "schema present / missing" view: groups crawled
+   * pages by URL pattern (homepage, service, location, blog) and reports
+   * what schema types each bucket actually has vs. what it should have.
+   */
+  schemaCoverageMatrix: SchemaCoverageMatrix
   /** robots.txt Crawl-delay value applied (seconds). 0 when none was set. */
   crawlDelaySec: number
+}
+
+/** Page-type bucket the schema coverage matrix groups pages into. */
+export type SchemaPageType = "homepage" | "service" | "location" | "blog"
+
+/**
+ * One row of the schema coverage matrix — one bucket of pages classified
+ * by URL pattern (e.g. all `/services/*` pages). `typesFound` is the union
+ * of every JSON-LD `@type` seen on any page in the bucket; `typesMissing`
+ * is the set of expected types that no page in the bucket carries.
+ *
+ * Note: `typesExpected` is the canonical name (e.g. "LocalBusiness") but
+ * matching against `typesFound` allows aliases — for LocalBusiness, any
+ * recognized subtype (Plumber, Electrician, RoofingContractor, etc.)
+ * counts as satisfying the requirement.
+ */
+export interface SchemaPageTypeBucket {
+  pageType: SchemaPageType
+  pageCount: number
+  /** Up to 5 example URLs for this bucket. */
+  sampleUrls: string[]
+  /** Distinct @type values seen across any page in this bucket. */
+  typesFound: string[]
+  /** Schema types we expect this page type to carry. */
+  typesExpected: string[]
+  /** Expected types that aren't satisfied by any page in this bucket. */
+  typesMissing: string[]
+  /** Pages in this bucket with zero JSON-LD blocks. */
+  pagesWithNoSchema: number
+}
+
+/**
+ * One prioritized recommendation for closing a schema gap. Priority is
+ * 1 = highest-impact (LocalBusiness on homepage), 4 = lowest (FAQPage where
+ * applicable). The synthesis prompt orders recommendations by this number.
+ */
+export interface SchemaGapRecommendation {
+  pageType: SchemaPageType
+  missingType: string
+  priority: number
+  pageCount: number
+  sampleUrls: string[]
+}
+
+/**
+ * Schema coverage matrix for the audit. Computed in `lib/crawler.ts` from
+ * per-page JSON-LD `@type` extraction; consumed by the Claude synthesis
+ * prompt so the audit's "Schema Coverage" section can render specific
+ * gaps (e.g. "Service schema absent on all 12 service pages") instead of
+ * the old binary "schema present / missing" finding.
+ */
+export interface SchemaCoverageMatrix {
+  /** Distinct @type values seen anywhere on the site. */
+  schemaTypesInUse: string[]
+  /** One row per page-type bucket — empty buckets are still emitted. */
+  buckets: SchemaPageTypeBucket[]
+  /** Highest-impact gaps in priority order (LocalBusiness on homepage first). */
+  prioritizedRecommendations: SchemaGapRecommendation[]
 }
 
 /** Backwards-compatible alias. Prefer `CrawlResults` in new code. */
@@ -1049,6 +1114,20 @@ export interface PageSpeedReport {
 }
 
 /**
+ * Schema Coverage section emitted by the synthesis. The matrix itself
+ * (`schemaTypesInUse`, `buckets`, `prioritizedRecommendations`) is echoed
+ * verbatim from the server-computed `CrawlResults.schemaCoverageMatrix`;
+ * `narrative` is Claude's read of the table. See the synthesis prompt's
+ * SCHEMA COVERAGE RULES for the priority order Claude must follow.
+ */
+export interface AuditSchemaCoverageSection {
+  schemaTypesInUse: string[]
+  buckets: SchemaPageTypeBucket[]
+  prioritizedRecommendations: SchemaGapRecommendation[]
+  narrative: string
+}
+
+/**
  * Performance section emitted by Claude synthesis when at least one audited
  * page has a mobile performance score below 70. Mirrors the shape of other
  * synthesis sub-sections (positionDistribution, etc.) — narrative is
@@ -1215,6 +1294,12 @@ export interface AuditSynthesis {
    * mobile performance score below 70 (see CLAUDE.md → Audit tab).
    */
   performance?: AuditPerformanceSection
+  /**
+   * Schema Coverage section — always emitted because the crawl always
+   * produces a matrix. Replaces the legacy binary "schema present /
+   * missing" finding with a per-page-type breakdown.
+   */
+  schemaCoverage?: AuditSchemaCoverageSection
   dataSources: {
     crawlPagesAnalyzed: number
     gscIncluded: boolean
