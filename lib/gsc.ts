@@ -16,6 +16,8 @@ import type {
   GSCSiteInfo,
   GSCTopPageRow,
   GSCTopQueryRow,
+  IndexCoverageReport,
+  InspectedUrl,
 } from "@/lib/types"
 
 /**
@@ -345,5 +347,138 @@ export async function getDailyClicks(params: {
     })
   } catch (error: unknown) {
     wrapApiError(error, params.account)
+  }
+}
+
+/** Cap on URL Inspection calls per audit. The API quota is 2,000/day per
+ *  property; 10 keeps audits well clear and matches the spec. */
+const URL_INSPECTION_SAMPLE_SIZE = 10
+
+/**
+ * Normalize a URL for comparing sitemap entries against GSC search-analytics
+ * page rows. Sitemap and GSC URLs frequently differ on cosmetics that don't
+ * change the canonical resource:
+ *
+ *   - scheme/host casing
+ *   - trailing slash on non-root paths
+ *   - tracking query strings (utm_*, gclid, fbclid, etc.)
+ *   - URL fragments
+ *
+ * We strip queries entirely because most local-business sitemaps list bare
+ * canonical URLs while GSC may surface query-bearing variants. Returns null
+ * when the input doesn't parse as an absolute URL.
+ */
+function normalizeUrlForIndexComparison(raw: string): string | null {
+  try {
+    const u = new URL(raw)
+    u.hash = ""
+    u.search = ""
+    u.protocol = u.protocol.toLowerCase()
+    u.hostname = u.hostname.toLowerCase()
+    let pathname = u.pathname
+    if (pathname.length > 1 && pathname.endsWith("/")) {
+      pathname = pathname.slice(0, -1)
+    }
+    u.pathname = pathname
+    return u.toString()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Compute an indexation-coverage proxy for a site by diffing the sitemap
+ * against URLs that have appeared in GSC search analytics in the last 90
+ * days, then confirming a sample of the missing set via the URL Inspection
+ * API.
+ *
+ * Conceptual signature (per the spec): get_index_coverage(site_url,
+ * sitemap_urls, gsc_data) — `gscData` is the 90-day page-level rollup the
+ * caller has already fetched (so this function stays deterministic for a
+ * given input set, and the caller controls the date window).
+ *
+ * Returns null only when an unrecoverable error short-circuits the pipeline
+ * — sitemap=0 or gsc=0 still produce a valid (but noisy) report so callers
+ * can surface the data gap.
+ */
+export async function getIndexCoverage(params: {
+  account: GoogleAccount
+  siteUrl: string
+  sitemapUrls: string[]
+  /** 90-day search-analytics page rollup. Only the `page` field is read. */
+  gscPages: { page: string }[]
+  dateRange: { startDate: string; endDate: string }
+  /** Override sample size for tests; defaults to 10. */
+  sampleSize?: number
+}): Promise<IndexCoverageReport> {
+  const sampleSize = params.sampleSize ?? URL_INSPECTION_SAMPLE_SIZE
+
+  // Build the "seen by GSC" set (normalized).
+  const indexedSet = new Set<string>()
+  for (const row of params.gscPages) {
+    const norm = normalizeUrlForIndexComparison(row.page)
+    if (norm) indexedSet.add(norm)
+  }
+
+  // Walk the sitemap once: split into indexed / probably-not-indexed,
+  // preserving the original (un-normalized) sitemap URL in the output so
+  // PDF readers see the URL the way it was published.
+  const indexedUrls: string[] = []
+  const probablyNotIndexed: string[] = []
+  const seenSitemap = new Set<string>()
+  for (const raw of params.sitemapUrls) {
+    const norm = normalizeUrlForIndexComparison(raw)
+    if (!norm || seenSitemap.has(norm)) continue
+    seenSitemap.add(norm)
+    if (indexedSet.has(norm)) {
+      indexedUrls.push(raw)
+    } else {
+      probablyNotIndexed.push(raw)
+    }
+  }
+
+  // Inspect a sample of the probably-not-indexed set. URL Inspection is
+  // serial here — the API rate-limits at 600 calls/min which is comfortable
+  // for 10 requests, and serial keeps error attribution clean.
+  const auth = getOAuth2(params.account)
+  const searchconsole = google.searchconsole({ version: "v1", auth })
+  const sample = probablyNotIndexed.slice(0, sampleSize)
+  const inspectedSample: InspectedUrl[] = []
+  for (const url of sample) {
+    try {
+      const response = await searchconsole.urlInspection.index.inspect({
+        requestBody: {
+          inspectionUrl: url,
+          siteUrl: params.siteUrl,
+        },
+      })
+      const status = response.data.inspectionResult?.indexStatusResult
+      inspectedSample.push({
+        url,
+        coverageState: status?.coverageState ?? null,
+        lastCrawlTime: status?.lastCrawlTime ?? null,
+        pageFetchState: status?.pageFetchState ?? null,
+        verdict: status?.verdict ?? null,
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown inspection error"
+      inspectedSample.push({
+        url,
+        coverageState: null,
+        lastCrawlTime: null,
+        pageFetchState: null,
+        verdict: null,
+        error: msg,
+      })
+    }
+  }
+
+  return {
+    siteUrl: params.siteUrl,
+    dateRange: params.dateRange,
+    sitemapCount: params.sitemapUrls.length,
+    indexedUrls,
+    probablyNotIndexed,
+    inspectedSample,
   }
 }
