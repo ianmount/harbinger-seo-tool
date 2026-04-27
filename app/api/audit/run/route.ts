@@ -30,11 +30,43 @@ import type {
   AssessmentGa4Data,
   AssessmentGscData,
   AuditCrawlSummary,
+  BacklinkProfile,
   CannibalizationCluster,
   CrawlReport,
   GSCQueryRow,
   PageSpeedReport,
 } from "@/lib/types"
+
+/**
+ * Placeholder shapes for inputs that are computed in upcoming pipeline steps
+ * (URL structure audit, broken-link audit, per-location competitor pull). The
+ * synthesis prompt accepts them as optional today so the system prompt and
+ * Markdown output structure are ready when those steps land. When undefined
+ * the corresponding section is omitted from both the prompt and the output.
+ */
+export interface UrlStructureIssues {
+  mixedProtocol: { canonical: "https" | "http"; offendingUrls: string[] }
+  mixedWww: { canonical: "www" | "apex"; offendingUrls: string[] }
+  mixedTrailingSlash: { canonical: "with" | "without"; offendingUrls: string[] }
+  deeplyNested: { url: string; depth: number }[]
+}
+
+export interface BrokenInternalLinks {
+  totalBrokenLinks: number
+  examples: { sourceUrl: string; brokenUrl: string; status: number }[]
+}
+
+export interface LocationCompetitorSnippet {
+  city: string
+  state: string
+  prospectOrganicTraffic: number
+  topCompetitors: {
+    domain: string
+    organicTraffic: number
+    organicKeywords: number
+    sampleQueries: { query: string; position: number; searchVolume: number }[]
+  }[]
+}
 
 /**
  * Assessment Audit endpoint.
@@ -411,6 +443,163 @@ function buildPageSpeedSection(report: PageSpeedReport): string[] {
   return lines
 }
 
+/**
+ * Compute the gating shares the prompt + Claude both reason about. Mirrors
+ * the helper in `app/api/claude/audit/route.ts` so the Tier-1 trigger is the
+ * single source of truth.
+ */
+function backlinkProfileShares(p: BacklinkProfile): {
+  lowQualityShare: number
+  newLinkLowQualityShare: number
+  sectionRequired: boolean
+  tier1: boolean
+} {
+  const lowQualityShare =
+    p.totalReferringDomains > 0
+      ? p.lowQualityDomains / p.totalReferringDomains
+      : 0
+  const newLinkLowQualityShare =
+    p.newLinksLast12Months > 0
+      ? p.newLinksLast12MonthsLowQuality / p.newLinksLast12Months
+      : 0
+  // Section required when either share is meaningful; Tier 1 fires once the
+  // new-link low-quality share crosses 40% (the threshold in the user-facing
+  // prioritization rules).
+  const sectionRequired = lowQualityShare > 0.3 || newLinkLowQualityShare > 0.4
+  const tier1 = newLinkLowQualityShare > 0.4
+  return { lowQualityShare, newLinkLowQualityShare, sectionRequired, tier1 }
+}
+
+function buildBacklinkProfileSection(p: BacklinkProfile): string[] {
+  const lines: string[] = []
+  const shares = backlinkProfileShares(p)
+  lines.push(`# Backlink profile`)
+  lines.push(`Domain: ${p.domain}`)
+  lines.push(`Total backlinks: ${p.totalBacklinks.toLocaleString()}`)
+  lines.push(`Total referring domains: ${p.totalReferringDomains.toLocaleString()}`)
+  lines.push(`Dofollow ratio: ${(p.dofollowRatio * 100).toFixed(1)}%`)
+  lines.push(`Anchor diversity (distinct anchors): ${p.anchorDiversity.toLocaleString()}`)
+  lines.push(
+    `High-quality referring domains (spam<30 AND rank>20): ${p.highQualityDomains}`,
+  )
+  lines.push(
+    `Low-quality referring domains (spam>=50): ${p.lowQualityDomains} (${(shares.lowQualityShare * 100).toFixed(1)}% of referring domains)`,
+  )
+  lines.push(
+    `New links in last 12 months: ${p.newLinksLast12Months}; of those, low-quality: ${p.newLinksLast12MonthsLowQuality} (${(shares.newLinkLowQualityShare * 100).toFixed(1)}%)`,
+  )
+  lines.push(
+    `Backlink Profile section required: ${shares.sectionRequired ? "YES — emit a Backlink Profile section in the Markdown output" : "no — omit the section entirely"}`,
+  )
+  lines.push(
+    `Tier 1 backlink-profile finding required: ${shares.tier1 ? "YES — new-link low-quality share > 40%; surface in Executive Summary AND Key Findings" : "no"}`,
+  )
+  if (p.sampleLowQualityLinks.length > 0) {
+    lines.push("")
+    lines.push(`## Sample low-quality referring domains (cite VERBATIM in the report)`)
+    for (const d of p.sampleLowQualityLinks) {
+      lines.push(
+        `  - ${d.domain} — spam ${d.spamScore}, rank ${d.domainRank}, ${d.backlinks} backlinks${d.firstSeen ? `, first seen ${d.firstSeen}` : ""}`,
+      )
+    }
+  }
+  lines.push("")
+  return lines
+}
+
+function buildUrlStructureSection(u: UrlStructureIssues): string[] {
+  const lines: string[] = []
+  const total =
+    u.mixedProtocol.offendingUrls.length +
+    u.mixedWww.offendingUrls.length +
+    u.mixedTrailingSlash.offendingUrls.length +
+    u.deeplyNested.length
+  if (total === 0) return lines
+  lines.push(`# URL structure issues`)
+  lines.push(
+    `URL Structure section required: YES — at least one URL-structure conflict was detected.`,
+  )
+  if (u.mixedProtocol.offendingUrls.length > 0) {
+    lines.push("")
+    lines.push(
+      `## Mixed protocol — canonical=${u.mixedProtocol.canonical}, ${u.mixedProtocol.offendingUrls.length} offending URLs`,
+    )
+    for (const url of u.mixedProtocol.offendingUrls.slice(0, 10)) {
+      lines.push(`  - ${truncate(url, 140)}`)
+    }
+  }
+  if (u.mixedWww.offendingUrls.length > 0) {
+    lines.push("")
+    lines.push(
+      `## Mixed www/apex — canonical=${u.mixedWww.canonical}, ${u.mixedWww.offendingUrls.length} offending URLs`,
+    )
+    for (const url of u.mixedWww.offendingUrls.slice(0, 10)) {
+      lines.push(`  - ${truncate(url, 140)}`)
+    }
+  }
+  if (u.mixedTrailingSlash.offendingUrls.length > 0) {
+    lines.push("")
+    lines.push(
+      `## Mixed trailing slash — canonical=${u.mixedTrailingSlash.canonical}, ${u.mixedTrailingSlash.offendingUrls.length} offending URLs`,
+    )
+    for (const url of u.mixedTrailingSlash.offendingUrls.slice(0, 10)) {
+      lines.push(`  - ${truncate(url, 140)}`)
+    }
+  }
+  if (u.deeplyNested.length > 0) {
+    lines.push("")
+    lines.push(`## Deeply nested URLs (depth > 4)`)
+    for (const row of u.deeplyNested.slice(0, 10)) {
+      lines.push(`  - depth ${row.depth} ${truncate(row.url, 140)}`)
+    }
+  }
+  lines.push("")
+  return lines
+}
+
+function buildBrokenInternalLinksSection(b: BrokenInternalLinks): string[] {
+  const lines: string[] = []
+  if (b.totalBrokenLinks === 0) return lines
+  lines.push(`# Broken internal links`)
+  lines.push(`Total broken internal links: ${b.totalBrokenLinks}`)
+  lines.push(``)
+  lines.push(`## Examples (source → broken target, status)`)
+  for (const ex of b.examples.slice(0, 20)) {
+    lines.push(
+      `  - ${ex.status} ${truncate(ex.sourceUrl, 90)} → ${truncate(ex.brokenUrl, 90)}`,
+    )
+  }
+  lines.push("")
+  return lines
+}
+
+function buildLocationCompetitorSection(
+  rows: LocationCompetitorSnippet[],
+): string[] {
+  const lines: string[] = []
+  if (rows.length === 0) return lines
+  lines.push(`# Location competitor snippets`)
+  for (const r of rows) {
+    lines.push("")
+    lines.push(`## ${r.city}, ${r.state}`)
+    lines.push(
+      `Prospect organic traffic estimate: ${r.prospectOrganicTraffic.toLocaleString()}`,
+    )
+    for (const c of r.topCompetitors.slice(0, 5)) {
+      lines.push(
+        `  - ${c.domain} — ${c.organicTraffic.toLocaleString()} traffic, ${c.organicKeywords.toLocaleString()} organic keywords`,
+      )
+      for (const q of c.sampleQueries.slice(0, 3)) {
+        lines.push(
+          `      "${truncate(q.query, 70)}" — pos ${q.position}, vol ${q.searchVolume}`,
+        )
+      }
+    }
+  }
+  lines.push("")
+  return lines
+}
+
 function buildPrompt(params: {
   body: Body
   gsc: AssessmentGscData | null
@@ -418,8 +607,23 @@ function buildPrompt(params: {
   crawl: CrawlReport
   cannibalization: CannibalizationCluster[]
   pageSpeed: PageSpeedReport
+  backlinkProfile?: BacklinkProfile | null
+  urlStructureIssues?: UrlStructureIssues | null
+  brokenInternalLinks?: BrokenInternalLinks | null
+  locationCompetitorSnippets?: LocationCompetitorSnippet[] | null
 }): string {
-  const { body, gsc, ga4, crawl, cannibalization, pageSpeed } = params
+  const {
+    body,
+    gsc,
+    ga4,
+    crawl,
+    cannibalization,
+    pageSpeed,
+    backlinkProfile,
+    urlStructureIssues,
+    brokenInternalLinks,
+    locationCompetitorSnippets,
+  } = params
   const lines: string[] = []
 
   lines.push(`# Prospect business context`)
@@ -658,9 +862,13 @@ function buildPrompt(params: {
   // section when there's at least one cluster; absence is meaningful too,
   // but mentioning "no clusters" in the prompt invites Claude to fabricate.
   if (cannibalization.length > 0) {
+    const tier1Cannibalization = cannibalization.length > 5
     lines.push(`# Keyword cannibalization clusters`)
     lines.push(
       `${cannibalization.length} cluster(s) of pages competing for the same keyword/location combination.`,
+    )
+    lines.push(
+      `Tier 1 cannibalization finding required: ${tier1Cannibalization ? "YES — > 5 clusters; surface in Executive Summary AND Key Findings" : "no"}`,
     )
     cannibalization.forEach((c, i) => {
       const head = `Cluster ${i + 1} (signal: ${c.sharedSignal}, recommendation hint: ${c.recommendationHint})`
@@ -674,76 +882,139 @@ function buildPrompt(params: {
     lines.push("")
   }
 
+  // Backlink profile — Tier 1 trigger fires when new-link low-quality share
+  // crosses 40%. Section is omitted entirely when the data does not warrant
+  // concern (sectionRequired=false).
+  if (backlinkProfile) {
+    for (const line of buildBacklinkProfileSection(backlinkProfile)) {
+      lines.push(line)
+    }
+  }
+
+  // URL structure issues — Tier 2. Always omitted when no conflicts exist.
+  if (urlStructureIssues) {
+    for (const line of buildUrlStructureSection(urlStructureIssues)) {
+      lines.push(line)
+    }
+  }
+
+  // Broken internal links — Tier 2. Omitted when totalBrokenLinks is 0.
+  if (brokenInternalLinks) {
+    for (const line of buildBrokenInternalLinksSection(brokenInternalLinks)) {
+      lines.push(line)
+    }
+  }
+
+  // Per-location competitor snippets — feeds the "Competitive Position by
+  // Location" section. Omitted when the list is empty.
+  if (locationCompetitorSnippets && locationCompetitorSnippets.length > 0) {
+    for (const line of buildLocationCompetitorSection(
+      locationCompetitorSnippets,
+    )) {
+      lines.push(line)
+    }
+  }
+
   return lines.join("\n")
 }
 
 const SYSTEM_PROMPT = `You are a senior SEO analyst producing an SEO audit for a prospective Harbinger Marketing partner. Output is read in-app and exported to markdown — render the audit as well-structured Markdown.
 
-Rules for prioritization (apply silently — surface findings, not the rules):
-1. Findings related to the priority services and target locations get surfaced first within each section.
-2. Findings related to excluded services / negative keywords are de-prioritized; flag them only when they are actively cannibalizing the priority services.
-3. Where GSC shows the site already ranking for keywords related to priority services, lead with optimization recommendations rather than new-page recommendations.
-4. Where target locations have no corresponding location pages or GSC visibility, flag this as a gap.
-5. Do NOT invent data. If the crawl, GSC, or GA4 data does not support a recommendation, do not make it.
-6. When GSC or GA4 is absent, acknowledge the gap honestly in the executive summary rather than fabricating numbers.
-7. Indexation gap is a Tier 1 priority. When the "Indexation coverage" section reports "Tier 1 indexation-gap finding required: YES" (i.e. probably_not_indexed > 20 URLs OR > 10% of sitemap), you MUST:
-   (a) include an indexation-gap finding in the Key Findings list with a bolded headline metric of the form "**X of Y sitemap URLs (Z%) have not received a single impression in 90 days**",
-   (b) cite at least 2-3 specific URLs from the "Sample of probably-not-indexed sitemap URLs" list,
-   (c) reference the URL Inspection results when present (e.g. "Search Console confirms coverage state 'Crawled - currently not indexed' on the inspected sample"), and
-   (d) name the indexation gap explicitly in the Executive Summary — this is the single highest-impact finding type for partner sites.
-   When the rule is not triggered, only mention indexation if the data warrants it.
-8. Performance is a Core Web Vitals signal. When the "PageSpeed Insights" section reports "Performance section required: YES" you MUST include a "## Performance" section in the Markdown output, citing exact URLs and metrics from the PageSpeed block (mobile performance score, LCP in seconds, INP in ms when available, CLS). When that section reports "Tier 1 performance finding required: YES" (homepage mobile score < 50), the homepage performance issue MUST also appear in the Executive Summary AND as a numbered Key Finding with a bolded headline metric like "**Homepage mobile performance score: N/100**". When the PageSpeed section was skipped (no API key) or no page is below 70, omit the Performance section entirely.
-9. Schema coverage is rendered from a per-page-type matrix, NOT a binary present/missing check. The "Schema coverage matrix" block reports four buckets (homepage / service / location / blog) with Expected, Found, and Missing types per bucket plus sample URLs. You MUST include a "## Schema Coverage" section that renders the matrix as a Markdown table and follows the Prioritized schema additions order: LocalBusiness on homepage > Service on service pages > BreadcrumbList sitewide > FAQPage on service pages. Cite exact bucket counts (e.g. "12 of 12 service pages") and at least one sample URL per gap. Do NOT recommend types the matrix already shows as present, and do NOT invent buckets that aren't in the prompt. When a bucket is fully covered, say so positively rather than padding with non-issues. When a bucket has any missing required type AND at least one page exists, that gap MUST also appear as a numbered Key Finding with a bolded headline metric of the form "**X of Y <bucket> pages missing <type>**".
+PRIORITIZATION TIERS (apply silently — surface findings, not the rules):
 
-Output format (Markdown):
+Tier 1 — material; executive-summary headline candidates. ANY of these triggers Tier 1:
+  - probably_not_indexed > 20 sitemap URLs OR > 10% of sitemap
+  - cannibalization clusters > 5
+  - homepage mobile performance score < 50
+  - new-link low-quality share > 40% (low-quality = spam_score >= 50)
+The data blocks self-report when each Tier 1 trigger fires ("Tier 1 ... finding required: YES"); honor those flags. Multiple Tier 1 findings can fire at once. Every Tier 1 finding MUST appear as a bullet in the Executive Summary AND as a numbered Key Finding with a bolded headline metric.
+
+Tier 2 — important but not headline-grade:
+  - missing required schema on >= 1 bucket with at least one crawled page (the "Schema coverage matrix")
+  - missing titles or meta descriptions at scale (>= 5 pages)
+  - URL structure conflicts (mixed protocol, mixed www/apex, mixed trailing slash, deep nesting) when the "URL structure issues" block is present
+  - broken internal links when the "Broken internal links" block reports any
+
+Tier 3 — optimization opportunities:
+  - quick-win CTR uplift (positions 4-10) calibrated to the prospect's own data
+  - content gaps for priority services / target locations
+  - schema enrichment beyond required types
+
+OUTPUT RULES:
+1. The Executive Summary leads with the most material Tier 1 finding. If no Tier 1 fires, lead with the most material Tier 2 finding. Quantify in business language wherever possible — "lifting CTR from X% to Y% on N queries adds ~Z clicks/year" beats "the title tags are weak."
+2. Do NOT make claims that aren't grounded in the data inputs. If a section's trigger is not met, OMIT that section entirely rather than padding with non-issues.
+3. Every finding cites a specific URL, count, percentage, or query taken VERBATIM from the data. Generic findings are forbidden.
+4. When GSC or GA4 is absent, acknowledge the gap honestly in the Executive Summary rather than fabricating numbers.
+5. Do NOT cite industry CTR averages — use the prospect's own GSC data only.
+6. Findings related to priority services and target locations get surfaced first within each tier.
+7. Where GSC shows the site already ranking for priority-service keywords, lead with optimization recommendations rather than new-page recommendations.
+
+OUTPUT FORMAT (Markdown — emit sections in EXACTLY this order; OMIT a section entirely when its trigger is not met):
 
 # SEO Audit — <prospect domain>
 
 ## Executive Summary
-2-4 sentences. Lead with the single most important conclusion. If GSC or GA4 is absent, name the gap explicitly.
+5-7 bullets. Bullet #1 is the single most material Tier 1 finding (or the top Tier 2 if no Tier 1 fires). Each bullet is one sentence with a quantified headline metric. If GSC or GA4 is absent, one bullet names that gap explicitly.
 
 ## Key Findings
-5-7 numbered findings, each cites a specific URL, count, percentage, or query taken VERBATIM from the data. Generic findings are forbidden. Each finding has a one-line headline metric in **bold**.
+Numbered findings (typically 5-9 total). Each has a one-line **bold headline metric**. Tier 1 findings come first, then Tier 2, then Tier 3 — preserve that ordering. Each finding cites a specific URL, count, percentage, or query verbatim.
+
+## YoY Traffic Chart
+Include this section ONLY when GA4 is connected. Output one short sentence reading the YoY trend (e.g. "Organic sessions are down 18% YoY, driven by losses on /services/water-heaters and /locations/charlotte"). Leave a blank line after the sentence — the YoY chart SVG is injected at this position by the renderer.
 
 ## Traffic & Visibility
-Read of the GSC + GA4 data. Highlight the priority-service queries the site already ranks for (lead with these), and the target locations with no visibility (flag these). If GA4 conversions are configured, translate traffic gaps to leads/revenue in plain language. If not, say so.
+Read of GSC + GA4 data. Highlight priority-service queries already ranking (lead with these), and target locations with no visibility (flag these). If GA4 conversions are configured, translate traffic gaps to leads/revenue in plain language. Skip this section when both GSC and GA4 are absent.
+
+## Indexation Status
+Include ONLY when the "Indexation coverage" block is present. When the block reports "Tier 1 indexation-gap finding required: YES", lead with the bolded metric "**X of Y sitemap URLs (Z%) have not received a single impression in 90 days**". Quote 2-3 representative not-indexed URLs verbatim. Reference URL Inspection results when present (e.g. "Search Console confirms coverage state 'Crawled - currently not indexed'").
+
+## Cannibalization
+Include ONLY when the "Keyword cannibalization clusters" block is present. One subsection per cluster:
+- List competing URLs verbatim.
+- Name the shared signal (identical title, title similarity, URL pattern, or SERP overlap); quote the shared query/title when present.
+- Recommend the winning URL based on the strongest signal — prefer more GSC clicks, otherwise better rank, otherwise longer / more linked URL. Be explicit: "Keep <URL>; 301 redirect <URL>".
+- For "differentiate_intent" hints, recommend rewriting titles/intent rather than redirecting; for "consolidate_to_stronger", recommend the 301.
+
+## Performance / Core Web Vitals
+Include ONLY when the PageSpeed Insights block reports "Performance section required: YES". Lead with the average mobile score, then the homepage score on its own line. Cite specific failing pages with exact LCP (s) / CLS / INP (ms) values verbatim. Recommend 1-2 of the named opportunities verbatim (e.g. "Eliminate render-blocking resources"). No generic Core Web Vitals advice.
+
+## Backlink Profile
+Include ONLY when the "Backlink profile" block reports "Backlink Profile section required: YES". Cite the low-quality share, the new-link low-quality share when relevant, and 2-3 of the sampleLowQualityLinks domains by name verbatim. When Tier 1 fires (new-link low-quality share > 40%), lead with that.
 
 ## Technical Findings
-Specific issues from the crawl, ordered by impact. Cite exact pages.
+Specific crawl-level issues ordered by impact. Cite exact pages.
+
+## URL Structure Issues
+Include ONLY when the "URL structure issues" block is present. Group by issue type (mixed protocol, mixed www/apex, mixed trailing slash, deep nesting). For each, state the canonical form and cite 2-3 offending URLs verbatim. Recommend a single canonical and the redirect rule that resolves the conflict.
 
 ## Schema Coverage
-Render the matrix from the "Schema coverage matrix" block as a Markdown table with columns: Page Type, Pages Crawled, Expected, Found, Missing. After the table, list 1-3 prioritized recommendations in the order from the Prioritized schema additions block (P1 first), each citing exact bucket counts and at least one sample URL. If every bucket is fully covered, say so explicitly in one sentence and skip the recommendations list.
-
-## Performance
-Include this section ONLY when the PageSpeed Insights block reports "Performance section required: YES". Lead with the average mobile performance score and call out the homepage score by itself. List the specific pages that scored below 50, and pages with mobile LCP > 2.5s or CLS > 0.1, citing the exact URLs and metric values verbatim from the PageSpeed block. Reference the top opportunities by name when they appear (e.g. "Eliminate render-blocking resources"). Do NOT cite generic Core Web Vitals advice; tie every recommendation to a specific page from the block.
+Render the "Schema coverage matrix" as a Markdown table with columns: Page Type | Pages Crawled | Expected | Found | Missing. After the table, list 1-3 prioritized recommendations in the order from the "Prioritized schema additions" block (P1 first), each citing exact bucket counts and at least one sample URL per gap. When every bucket is fully covered, say so in one sentence and skip the recommendations. Do NOT recommend types the matrix already shows as present. When a bucket has any missing required type AND at least one page exists, that gap MUST also appear as a numbered Key Finding with a bolded headline metric of the form "**X of Y <bucket> pages missing <type>**".
 
 ## Target Location Coverage
 One short row per target location: does the site have a corresponding page? Is it ranking? Use the data provided.
 
-## Keyword Cannibalization
-ONLY include this section when the prompt contains a "# Keyword cannibalization clusters" block. Render it as a top-level audit section with one subsection per cluster. For each cluster:
-- List the competing URLs verbatim from the prompt.
-- Name the shared signal (identical title, title similarity, URL pattern, or SERP overlap) and, if present, quote the shared query / title.
-- Recommend a winning URL based on the strongest signal in the data — prefer the page with more GSC clicks if known, otherwise the better-ranked page, otherwise the page with the longer / more linked URL. Be explicit ("Keep <URL>; 301 redirect <URL> and <URL>").
-- For clusters with the recommendation hint "differentiate_intent", recommend rewriting titles/intent rather than redirecting; for "consolidate_to_stronger", recommend a 301 redirect.
-Do NOT invent clusters that aren't in the prompt block. When the block is absent, omit this section entirely.
+## Competitive Position by Location
+Include ONLY when the "Location competitor snippets" block is present. One subsection per target market. Name the top 3 competitors by organic-traffic estimate, the prospect's gap vs. each, and 1-2 high-value queries the prospect is missing (cite query + position + search volume verbatim).
 
 ## 90-Day Roadmap
-Month 1 / Month 2 / Month 3, each with 2-3 specific actions. Reference key findings by number ("Resolves Finding #3").
+Auto-prioritized by tier — do NOT group by service category:
+- Month 1 — every Tier 1 fix (one bullet per Tier 1 finding). If fewer than 3 Tier 1 findings exist, fill remaining Month 1 slots with the highest-impact Tier 2 fixes.
+- Month 2 — Tier 2 fixes (schema gaps, scaled missing-meta cleanup, URL-structure canonicalization, broken-link repair).
+- Month 3 — Tier 3 fixes (CTR optimization, content gaps, schema enrichment).
+Each bullet references the relevant findings by number ("Resolves Finding #3"). 2-3 actions per month.
 
 ## Appendix: Other Issues
 One-liners for issues that didn't make the top findings. Optional.
 
-Constraints:
-- Do NOT include partner profile boilerplate.
-- Do NOT cite industry CTR averages — use the prospect's own GSC data.
-- Every recommendation specifies the exact pages, queries, and metrics being addressed.
-- Length: aim for 800-1500 words of finished prose.`
+CONSTRAINTS:
+- Length: 800-1500 words of finished prose.
+- No partner profile boilerplate.
+- Every recommendation specifies the exact pages, queries, and metrics being addressed.`
 
 /**
- * Insert the YoY organic-sessions chart (full chart after the
- * "Traffic & Visibility" heading; sparkline at the start of the
- * "Executive Summary" block) into the markdown Claude produced.
+ * Insert the YoY organic-sessions chart (full chart inside the new
+ * "## YoY Traffic Chart" section; sparkline at the end of the
+ * "## Executive Summary" block) into the markdown Claude produced.
  *
  * Silently no-ops when GA4 is absent or returned no monthly rows. Each
  * insertion is idempotent on the heading regex — we never insert twice.
@@ -761,16 +1032,21 @@ function injectOrganicSessionsChart(
 
   let out = markdown
 
-  // Inject the full chart immediately after the "## Traffic & Visibility"
-  // heading. Match the heading on its own line, allow optional trailing
-  // whitespace.
+  // Inject the full chart immediately after the "## YoY Traffic Chart"
+  // heading. The system prompt instructs Claude to emit a one-sentence read
+  // of the YoY trend under that heading and leave the chart placeholder for
+  // us to fill.
+  const yoyHeading = /^(##\s+YoY\s+Traffic\s+Chart[^\n]*)\n/m
   const trafficHeading = /^(##\s+Traffic\s*&(?:amp;)?\s*Visibility[^\n]*)\n/m
-  if (trafficHeading.test(out)) {
+  if (yoyHeading.test(out)) {
+    out = out.replace(yoyHeading, `$1\n\n${chartBlock}\n`)
+  } else if (trafficHeading.test(out)) {
+    // Fallback: older outputs (or drift) place the chart with the
+    // Traffic & Visibility section. Insert there so we never silently lose
+    // the chart from the rendered audit.
     out = out.replace(trafficHeading, `$1\n\n${chartBlock}\n`)
   } else {
-    // Fallback: append the chart as its own section so the data still
-    // surfaces in the audit even when Claude's heading drifted.
-    out = `${out.trimEnd()}\n\n## Traffic & Visibility\n\n${chartBlock}\n`
+    out = `${out.trimEnd()}\n\n## YoY Traffic Chart\n\n${chartBlock}\n`
   }
 
   // Inject the sparkline at the END of the "## Executive Summary" block,
