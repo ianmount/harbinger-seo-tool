@@ -2,6 +2,7 @@
 
 import { useCallback, useMemo, useState } from "react"
 import ReactMarkdown from "react-markdown"
+import rehypeRaw from "rehype-raw"
 import { Download, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/PageHeader"
@@ -378,7 +379,9 @@ function AuditResult({
 
       <article className="rounded-lg border bg-card p-6">
         <div className="prose prose-sm max-w-none dark:prose-invert prose-headings:font-sans prose-headings:font-extrabold prose-headings:tracking-[-0.005em] prose-h1:text-[24px] prose-h2:text-[18px] prose-h3:text-[15px] prose-strong:text-foreground">
-          <ReactMarkdown>{result.auditMarkdown}</ReactMarkdown>
+          <ReactMarkdown rehypePlugins={[rehypeRaw]}>
+            {result.auditMarkdown}
+          </ReactMarkdown>
         </div>
       </article>
     </section>

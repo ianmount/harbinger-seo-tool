@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
+import {
+  buildSeries as buildOrganicSeries,
+  renderOrganicSessionsBlock,
+  renderOrganicSessionsSparklineSvg,
+} from "@/lib/audit-chart"
 import { detectCannibalization } from "@/lib/cannibalization"
 import { callClaude, ClaudeApiError } from "@/lib/claude"
 import { crawlSite } from "@/lib/crawler"
@@ -256,13 +261,22 @@ async function tryFetchGa4(
   startD.setUTCDate(startD.getUTCDate() + 1)
   const startDate = fmtDate(startD)
 
+  // Monthly organic powers the YoY chart, which needs the most recent 12
+  // months PLUS the prior 12 for comparison. GA4 returns whatever exists in
+  // the window; if a property is younger than 24 months, the prior series
+  // is just shorter — the chart util handles that gracefully.
+  const monthlyStartD = new Date(today)
+  monthlyStartD.setUTCFullYear(monthlyStartD.getUTCFullYear() - 2)
+  monthlyStartD.setUTCDate(monthlyStartD.getUTCDate() + 1)
+  const monthlyStartDate = fmtDate(monthlyStartD)
+
   try {
     const [report, monthlyOrganic] = await Promise.all([
       getSeoReport({ account: "assessments", propertyId, startDate, endDate }),
       getMonthlyOrganic({
         account: "assessments",
         propertyId,
-        startDate,
+        startDate: monthlyStartDate,
         endDate,
       }).catch(() => []),
     ])
@@ -726,6 +740,56 @@ Constraints:
 - Every recommendation specifies the exact pages, queries, and metrics being addressed.
 - Length: aim for 800-1500 words of finished prose.`
 
+/**
+ * Insert the YoY organic-sessions chart (full chart after the
+ * "Traffic & Visibility" heading; sparkline at the start of the
+ * "Executive Summary" block) into the markdown Claude produced.
+ *
+ * Silently no-ops when GA4 is absent or returned no monthly rows. Each
+ * insertion is idempotent on the heading regex — we never insert twice.
+ */
+function injectOrganicSessionsChart(
+  markdown: string,
+  ga4: AssessmentGa4Data | null,
+): string {
+  if (!ga4 || ga4.monthlyOrganic.length === 0) return markdown
+  const data = buildOrganicSeries(ga4.monthlyOrganic)
+  if (!data) return markdown
+
+  const chartBlock = renderOrganicSessionsBlock(data)
+  const sparkline = renderOrganicSessionsSparklineSvg(data)
+
+  let out = markdown
+
+  // Inject the full chart immediately after the "## Traffic & Visibility"
+  // heading. Match the heading on its own line, allow optional trailing
+  // whitespace.
+  const trafficHeading = /^(##\s+Traffic\s*&(?:amp;)?\s*Visibility[^\n]*)\n/m
+  if (trafficHeading.test(out)) {
+    out = out.replace(trafficHeading, `$1\n\n${chartBlock}\n`)
+  } else {
+    // Fallback: append the chart as its own section so the data still
+    // surfaces in the audit even when Claude's heading drifted.
+    out = `${out.trimEnd()}\n\n## Traffic & Visibility\n\n${chartBlock}\n`
+  }
+
+  // Inject the sparkline at the END of the "## Executive Summary" block,
+  // before the next "## " heading. Single-line trailing aside so it doesn't
+  // shove the lead sentence around.
+  const execMatch = out.match(/^##\s+Executive Summary[^\n]*\n/m)
+  if (execMatch && sparkline) {
+    const startIdx = (execMatch.index ?? 0) + execMatch[0].length
+    const rest = out.slice(startIdx)
+    const nextHeadingIdx = rest.search(/\n##\s+/)
+    const insertAt =
+      nextHeadingIdx === -1 ? out.length : startIdx + nextHeadingIdx
+    const aside = `\n\n*12-month organic trend:* ${sparkline}\n`
+    out = `${out.slice(0, insertAt)}${aside}${out.slice(insertAt)}`
+  }
+
+  return out
+}
+
 export async function POST(request: Request) {
   let raw: unknown
   try {
@@ -812,6 +876,7 @@ export async function POST(request: Request) {
       system: SYSTEM_PROMPT,
       maxTokens: 12_000,
     })
+    auditMarkdown = injectOrganicSessionsChart(auditMarkdown, ga4)
   } catch (err) {
     if (err instanceof ClaudeApiError) {
       return NextResponse.json(
