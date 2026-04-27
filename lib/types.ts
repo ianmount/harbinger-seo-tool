@@ -1043,8 +1043,8 @@ export interface AuditLocalPerformance {
 // ── PageSpeed Insights ─────────────────────────────────────────────────────
 //
 // PageSpeed Insights API output, normalized to the subset we actually use in
-// the audit. Mobile is the primary signal because that's what Google ranks
-// on; desktop is captured for completeness but findings are mobile-first.
+// the audit. Mobile only — Google ranks on mobile, and the desktop pass was
+// dropped because no consumer (synthesis or dashboard) ever read it.
 //
 // `inpMs` and other CrUX-derived metrics may be null when the page has too
 // little real-user data for Google to publish a percentile. Lab metrics
@@ -1076,11 +1076,9 @@ export interface PageSpeedMetrics {
 
 export interface PageSpeedUrlResult {
   url: string
-  /** Mobile metrics — the primary signal because Google ranks on mobile. */
+  /** Mobile metrics — the only signal we keep because Google ranks on mobile. */
   mobile: PageSpeedMetrics | null
-  /** Desktop metrics — secondary, for context only. */
-  desktop: PageSpeedMetrics | null
-  /** Populated when both strategies failed for this URL. */
+  /** Populated when the mobile fetch failed for this URL. */
   error?: string
 }
 

@@ -11,28 +11,32 @@ import type {
  * Google PageSpeed Insights v5 client for the SEO Audit tab.
  *
  * Pulls Lighthouse + CrUX metrics for the homepage and the prospect's top GSC
- * pages. Mobile is the primary signal because Google ranks on mobile; desktop
- * is captured for context but never gates a finding by itself.
+ * pages. Mobile only — Google ranks on mobile, and the prior desktop pass
+ * doubled wall time without ever feeding any consumer (synthesis prompt or
+ * dashboard).
  *
  * Operational guardrails:
- *   - 24h in-memory cache per (URL, strategy). Surviving cold starts is not
- *     a goal — the cache exists to avoid hammering the API on retries within
- *     a single audit run.
- *   - Concurrency capped at 2 simultaneous requests. PSI rate-limits hard.
+ *   - 24h in-memory cache per URL. Surviving cold starts is not a goal — the
+ *     cache exists to avoid hammering the API on retries within a single
+ *     audit run.
+ *   - Concurrency capped at 4 simultaneous requests. PSI free tier allows
+ *     240 queries/min, so 4 inflight stays well under the rate limit.
  *   - 60s per-request timeout; PSI can take 30-50s on a cold third-party site.
+ *   - URL set capped at MAX_GSC_PAGES + homepage (≤5 URLs) so the pass fits
+ *     comfortably inside Vercel's 300s function budget.
  *   - Without `PAGESPEED_API_KEY` set, the whole pass is skipped (returns a
  *     report flagged with `skippedReason`). With a key the free quota is
- *     25,000 calls/day, comfortably above the audit's 22-call ceiling.
+ *     25,000 calls/day, comfortably above the audit's per-run ceiling.
  */
 
 const PSI_ENDPOINT =
   "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
 const REQUEST_TIMEOUT_MS = 60_000
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000
-const MAX_CONCURRENT = 2
-const MAX_GSC_PAGES = 10
+const MAX_CONCURRENT = 4
+const MAX_GSC_PAGES = 4
 
-type Strategy = "mobile" | "desktop"
+type Strategy = "mobile"
 
 // ── 24h in-memory cache ────────────────────────────────────────────────────
 //
@@ -331,10 +335,11 @@ function buildAggregates(
 /**
  * Run the PageSpeed pass over the prospect's homepage and top GSC pages.
  *
- * Mobile + desktop for each URL. Mobile is what Google ranks on; desktop is
- * captured for context. The whole pass is opt-in on `PAGESPEED_API_KEY` —
- * with no key the function returns a skipped report so callers can render
- * a "PageSpeed not configured" badge instead of erroring.
+ * Mobile only — Google ranks on mobile, and the desktop pass it used to
+ * issue was never read by any consumer. The whole pass is opt-in on
+ * `PAGESPEED_API_KEY` — with no key the function returns a skipped report
+ * so callers can render a "PageSpeed not configured" badge instead of
+ * erroring.
  */
 export async function runPageSpeedAudit(opts: {
   domain: string
@@ -364,13 +369,10 @@ export async function runPageSpeedAudit(opts: {
   const startedAt = Date.now()
   const pages: PageSpeedUrlResult[] = await Promise.all(
     urls.map(async (url) => {
-      const [mobile, desktop] = await Promise.all([
-        fetchOne(url, "mobile", apiKey),
-        fetchOne(url, "desktop", apiKey),
-      ])
-      const result: PageSpeedUrlResult = { url, mobile, desktop }
-      if (!mobile && !desktop) {
-        result.error = "PageSpeed Insights returned no data for either strategy."
+      const mobile = await fetchOne(url, "mobile", apiKey)
+      const result: PageSpeedUrlResult = { url, mobile }
+      if (!mobile) {
+        result.error = "PageSpeed Insights returned no data for this URL."
       }
       return result
     }),
