@@ -925,3 +925,104 @@ export interface AuditSynthesis {
   costUsd?: number
   durationSeconds?: number
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Onboarding tab — Initial Strategy workflow.
+//
+// Generates the strategic deliverables needed to brief a developer building a
+// new site for a Partner: keyword-to-page mapping, URL redirect mapping, and
+// internal linking plan. Distinct from the Audit tab (pre-sales, Prospect) and
+// the Strategy tab (recurring 6-month cycle, markdown narrative). Output is a
+// 3-sheet XLSX consumed by the developer + SEO engineer during the build.
+
+/**
+ * One node in the proposed-sitemap tree parsed from the indented text input.
+ * Path is the breadcrumb chain ("Services > Plumbing > Drain Cleaning") and is
+ * what the keyword/linking outputs reference, so a renamed page in the source
+ * indented text changes the references everywhere consistently.
+ */
+export interface SitemapNode {
+  /** Page name as written in the indented text. */
+  name: string
+  /** Breadcrumb path joined with " > ". Unique within the tree. */
+  path: string
+  /** 0 for root, 1 for top-level pages, etc. */
+  depth: number
+  /** Slug derived from `name` — Claude can override in the URL mapping output. */
+  proposedSlug: string
+  children: SitemapNode[]
+}
+
+/**
+ * One row of the keyword-to-page mapping. Primary keyword is the single
+ * keyword the page should rank #1 for; secondaries are supporting terms the
+ * same page should naturally cover.
+ */
+export interface KeywordMapping {
+  /** Page name from the proposed sitemap. */
+  pageName: string
+  /** Breadcrumb path from the proposed sitemap (matches SitemapNode.path). */
+  pagePath: string
+  /** Proposed full URL path, e.g. "/services/plumbing/drain-cleaning". */
+  newUrl: string
+  primaryKeyword: string
+  secondaryKeywords: string[]
+  /** One-sentence reason this page won this primary keyword. */
+  rationale: string
+}
+
+/**
+ * One row of the old-URL → new-URL mapping. `newUrl` is null when no new page
+ * is a meaningful destination (the page is being retired, content was rolled
+ * into a parent, etc.) — Claude flags those with `redirectType: "none"` and
+ * the `notes` field explains the call.
+ */
+export type RedirectType = "301" | "none"
+
+export interface UrlMapping {
+  /** Original URL crawled from the current site (absolute). */
+  oldUrl: string
+  /** New URL path on the rebuilt site, or null when no redirect is appropriate. */
+  newUrl: string | null
+  redirectType: RedirectType
+  notes: string
+}
+
+/**
+ * One internal-link recommendation. Source and target both reference pages
+ * from the proposed sitemap. Anchor text is the exact text the developer
+ * should put inside the `<a>` tag on the source page.
+ */
+export interface InternalLink {
+  sourcePage: string
+  sourcePath: string
+  sourceUrl: string
+  targetPage: string
+  targetPath: string
+  targetUrl: string
+  anchorText: string
+  /** One-sentence reason this link helps (topical authority, user flow, etc.). */
+  rationale: string
+}
+
+/**
+ * Aggregate output of the Initial Strategy workflow. Returned to the client as
+ * JSON; the client renders preview tables and offers an XLSX download whose
+ * three sheets correspond 1-1 to these arrays.
+ */
+export interface InitialStrategyOutput {
+  partnerId: string
+  partnerName: string
+  generatedAt: string
+  keywordMapping: KeywordMapping[]
+  urlMapping: UrlMapping[]
+  internalLinking: InternalLink[]
+  /** Pages that appeared in the proposed sitemap and ended up in the output. */
+  sitemapPageCount: number
+  /** Total URLs returned by the current-site crawl. */
+  crawledUrlCount: number
+  costUsd: number
+  durationSeconds: number
+  /** Non-fatal issues for the UI to surface (e.g. "12 keywords were not used"). */
+  warnings: string[]
+}
