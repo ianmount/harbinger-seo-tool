@@ -3,6 +3,7 @@ import { z } from "zod"
 import { callClaude, ClaudeApiError } from "@/lib/claude"
 import type {
   AuditSynthesis,
+  BacklinkProfile,
   BacklinkReport,
   CompetitiveReport,
   CrawlReport,
@@ -51,6 +52,7 @@ const bodySchema = z.object({
   crawl: z.unknown(),
   competitive: z.unknown(),
   backlinks: z.unknown(),
+  backlinkProfile: z.unknown().optional().nullable(),
   gsc: z.unknown().optional().nullable(),
   ga4: z.unknown().optional().nullable(),
   pageSpeed: z.unknown().optional().nullable(),
@@ -63,6 +65,7 @@ interface ParsedBody {
   crawl: CrawlReport
   competitive: CompetitiveReport
   backlinks: BacklinkReport
+  backlinkProfile?: BacklinkProfile | null
   gsc?: AuditGscSlice
   ga4?: AuditGa4Slice
   pageSpeed?: PageSpeedReport
@@ -183,6 +186,65 @@ function buildBacklinkBlock(b: BacklinkReport): string {
   lines.push(`Top authority referring domains for context:`)
   for (const s of b.topAuthorityExamples.slice(0, 5)) {
     lines.push(`  - ${s.domain} (rank ${s.rank})`)
+  }
+  return lines.join("\n")
+}
+
+/**
+ * Compute the gating shares the prompt + Claude both reason about. Kept
+ * here so the prompt block and the JSON output schema agree on the
+ * triggering thresholds — drift between them was a previous footgun.
+ */
+function backlinkProfileShares(p: BacklinkProfile) {
+  const lowQualityShare =
+    p.totalReferringDomains > 0
+      ? p.lowQualityDomains / p.totalReferringDomains
+      : 0
+  const newLinkLowQualityShare =
+    p.newLinksLast12Months > 0
+      ? p.newLinksLast12MonthsLowQuality / p.newLinksLast12Months
+      : 0
+  // Section required when overall low-quality share > 30% OR new-link
+  // low-quality share > 40%. Tier 1 (executive summary required) when
+  // new-link low-quality share > 60%.
+  const sectionRequired = lowQualityShare > 0.3 || newLinkLowQualityShare > 0.4
+  const tier1 = newLinkLowQualityShare > 0.6
+  return { lowQualityShare, newLinkLowQualityShare, sectionRequired, tier1 }
+}
+
+function buildBacklinkProfileBlock(p: BacklinkProfile): string {
+  const lines: string[] = []
+  const { lowQualityShare, newLinkLowQualityShare, sectionRequired, tier1 } =
+    backlinkProfileShares(p)
+  lines.push(`# Backlink profile (DataForSEO summary + referring_domains + bulk_spam_score)`)
+  lines.push(`Domain: ${p.domain}`)
+  lines.push(`Total backlinks: ${p.totalBacklinks.toLocaleString()}`)
+  lines.push(`Total referring domains: ${p.totalReferringDomains.toLocaleString()}`)
+  lines.push(`Dofollow ratio: ${(p.dofollowRatio * 100).toFixed(1)}%`)
+  lines.push(`Anchor diversity (distinct anchors): ${p.anchorDiversity.toLocaleString()}`)
+  lines.push(
+    `High-quality referring domains (spam<30 AND rank>20): ${p.highQualityDomains}`,
+  )
+  lines.push(
+    `Low-quality referring domains (spam>=50): ${p.lowQualityDomains} (${(lowQualityShare * 100).toFixed(1)}% of referring domains)`,
+  )
+  lines.push(
+    `New links in last 12 months: ${p.newLinksLast12Months}; of those, low-quality: ${p.newLinksLast12MonthsLowQuality} (${(newLinkLowQualityShare * 100).toFixed(1)}%)`,
+  )
+  lines.push(
+    `Backlink Profile section required: ${sectionRequired ? "YES — emit synthesis.backlinkProfile and a narrative" : "no — set synthesis.backlinkProfile to null"}`,
+  )
+  lines.push(
+    `Tier 1 backlink-profile finding required: ${tier1 ? "YES — new-link low-quality share > 60%; surface in executiveSummary AND a numbered Key Finding" : "no"}`,
+  )
+  if (p.sampleLowQualityLinks.length > 0) {
+    lines.push("")
+    lines.push(`## Sample low-quality referring domains (cite VERBATIM in the report)`)
+    for (const d of p.sampleLowQualityLinks) {
+      lines.push(
+        `  - ${d.domain} — spam ${d.spamScore}, rank ${d.domainRank}, ${d.backlinks} backlinks${d.firstSeen ? `, first seen ${d.firstSeen}` : ""}`,
+      )
+    }
   }
   return lines.join("\n")
 }
@@ -499,6 +561,12 @@ HARD CONSTRAINTS (violations cause the audit to be rejected):
 6. The 90-day roadmap must reference findings by number using "#N" format.
 7. No generic recommendations. Specify the exact pages, queries, and metrics being addressed.
 
+BACKLINK PROFILE RULES (apply when the "Backlink profile" block is present):
+B1. When the block reports "Backlink Profile section required: YES" (low-quality referring-domain share > 30% OR new-link low-quality share > 40%), populate synthesis.backlinkProfile with the echoed metrics and a 2-3 sentence narrative. Cite at least 2-3 of the sampleLowQualityLinks domains by name verbatim.
+B2. When the block reports "Tier 1 backlink-profile finding required: YES" (new-link low-quality share > 60%), the issue MUST also appear (a) in executiveSummary as one of the headline takeaways and (b) as a numbered Key Finding with a headlineMetric of the form "X% of new links in last 12 months are low-quality (spam ≥ 50)" citing the exact percentage from the data. Tier 1 here is independent of the indexation and performance Tier 1 rules — multiple can fire at once.
+B3. When the block reports "Backlink Profile section required: no", set synthesis.backlinkProfile to null. Do NOT fabricate concern when the data does not warrant it.
+B4. Backlink-profile narrative MUST cite values from the block verbatim (low-quality count, new-link share, specific domain names). No generic "your backlink profile has some risk" prose.
+
 PERFORMANCE RULES (apply when the PageSpeed Insights block is present):
 P1. When the PageSpeed block reports "Performance section required: YES", populate the synthesis "performance" object with a 2-3 sentence narrative that names the worst-performing audited page by URL, calls out the average mobile score, and recommends 1-2 of the top opportunities returned for that page. Echo the server-computed lowScorePages / poorLcpPages / poorClsPages lists verbatim.
 P2. When the PageSpeed block reports "Tier 1 performance finding required: YES" (homepage mobile score < 50), the homepage performance issue MUST appear (a) in executiveSummary as one of the headline takeaways and (b) as a numbered Key Finding with a headlineMetric of the form "Homepage mobile score: N/100" citing the exact URL of the homepage. The Tier 1 rule is independent of the indexation Tier 1 rule — both can fire at once.
@@ -526,6 +594,7 @@ function buildUserPrompt(body: ParsedBody): string {
     crawl,
     competitive,
     backlinks,
+    backlinkProfile,
     gsc,
     ga4,
     pageSpeed,
@@ -559,6 +628,10 @@ function buildUserPrompt(body: ParsedBody): string {
   lines.push(buildCompetitiveBlock(competitive))
   lines.push("")
   lines.push(buildBacklinkBlock(backlinks))
+  if (backlinkProfile) {
+    lines.push("")
+    lines.push(buildBacklinkProfileBlock(backlinkProfile))
+  }
   if (gsc) {
     lines.push("")
     lines.push(buildGscBlock(gsc))
@@ -647,6 +720,25 @@ function buildUserPrompt(body: ParsedBody): string {
           highSpamCount: 0,
           spamExamples: ["<exact spammy domain 1>", "<exact spammy domain 2>"],
         },
+        backlinkProfile:
+          backlinkProfile && backlinkProfileShares(backlinkProfile).sectionRequired
+            ? {
+                totalBacklinks: backlinkProfile.totalBacklinks,
+                totalReferringDomains: backlinkProfile.totalReferringDomains,
+                dofollowRatio: backlinkProfile.dofollowRatio,
+                anchorDiversity: backlinkProfile.anchorDiversity,
+                highQualityDomains: backlinkProfile.highQualityDomains,
+                lowQualityDomains: backlinkProfile.lowQualityDomains,
+                newLinksLast12Months: backlinkProfile.newLinksLast12Months,
+                newLinksLast12MonthsLowQuality:
+                  backlinkProfile.newLinksLast12MonthsLowQuality,
+                sampleLowQualityLinks:
+                  backlinkProfile.sampleLowQualityLinks.map((d) => d.domain),
+                tier1: backlinkProfileShares(backlinkProfile).tier1,
+                narrative:
+                  "<2-3 sentences. Frame as link-quality risk: cite the low-quality share, the new-link low-quality share when relevant, and at least 2-3 of the sampleLowQualityLinks domains by name. If tier1 fires, lead with that.>",
+              }
+            : null,
         roadmap: [
           {
             phase: "Month 1",
