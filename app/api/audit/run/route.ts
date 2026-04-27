@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
+import { detectCannibalization } from "@/lib/cannibalization"
 import { callClaude, ClaudeApiError } from "@/lib/claude"
 import { crawlSite } from "@/lib/crawler"
 import { GA4Error, getMonthlyOrganic, getSeoReport } from "@/lib/ga4"
@@ -10,6 +11,7 @@ import {
   GSCError,
   getDailyClicks,
   getIndexCoverage,
+  getQueries,
   getTopPages,
   getTopPagesPaginated,
   getTopQueriesPaginated,
@@ -22,7 +24,9 @@ import type {
   AssessmentGa4Data,
   AssessmentGscData,
   AuditCrawlSummary,
+  CannibalizationCluster,
   CrawlReport,
+  GSCQueryRow,
 } from "@/lib/types"
 
 /**
@@ -51,6 +55,7 @@ const targetMarketSchema = z.object({
 
 const bodySchema = z.object({
   websiteUrl: z.string().min(3),
+  partnerName: z.string().optional().default(""),
   priorityServices: z.string().optional().default(""),
   negativeKeywords: z.string().optional().default(""),
   existingTargetKeywords: z.string().optional().default(""),
@@ -84,10 +89,16 @@ function cleanWebsite(raw: string): string {
   return raw.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase()
 }
 
+interface GscFetchResult {
+  data: AssessmentGscData
+  /** Long-range [query, page] export used by the cannibalization detector. */
+  queryPages: GSCQueryRow[]
+}
+
 async function tryFetchGsc(
   websiteUrl: string,
   warnings: string[],
-): Promise<AssessmentGscData | null> {
+): Promise<GscFetchResult | null> {
   let siteUrl: string | null = null
   try {
     const sites = await listSites("assessments")
@@ -109,7 +120,7 @@ async function tryFetchGsc(
   const startDate = isoMonthsAgo(16)
   const endDate = isoDaysAgo(2)
   try {
-    const [topQueries, topPages, dailyClicks] = await Promise.all([
+    const [topQueries, topPages, dailyClicks, queryPages] = await Promise.all([
       getTopQueriesPaginated({
         account: "assessments",
         siteUrl,
@@ -130,18 +141,31 @@ async function tryFetchGsc(
         startDate,
         endDate,
       }),
+      // [query, page] export — feeds the SERP-overlap signal in the
+      // cannibalization detector. Capped at one API call (5k rows) since
+      // ranking pages with positions in the top 20 don't need a deep tail.
+      getQueries({
+        account: "assessments",
+        siteUrl,
+        startDate,
+        endDate,
+        rowLimit: 5000,
+      }).catch(() => [] as GSCQueryRow[]),
     ])
     const totalClicks = dailyClicks.reduce((s, d) => s + d.clicks, 0)
     const totalImpressions = dailyClicks.reduce((s, d) => s + d.impressions, 0)
     return {
-      siteUrl,
-      dateRange: { startDate, endDate },
-      totalClicks,
-      totalImpressions,
-      topQueries,
-      topPages,
-      dailyClicks,
-      indexCoverage: null,
+      data: {
+        siteUrl,
+        dateRange: { startDate, endDate },
+        totalClicks,
+        totalImpressions,
+        topQueries,
+        topPages,
+        dailyClicks,
+        indexCoverage: null,
+      },
+      queryPages,
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown GSC error"
@@ -282,8 +306,9 @@ function buildPrompt(params: {
   gsc: AssessmentGscData | null
   ga4: AssessmentGa4Data | null
   crawl: CrawlReport
+  cannibalization: CannibalizationCluster[]
 }): string {
-  const { body, gsc, ga4, crawl } = params
+  const { body, gsc, ga4, crawl, cannibalization } = params
   const lines: string[] = []
 
   lines.push(`# Prospect business context`)
@@ -475,6 +500,27 @@ function buildPrompt(params: {
   lines.push(`Image alt coverage: ${crawl.imageAltCoveragePercent}%`)
   lines.push("")
 
+  // Cannibalization clusters — pre-computed by lib/cannibalization.ts so
+  // Claude doesn't have to re-derive them from the title list. Only emit the
+  // section when there's at least one cluster; absence is meaningful too,
+  // but mentioning "no clusters" in the prompt invites Claude to fabricate.
+  if (cannibalization.length > 0) {
+    lines.push(`# Keyword cannibalization clusters`)
+    lines.push(
+      `${cannibalization.length} cluster(s) of pages competing for the same keyword/location combination.`,
+    )
+    cannibalization.forEach((c, i) => {
+      const head = `Cluster ${i + 1} (signal: ${c.sharedSignal}, recommendation hint: ${c.recommendationHint})`
+      lines.push(head)
+      if (c.topQuery) lines.push(`  shared query: "${c.topQuery}"`)
+      if (c.sharedTitle) lines.push(`  shared title: "${truncate(c.sharedTitle, 100)}"`)
+      for (const url of c.cluster) {
+        lines.push(`  - ${truncate(url, 140)}`)
+      }
+    })
+    lines.push("")
+  }
+
   return lines.join("\n")
 }
 
@@ -513,6 +559,14 @@ Specific issues from the crawl, ordered by impact. Cite exact pages.
 ## Target Location Coverage
 One short row per target location: does the site have a corresponding page? Is it ranking? Use the data provided.
 
+## Keyword Cannibalization
+ONLY include this section when the prompt contains a "# Keyword cannibalization clusters" block. Render it as a top-level audit section with one subsection per cluster. For each cluster:
+- List the competing URLs verbatim from the prompt.
+- Name the shared signal (identical title, title similarity, URL pattern, or SERP overlap) and, if present, quote the shared query / title.
+- Recommend a winning URL based on the strongest signal in the data — prefer the page with more GSC clicks if known, otherwise the better-ranked page, otherwise the page with the longer / more linked URL. Be explicit ("Keep <URL>; 301 redirect <URL> and <URL>").
+- For clusters with the recommendation hint "differentiate_intent", recommend rewriting titles/intent rather than redirecting; for "consolidate_to_stronger", recommend a 301 redirect.
+Do NOT invent clusters that aren't in the prompt block. When the block is absent, omit this section entirely.
+
 ## 90-Day Roadmap
 Month 1 / Month 2 / Month 3, each with 2-3 specific actions. Reference key findings by number ("Resolves Finding #3").
 
@@ -549,6 +603,7 @@ export async function POST(request: Request) {
   const websiteUrl = cleanWebsite(body.websiteUrl)
 
   let gsc: AssessmentGscData | null = null
+  let gscQueryPages: GSCQueryRow[] = []
   let ga4: AssessmentGa4Data | null = null
   let crawl: CrawlReport
   try {
@@ -560,7 +615,8 @@ export async function POST(request: Request) {
         options: { mode: body.crawlMode },
       }),
     ])
-    gsc = gscRes
+    gsc = gscRes?.data ?? null
+    gscQueryPages = gscRes?.queryPages ?? []
     ga4 = ga4Res
     crawl = crawlRes
     if (gsc) {
@@ -574,9 +630,19 @@ export async function POST(request: Request) {
     )
   }
 
+  const cannibalization = detectCannibalization({
+    pages: crawl.pages,
+    partnerName: body.partnerName?.trim() || null,
+    gscQueryPages,
+    targetMarkets: body.targetMarkets,
+  })
+  console.log(
+    `[audit:cannibalization] domain=${websiteUrl} clusters=${cannibalization.length} pages=${crawl.pages.length} gsc_query_pages=${gscQueryPages.length}`,
+  )
+
   let auditMarkdown: string
   try {
-    const prompt = buildPrompt({ body, gsc, ga4, crawl })
+    const prompt = buildPrompt({ body, gsc, ga4, crawl, cannibalization })
     auditMarkdown = await callClaude(prompt, {
       model: "claude-opus-4-7",
       system: SYSTEM_PROMPT,
@@ -605,6 +671,7 @@ export async function POST(request: Request) {
     gscData: gsc,
     ga4Data: ga4,
     crawlSummary: summarizeCrawl(crawl),
+    cannibalization,
     durationSeconds,
   }
   return NextResponse.json(result)
