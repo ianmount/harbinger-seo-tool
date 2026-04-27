@@ -556,6 +556,56 @@ export interface BacklinkReport {
   topAuthorityExamples: ReferringDomainSample[]
 }
 
+/**
+ * One referring domain row in the backlink-profile pull. Distinct from
+ * `ReferringDomainSample` (used by `BacklinkReport`): this row carries the
+ * spam score joined from /v3/backlinks/bulk_spam_score/live and a `lost`
+ * flag from /v3/backlinks/referring_domains/live so the audit can quantify
+ * recent link velocity (newly-acquired vs lost) alongside quality.
+ */
+export interface BacklinkProfileDomain {
+  domain: string
+  /** DataForSEO domain rank (0–1000; higher = stronger). */
+  domainRank: number
+  /** Backlink count from this domain. */
+  backlinks: number
+  /** ISO date the link was first observed. */
+  firstSeen?: string
+  /** True when DataForSEO marked the link as lost (lost_date present). */
+  lost: boolean
+  /** Spam score 0–100 (higher = spammier). */
+  spamScore: number
+}
+
+/**
+ * Output of `backlinkProfile()` — orchestrates a three-call pull from
+ * DataForSEO (summary + referring_domains + bulk_spam_score) and computes
+ * the derived metrics the audit uses to flag link-quality risk. Distinct
+ * from `BacklinkReport`, which is the spammy-domain example list rendered
+ * in the existing Backlink Risk PDF page.
+ */
+export interface BacklinkProfile {
+  domain: string
+  totalBacklinks: number
+  totalReferringDomains: number
+  /** Fraction of backlinks marked dofollow (0–1). 0 when total is 0. */
+  dofollowRatio: number
+  /** Count of distinct anchor texts on the domain (anchor-diversity proxy). */
+  anchorDiversity: number
+  /** Referring domains with spam_score < 30 AND domain_rank > 20. */
+  highQualityDomains: number
+  /** Referring domains with spam_score >= 50. */
+  lowQualityDomains: number
+  /** Referring domains first seen in the last 12 months. */
+  newLinksLast12Months: number
+  /** Subset of newLinksLast12Months with spam_score >= 50. */
+  newLinksLast12MonthsLowQuality: number
+  /** Top 5 worst (high-spam) referring domains for the report. */
+  sampleLowQualityLinks: BacklinkProfileDomain[]
+  /** Up to 100 referring domains by domain_rank desc, with spam scores joined. */
+  topReferringDomains: BacklinkProfileDomain[]
+}
+
 // ── GSC / GA4 slices the audit passes to Claude ───────────────────────────
 
 /**
@@ -798,6 +848,30 @@ export interface AuditBacklinkRisk {
   highSpamCount: number
   /** Exact domains to cite in the PDF. */
   spamExamples: string[]
+}
+
+/**
+ * Backlink Profile section. Populated when overall low-quality share
+ * (>30% of referring domains) OR new-link low-quality share (>40% of
+ * links acquired in the last 12 months) trips the threshold. The
+ * `tier1` flag fires when new-link low-quality share exceeds 60% — Claude
+ * must surface it in the executive summary as well.
+ */
+export interface AuditBacklinkProfileSection {
+  totalBacklinks: number
+  totalReferringDomains: number
+  /** 0–1 fraction. */
+  dofollowRatio: number
+  anchorDiversity: number
+  highQualityDomains: number
+  lowQualityDomains: number
+  newLinksLast12Months: number
+  newLinksLast12MonthsLowQuality: number
+  /** Domain strings to cite verbatim in the PDF. */
+  sampleLowQualityLinks: string[]
+  /** True when new-link low-quality share > 60% — Tier 1 finding required. */
+  tier1: boolean
+  narrative: string
 }
 
 /**
@@ -1119,6 +1193,12 @@ export interface AuditSynthesis {
   topPagesToRecover?: { page: string; reasoning: string }[]
   technicalFindings: AuditTechnicalFinding[]
   backlinkRisk: AuditBacklinkRisk
+  /**
+   * Backlink Profile section. Populated only when low_quality% > 30% of
+   * referring domains OR new-link low-quality share > 40%. Otherwise null /
+   * absent — Claude is instructed to omit the field rather than fabricate.
+   */
+  backlinkProfile?: AuditBacklinkProfileSection | null
   roadmap: AuditRoadmapItem[]
   /** Section 3a–3h — only populated when GSC data is available. */
   positionDistribution?: AuditPositionDistribution

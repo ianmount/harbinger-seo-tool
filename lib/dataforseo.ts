@@ -3,6 +3,8 @@ import { z } from "zod"
 import { recordDataForSEOCost } from "@/lib/audit-cost"
 import { requireEnv } from "@/lib/env"
 import type {
+  BacklinkProfile,
+  BacklinkProfileDomain,
   BacklinkReport,
   CompetitionLevel,
   DfsLabsLocation,
@@ -953,5 +955,179 @@ export async function referringDomainsWithSpamScore(
     highSpamCount,
     highSpamExamples,
     topAuthorityExamples,
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Backlink profile pull. Three-call orchestration that captures link
+// quality + recency signals separate from the existing
+// `referringDomainsWithSpamScore` pass (which orders by spam score desc and
+// drives the backlink-risk PDF page). The profile is keyed on domain_rank
+// desc and joins per-domain spam scores from the bulk endpoint so the audit
+// can compute high-quality / low-quality counts and recent-link velocity.
+
+const profileSummaryItemSchema = z
+  .object({
+    target: z.string().optional(),
+    backlinks: z.number().nullable().optional(),
+    referring_domains: z.number().nullable().optional(),
+    referring_main_domains: z.number().nullable().optional(),
+    backlinks_dofollow: z.number().nullable().optional(),
+    /** Distinct anchor count — DataForSEO surfaces this as `anchor`. */
+    anchor: z.number().nullable().optional(),
+  })
+  .passthrough()
+
+const profileReferringDomainItemSchema = z
+  .object({
+    domain: z.string(),
+    rank: z.number().nullable().optional(),
+    backlinks: z.number().nullable().optional(),
+    first_seen: z.string().nullable().optional(),
+    lost_date: z.string().nullable().optional(),
+  })
+  .passthrough()
+
+const bulkSpamScoreItemSchema = z
+  .object({
+    target: z.string(),
+    spam_score: z.number().nullable().optional(),
+  })
+  .passthrough()
+
+/**
+ * Fetch the full backlink profile for a domain via three DataForSEO calls:
+ *   1. /v3/backlinks/summary/live          — totals + dofollow ratio + anchors
+ *   2. /v3/backlinks/referring_domains/live — top 100 by domain_rank desc
+ *   3. /v3/backlinks/bulk_spam_score/live   — spam score per referring domain
+ *
+ * Steps 1 + 2 run in parallel; step 3 runs after step 2 because it needs the
+ * domain list. Computes the derived counts (high-quality / low-quality /
+ * new-link velocity) the audit synthesis uses to decide whether to surface a
+ * Backlink Profile section.
+ */
+export async function backlinkProfile(domain: string): Promise<BacklinkProfile> {
+  const target = stripDomain(domain)
+
+  const [summaryEnvelope, domainsEnvelope] = await Promise.all([
+    dfsRequest("/v3/backlinks/summary/live", [
+      {
+        target,
+        internal_list_limit: 10,
+        backlinks_status_type: "live",
+        include_subdomains: true,
+      },
+    ]),
+    dfsRequest("/v3/backlinks/referring_domains/live", [
+      {
+        target,
+        limit: 100,
+        backlinks_status_type: "live",
+        order_by: ["rank,desc"],
+      },
+    ]),
+  ])
+
+  const summaryRaw = summaryEnvelope.tasks[0]?.result?.[0]
+  const summaryParsed = profileSummaryItemSchema.safeParse(summaryRaw ?? {})
+  const summary = summaryParsed.success ? summaryParsed.data : {}
+
+  const totalBacklinks = summary.backlinks ?? 0
+  const totalReferringDomains =
+    summary.referring_main_domains ?? summary.referring_domains ?? 0
+  const dofollowRatio =
+    totalBacklinks > 0 ? (summary.backlinks_dofollow ?? 0) / totalBacklinks : 0
+  const anchorDiversity = summary.anchor ?? 0
+
+  const domainsResult = domainsEnvelope.tasks[0]?.result?.[0] as
+    | { items?: unknown[] }
+    | undefined
+  const rawDomainItems = domainsResult?.items ?? []
+
+  const referring: {
+    domain: string
+    rank: number
+    backlinks: number
+    firstSeen?: string
+    lost: boolean
+  }[] = []
+  for (const raw of rawDomainItems) {
+    const parsed = profileReferringDomainItemSchema.safeParse(raw)
+    if (!parsed.success) continue
+    referring.push({
+      domain: parsed.data.domain,
+      rank: parsed.data.rank ?? 0,
+      backlinks: parsed.data.backlinks ?? 0,
+      firstSeen: parsed.data.first_seen ?? undefined,
+      lost: Boolean(parsed.data.lost_date),
+    })
+  }
+
+  // Step 3: bulk_spam_score for the referring domains. The endpoint accepts
+  // up to 1000 targets per call; with limit=100 above we are well under it.
+  const spamMap = new Map<string, number>()
+  if (referring.length > 0) {
+    const spamEnvelope = await dfsRequest("/v3/backlinks/bulk_spam_score/live", [
+      { targets: referring.map((d) => d.domain) },
+    ])
+    const spamResult = spamEnvelope.tasks[0]?.result?.[0] as
+      | { items?: unknown[] }
+      | undefined
+    const spamItems = spamResult?.items ?? []
+    for (const raw of spamItems) {
+      const parsed = bulkSpamScoreItemSchema.safeParse(raw)
+      if (!parsed.success) continue
+      spamMap.set(parsed.data.target, parsed.data.spam_score ?? 0)
+    }
+  }
+
+  const enriched: BacklinkProfileDomain[] = referring.map((d) => ({
+    domain: d.domain,
+    domainRank: d.rank,
+    backlinks: d.backlinks,
+    firstSeen: d.firstSeen,
+    lost: d.lost,
+    spamScore: spamMap.get(d.domain) ?? 0,
+  }))
+
+  // 12-month cutoff for new-link velocity. DataForSEO returns first_seen as
+  // an ISO-ish string; Date parsing tolerates both "YYYY-MM-DD" and the full
+  // ISO timestamp form. Skip rows where parsing fails.
+  const cutoff = new Date()
+  cutoff.setUTCFullYear(cutoff.getUTCFullYear() - 1)
+
+  let highQualityDomains = 0
+  let lowQualityDomains = 0
+  let newLinksLast12Months = 0
+  let newLinksLast12MonthsLowQuality = 0
+  for (const d of enriched) {
+    if (d.spamScore < 30 && d.domainRank > 20) highQualityDomains++
+    if (d.spamScore >= 50) lowQualityDomains++
+    if (d.firstSeen) {
+      const fs = new Date(d.firstSeen)
+      if (!Number.isNaN(fs.getTime()) && fs >= cutoff) {
+        newLinksLast12Months++
+        if (d.spamScore >= 50) newLinksLast12MonthsLowQuality++
+      }
+    }
+  }
+
+  const sampleLowQualityLinks = [...enriched]
+    .filter((d) => d.spamScore >= 50)
+    .sort((a, b) => b.spamScore - a.spamScore)
+    .slice(0, 5)
+
+  return {
+    domain: target,
+    totalBacklinks,
+    totalReferringDomains,
+    dofollowRatio,
+    anchorDiversity,
+    highQualityDomains,
+    lowQualityDomains,
+    newLinksLast12Months,
+    newLinksLast12MonthsLowQuality,
+    sampleLowQualityLinks,
+    topReferringDomains: enriched,
   }
 }

@@ -11,7 +11,10 @@ import { renderAuditPdf } from "@/lib/audit-pdf"
 import { buildGscAnalyses } from "@/lib/audit-analyses"
 import { getPartner } from "@/lib/airtable"
 import { crawlSite } from "@/lib/crawler"
-import { referringDomainsWithSpamScore } from "@/lib/dataforseo"
+import {
+  backlinkProfile,
+  referringDomainsWithSpamScore,
+} from "@/lib/dataforseo"
 import {
   getChannelBreakdown,
   getMonthlyOrganic,
@@ -34,6 +37,7 @@ import type {
   AuditGscSlice,
   AuditGscWindow,
   AuditSynthesis,
+  BacklinkProfile,
   CompetitiveReport,
   PageSpeedReport,
   Partner,
@@ -470,6 +474,16 @@ async function runPipeline(params: {
 
   const backlinksPromise = referringDomainsWithSpamScore(prospect.domain)
 
+  // Backlink profile (3-call DataForSEO pull: summary + referring_domains +
+  // bulk_spam_score). Non-fatal: if it fails the audit continues with the
+  // existing referringDomainsWithSpamScore data only.
+  const backlinkProfilePromise: Promise<BacklinkProfile | null> = backlinkProfile(
+    prospect.domain,
+  ).catch((err) => {
+    console.warn("[api/audit/pdf] backlinkProfile failed:", err)
+    return null
+  })
+
   const gscSiteUrl = resolvedGscSiteUrl ?? prospect.gscSiteUrl ?? null
   const gscPromise: Promise<AuditGscSlice | null> = gscSiteUrl
     ? buildGscSlice(gscSiteUrl)
@@ -480,13 +494,15 @@ async function runPipeline(params: {
     ? buildGa4Slice(ga4PropertyId)
     : Promise.resolve(null)
 
-  const [crawl, competitive, backlinks, gsc, ga4] = await Promise.all([
-    crawlPromise,
-    competitivePromise,
-    backlinksPromise,
-    gscPromise,
-    ga4Promise,
-  ])
+  const [crawl, competitive, backlinks, backlinkProfileData, gsc, ga4] =
+    await Promise.all([
+      crawlPromise,
+      competitivePromise,
+      backlinksPromise,
+      backlinkProfilePromise,
+      gscPromise,
+      ga4Promise,
+    ])
 
   // PageSpeed runs after GSC because the URL set is "top GSC pages by
   // impressions + homepage". We don't parallelize it with the GSC fetch to
@@ -502,7 +518,7 @@ async function runPipeline(params: {
   })
 
   console.log(
-    `[api/audit/pdf] data: crawl=${crawl.crawledCount}pp competitive=${competitive.rows.length}rows backlinks=${backlinks.referringDomains}rd gsc=${gsc ? "yes" : "no"} ga4=${ga4 ? "yes" : "no"} pagespeed=${pageSpeed.skippedReason ? "skipped" : `${pageSpeed.pages.length}p`}`,
+    `[api/audit/pdf] data: crawl=${crawl.crawledCount}pp competitive=${competitive.rows.length}rows backlinks=${backlinks.referringDomains}rd profile=${backlinkProfileData ? `${backlinkProfileData.totalReferringDomains}rd/${backlinkProfileData.lowQualityDomains}lo/${backlinkProfileData.newLinksLast12Months}new` : "none"} gsc=${gsc ? "yes" : "no"} ga4=${ga4 ? "yes" : "no"} pagespeed=${pageSpeed.skippedReason ? "skipped" : `${pageSpeed.pages.length}p`}`,
   )
 
   // Detect short GSC history so the prompt + report can scale down trend
@@ -528,6 +544,7 @@ async function runPipeline(params: {
       crawl,
       competitive,
       backlinks,
+      backlinkProfile: backlinkProfileData,
       gsc,
       ga4,
       pageSpeed,
