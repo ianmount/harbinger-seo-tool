@@ -35,6 +35,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { useChatPageContext } from "@/lib/chat-context"
 import { useSelectedPartner } from "@/lib/use-selected-partner"
 import { cn } from "@/lib/utils"
 import type {
@@ -194,6 +195,36 @@ export default function BacklinksPage() {
 
   const running =
     phase.status === "fetching-backlinks" || phase.status === "categorizing"
+
+  useChatPageContext("backlinks", {
+    tab: "Backlinks",
+    summary: [
+      partner ? `Partner: ${partner.name}.` : "No partner selected.",
+      competitors.length > 0
+        ? `Competitor seeds: ${competitors.join(", ")}.`
+        : "No competitor domains entered yet.",
+      prospects.length > 0
+        ? `${prospects.length} categorized prospects loaded.`
+        : "No prospects categorized yet.",
+      `Phase: ${phase.status}.`,
+    ].join(" "),
+    data: {
+      competitors,
+      phase: phase.status,
+      prospectCount: prospects.length,
+      prospects:
+        prospects.length > 0
+          ? prospects.slice(0, 25).map((p) => ({
+              domain: p.domain,
+              category: p.category,
+              outreachPriority: p.outreachPriority,
+              angle: p.angle,
+              reasoning: p.reasoning,
+            }))
+          : null,
+      filters: { priority: priorityFilter, category: categoryFilter },
+    },
+  })
 
   const handleRun = useCallback(async () => {
     if (!partner) return

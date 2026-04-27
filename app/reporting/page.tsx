@@ -17,6 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { useChatPageContext } from "@/lib/chat-context"
 import { useSelectedPartner } from "@/lib/use-selected-partner"
 import { findGscSiteCandidates } from "@/lib/gsc-site-match"
 import { findGa4PropertyCandidates } from "@/lib/ga4-site-match"
@@ -351,6 +352,45 @@ export default function ReportingPage() {
       phase.status !== "generating",
     [partner, range, chosenSiteUrl, phase.status],
   )
+
+  useChatPageContext("reporting", {
+    tab: "Reporting",
+    summary: [
+      partner ? `Partner: ${partner.name}.` : "No partner selected.",
+      range?.from && range?.to
+        ? `Date range: ${iso(range.from)} to ${iso(range.to)}.`
+        : "Date range not set.",
+      chosenSiteUrl
+        ? `GSC site: ${chosenSiteUrl}.`
+        : "GSC site not chosen.",
+      chosenGa4PropertyId
+        ? `GA4 property: ${chosenGa4PropertyId}.`
+        : "GA4 not configured.",
+      phase.status === "done"
+        ? `Report generated for ${phase.partnerName} (GA4 ${phase.ga4Included ? "included" : "not included"}).`
+        : `Phase: ${phase.status}.`,
+    ].join(" "),
+    data: {
+      dateRange:
+        range?.from && range?.to
+          ? { from: iso(range.from), to: iso(range.to) }
+          : null,
+      gscSiteUrl: chosenSiteUrl,
+      ga4PropertyId: chosenGa4PropertyId,
+      phase: phase.status,
+      generated:
+        phase.status === "done"
+          ? {
+              partnerName: phase.partnerName,
+              ga4Included: phase.ga4Included,
+              reportMarkdown:
+                phase.report.length > 8000
+                  ? phase.report.slice(0, 8000) + "\n…[truncated]"
+                  : phase.report,
+            }
+          : null,
+    },
+  })
 
   const handleGenerate = useCallback(async () => {
     if (!partner || !range?.from || !range?.to || !chosenSiteUrl) return

@@ -30,6 +30,7 @@ import {
   TabsList,
   TabsTrigger,
 } from "@/components/ui/tabs"
+import { useChatPageContext } from "@/lib/chat-context"
 import { useSelectedPartner } from "@/lib/use-selected-partner"
 import { findSuggestedDfsLocation } from "@/lib/locations"
 import { cn } from "@/lib/utils"
@@ -356,6 +357,60 @@ export default function KeywordResearchPage() {
   )
 
   const running = phase.status === "running"
+
+  useChatPageContext("keyword-research", {
+    tab: "Keyword Research",
+    summary: [
+      `Mode: ${mode}.`,
+      mode === "partner"
+        ? partner
+          ? `Partner: ${partner.name} (${partner.website}).`
+          : "No partner selected."
+        : prospectForm.domain
+          ? `Prospect domain: ${prospectForm.domain}.`
+          : "No prospect domain entered.",
+      effectiveSeeds.length > 0
+        ? `${effectiveSeeds.length} seed keywords.`
+        : "No seed keywords.",
+      selectedLocations.length > 0
+        ? `${selectedLocations.length} location(s) selected.`
+        : "No locations selected.",
+      phase.status === "done"
+        ? `Run complete: ${phase.results.length} location result set(s) for ${phase.domain}.`
+        : phase.status === "running"
+          ? `Running: ${phase.stage}.`
+          : `Phase: ${phase.status}.`,
+    ].join(" "),
+    data: {
+      mode,
+      seedCount: effectiveSeeds.length,
+      seeds: effectiveSeeds.slice(0, 50),
+      locations: selectedLocations.map((l) => ({
+        code: l.location_code,
+        name: l.location_name,
+      })),
+      phase: phase.status,
+      results:
+        phase.status === "done"
+          ? phase.results.map((r) => ({
+              location: r.location.location_name,
+              keywordCount: r.rows.length,
+              clusterCount: r.clusters.length,
+              truncated: r.truncated,
+              rankProbeFailed: r.rankProbeFailed,
+              topKeywords: r.rows.slice(0, 15).map((k) => ({
+                keyword: k.keyword,
+                cluster: k.cluster,
+                volume: k.search_volume,
+                difficulty: k.keyword_difficulty,
+                intent: k.intent,
+                recommendation: k.recommendation,
+                fitScore: k.fitScore,
+              })),
+            }))
+          : null,
+    },
+  })
 
   /**
    * Resolve the run subject — either the selected Partner or the typed
