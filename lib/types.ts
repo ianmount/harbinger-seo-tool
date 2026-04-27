@@ -986,7 +986,37 @@ export interface AssessmentAuditResult {
   gscData: AssessmentGscData | null
   ga4Data: AssessmentGa4Data | null
   crawlSummary: AuditCrawlSummary | null
+  cannibalization: CannibalizationCluster[]
   durationSeconds: number
+}
+
+/**
+ * Keyword cannibalization cluster — a set of 2+ pages on the prospect's site
+ * that compete with each other for the same keyword/location combination.
+ *
+ * `sharedSignal` records WHY the cluster was flagged so Claude can pick the
+ * right remediation (consolidate vs. differentiate). `topQuery` is populated
+ * only for `serp_overlap` clusters.
+ */
+export type CannibalizationSignal =
+  | "identical_title"
+  | "title_similarity"
+  | "url_pattern"
+  | "serp_overlap"
+
+export type CannibalizationRecommendation =
+  | "consolidate_to_stronger"
+  | "differentiate_intent"
+
+export interface CannibalizationCluster {
+  /** 2+ absolute URLs of competing pages. */
+  cluster: string[]
+  sharedSignal: CannibalizationSignal
+  /** Populated for serp_overlap. */
+  topQuery?: string
+  /** Populated for identical_title / title_similarity. */
+  sharedTitle?: string
+  recommendationHint: CannibalizationRecommendation
 }
 
 export interface AuditSynthesis {
