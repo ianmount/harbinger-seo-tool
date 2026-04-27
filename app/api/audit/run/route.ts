@@ -5,9 +5,18 @@ import {
   renderOrganicSessionsBlock,
   renderOrganicSessionsSparklineSvg,
 } from "@/lib/audit-chart"
+import {
+  detectBrokenInternalLinks,
+  type BrokenInternalLinks,
+} from "@/lib/audit-broken-links"
+import {
+  detectUrlStructureIssues,
+  type UrlStructureIssues,
+} from "@/lib/audit-url-structure"
 import { detectCannibalization } from "@/lib/cannibalization"
 import { callClaude, ClaudeApiError } from "@/lib/claude"
 import { crawlSite } from "@/lib/crawler"
+import { backlinkProfile } from "@/lib/dataforseo"
 import { GA4Error, getMonthlyOrganic, getSeoReport } from "@/lib/ga4"
 import { findGa4PropertyCandidates } from "@/lib/ga4-site-match"
 import { listProperties } from "@/lib/ga4"
@@ -38,24 +47,11 @@ import type {
 } from "@/lib/types"
 
 /**
- * Placeholder shapes for inputs that are computed in upcoming pipeline steps
- * (URL structure audit, broken-link audit, per-location competitor pull). The
- * synthesis prompt accepts them as optional today so the system prompt and
- * Markdown output structure are ready when those steps land. When undefined
- * the corresponding section is omitted from both the prompt and the output.
+ * Per-location competitor snippets are still on the roadmap (Step 7) — the
+ * synthesis prompt accepts them as optional. URL structure and broken-
+ * internal-link detection are computed inline by `detectUrlStructureIssues`
+ * and `detectBrokenInternalLinks` from the existing crawl output.
  */
-export interface UrlStructureIssues {
-  mixedProtocol: { canonical: "https" | "http"; offendingUrls: string[] }
-  mixedWww: { canonical: "www" | "apex"; offendingUrls: string[] }
-  mixedTrailingSlash: { canonical: "with" | "without"; offendingUrls: string[] }
-  deeplyNested: { url: string; depth: number }[]
-}
-
-export interface BrokenInternalLinks {
-  totalBrokenLinks: number
-  examples: { sourceUrl: string; brokenUrl: string; status: number }[]
-}
-
 export interface LocationCompetitorSnippet {
   city: string
   state: string
@@ -509,48 +505,48 @@ function buildBacklinkProfileSection(p: BacklinkProfile): string[] {
 
 function buildUrlStructureSection(u: UrlStructureIssues): string[] {
   const lines: string[] = []
-  const total =
-    u.mixedProtocol.offendingUrls.length +
-    u.mixedWww.offendingUrls.length +
-    u.mixedTrailingSlash.offendingUrls.length +
-    u.deeplyNested.length
-  if (total === 0) return lines
+  if (u.parallelStructures.length === 0 && u.childCollisions.length === 0) {
+    return lines
+  }
   lines.push(`# URL structure issues`)
   lines.push(
-    `URL Structure section required: YES — at least one URL-structure conflict was detected.`,
+    `URL Structure section required: YES — parallel-structure conflict(s) detected.`,
   )
-  if (u.mixedProtocol.offendingUrls.length > 0) {
+  if (u.parallelStructures.length > 0) {
     lines.push("")
-    lines.push(
-      `## Mixed protocol — canonical=${u.mixedProtocol.canonical}, ${u.mixedProtocol.offendingUrls.length} offending URLs`,
-    )
-    for (const url of u.mixedProtocol.offendingUrls.slice(0, 10)) {
-      lines.push(`  - ${truncate(url, 140)}`)
+    lines.push(`## Parallel structures (semantically equivalent top-level segments coexisting)`)
+    for (const ps of u.parallelStructures) {
+      const pairLabel = ps.segments.map((s) => `/${s}/`).join(" + ")
+      const childCounts = ps.segments
+        .map((s) => `${ps.childCountPerSegment[s] ?? 0} under /${s}/`)
+        .join(", ")
+      lines.push(
+        `  - cluster=${ps.cluster}: ${pairLabel} — ${childCounts}`,
+      )
+      if (ps.sampleOverlappingSlugs.length > 0) {
+        lines.push(
+          `      overlapping slugs (cite VERBATIM): ${ps.sampleOverlappingSlugs.slice(0, 8).join(", ")}`,
+        )
+      }
     }
   }
-  if (u.mixedWww.offendingUrls.length > 0) {
+  if (u.childCollisions.length > 0) {
     lines.push("")
     lines.push(
-      `## Mixed www/apex — canonical=${u.mixedWww.canonical}, ${u.mixedWww.offendingUrls.length} offending URLs`,
+      `## Child URL collisions (same trailing slug under multiple parallel parents — high-confidence duplicates)`,
     )
-    for (const url of u.mixedWww.offendingUrls.slice(0, 10)) {
-      lines.push(`  - ${truncate(url, 140)}`)
-    }
-  }
-  if (u.mixedTrailingSlash.offendingUrls.length > 0) {
-    lines.push("")
-    lines.push(
-      `## Mixed trailing slash — canonical=${u.mixedTrailingSlash.canonical}, ${u.mixedTrailingSlash.offendingUrls.length} offending URLs`,
-    )
-    for (const url of u.mixedTrailingSlash.offendingUrls.slice(0, 10)) {
-      lines.push(`  - ${truncate(url, 140)}`)
-    }
-  }
-  if (u.deeplyNested.length > 0) {
-    lines.push("")
-    lines.push(`## Deeply nested URLs (depth > 4)`)
-    for (const row of u.deeplyNested.slice(0, 10)) {
-      lines.push(`  - depth ${row.depth} ${truncate(row.url, 140)}`)
+    for (const c of u.childCollisions.slice(0, 15)) {
+      const pct = Math.round(c.similarityScore * 100)
+      lines.push(
+        `  - slug "${c.slug}" — ${c.paths.length} paths, title+H1 token similarity ${pct}%`,
+      )
+      for (const p of c.paths) {
+        const title = c.titles[p]
+        const h1 = c.h1s[p]
+        lines.push(
+          `      ${truncate(p, 120)}${title ? ` — title="${truncate(title, 70)}"` : " — title=(missing)"}${h1 ? ` h1="${truncate(h1, 70)}"` : ""}`,
+        )
+      }
     }
   }
   lines.push("")
@@ -561,13 +557,27 @@ function buildBrokenInternalLinksSection(b: BrokenInternalLinks): string[] {
   const lines: string[] = []
   if (b.totalBrokenLinks === 0) return lines
   lines.push(`# Broken internal links`)
-  lines.push(`Total broken internal links: ${b.totalBrokenLinks}`)
-  lines.push(``)
-  lines.push(`## Examples (source → broken target, status)`)
-  for (const ex of b.examples.slice(0, 20)) {
+  lines.push(
+    `Total broken internal-link targets: ${b.totalBrokenLinks} (cross-referenced internalLinksOut against nonOkPages)`,
+  )
+  const typoCount = b.brokenTargets.filter((t) => t.likelyTypoOf).length
+  if (typoCount > 0) {
     lines.push(
-      `  - ${ex.status} ${truncate(ex.sourceUrl, 90)} → ${truncate(ex.brokenUrl, 90)}`,
+      `Likely-typo targets: ${typoCount} (Levenshtein ≤ 2 against an OK sibling). Cite the suggested correction in the recommendation.`,
     )
+  }
+  lines.push("")
+  lines.push(`## Broken targets (sorted by source-page count)`)
+  for (const t of b.brokenTargets.slice(0, 25)) {
+    const typo = t.likelyTypoOf
+      ? ` — likely typo of ${truncate(t.likelyTypoOf, 100)}`
+      : ""
+    lines.push(
+      `  - ${t.statusCode} ${truncate(t.brokenUrl, 110)} (linked from ${t.sourceCount} page${t.sourceCount === 1 ? "" : "s"})${typo}`,
+    )
+    for (const src of t.sourcePages.slice(0, 3)) {
+      lines.push(`      linked from: ${truncate(src, 120)}`)
+    }
   }
   lines.push("")
   return lines
@@ -1093,19 +1103,29 @@ export async function POST(request: Request) {
   let gscQueryPages: GSCQueryRow[] = []
   let ga4: AssessmentGa4Data | null = null
   let crawl: CrawlReport
+  let backlinkProfileData: BacklinkProfile | null = null
   try {
-    const [gscRes, ga4Res, crawlRes] = await Promise.all([
+    const [gscRes, ga4Res, crawlRes, backlinkProfileRes] = await Promise.all([
       tryFetchGsc(websiteUrl, warnings),
       tryFetchGa4(websiteUrl, warnings),
       crawlSite({
         domain: websiteUrl,
         options: { mode: body.crawlMode },
       }),
+      // Non-fatal: surface as a warning if it fails but keep the audit going.
+      // The synthesis prompt's Backlink Profile section is gated on the
+      // returned shares, so a null here just suppresses the section.
+      backlinkProfile(websiteUrl).catch((err) => {
+        const msg = err instanceof Error ? err.message : "Unknown error"
+        warnings.push(`Backlink profile fetch failed; the audit will continue without it. (${msg})`)
+        return null
+      }),
     ])
     gsc = gscRes?.data ?? null
     gscQueryPages = gscRes?.queryPages ?? []
     ga4 = ga4Res
     crawl = crawlRes
+    backlinkProfileData = backlinkProfileRes
     if (gsc) {
       await tryFetchIndexCoverage(gsc, crawl.sitemapUrls, warnings)
     }
@@ -1127,6 +1147,17 @@ export async function POST(request: Request) {
     `[audit:cannibalization] domain=${websiteUrl} clusters=${cannibalization.length} pages=${crawl.pages.length} gsc_query_pages=${gscQueryPages.length}`,
   )
 
+  // URL structure + broken-internal-link analyses are pure functions over
+  // the existing crawl output — no extra network calls.
+  const urlStructureIssues = detectUrlStructureIssues(crawl)
+  const brokenInternalLinks = detectBrokenInternalLinks(crawl)
+  console.log(
+    `[audit:url-structure] domain=${websiteUrl} parallel=${urlStructureIssues.parallelStructures.length} collisions=${urlStructureIssues.childCollisions.length}`,
+  )
+  console.log(
+    `[audit:broken-links] domain=${websiteUrl} broken_targets=${brokenInternalLinks.totalBrokenLinks} typos=${brokenInternalLinks.brokenTargets.filter((t) => t.likelyTypoOf).length}`,
+  )
+
   // PageSpeed runs after GSC because the URL set is "top GSC pages by
   // impressions + homepage". When GSC didn't connect we still audit the
   // homepage. Failures are non-fatal — `runPageSpeedAudit` returns a
@@ -1146,7 +1177,17 @@ export async function POST(request: Request) {
 
   let auditMarkdown: string
   try {
-    const prompt = buildPrompt({ body, gsc, ga4, crawl, cannibalization, pageSpeed })
+    const prompt = buildPrompt({
+      body,
+      gsc,
+      ga4,
+      crawl,
+      cannibalization,
+      pageSpeed,
+      backlinkProfile: backlinkProfileData,
+      urlStructureIssues,
+      brokenInternalLinks,
+    })
     auditMarkdown = await callClaude(prompt, {
       model: "claude-opus-4-7",
       system: SYSTEM_PROMPT,
