@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
+import { useChatPageContext } from "@/lib/chat-context"
 import { useSelectedPartner } from "@/lib/use-selected-partner"
 import type { Partner } from "@/lib/types"
 
@@ -324,6 +325,36 @@ export default function StrategyPage() {
     !!partner &&
     parsed.status === "ok" &&
     phase.status !== "generating"
+
+  useChatPageContext("strategy", {
+    tab: "Strategy",
+    summary: [
+      partner ? `Partner: ${partner.name}.` : "No partner selected.",
+      parsed.status === "ok"
+        ? `${parsed.keywords.length} keywords parsed across ${parsed.clusters} clusters (${parsed.format}).`
+        : "No keyword input parsed yet.",
+      phase.status === "done"
+        ? `Strategy generated for ${phase.partnerName}.`
+        : phase.status === "generating"
+          ? "Strategy generation in progress."
+          : "Strategy not yet generated.",
+    ].join(" "),
+    data: {
+      keywordInputStatus: parsed.status,
+      keywordCount: parsed.status === "ok" ? parsed.keywords.length : 0,
+      clusterCount: parsed.status === "ok" ? parsed.clusters : 0,
+      generated:
+        phase.status === "done"
+          ? {
+              partnerName: phase.partnerName,
+              strategyMarkdown:
+                phase.strategy.length > 8000
+                  ? phase.strategy.slice(0, 8000) + "\n…[truncated]"
+                  : phase.strategy,
+            }
+          : null,
+    },
+  })
 
   const handleFileUpload = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {

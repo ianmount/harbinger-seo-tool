@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { useAssessment } from "@/lib/assessment-context"
+import { useChatPageContext } from "@/lib/chat-context"
 import { parseTargetLocationLines } from "@/lib/locations"
 import type { AssessmentAuditResult } from "@/lib/types"
 
@@ -53,6 +54,30 @@ export default function AuditPage() {
     () => parseTargetLocationLines(state.targetLocations),
     [state.targetLocations],
   )
+
+  // Audit form/result state already flows into the chat via the
+  // AssessmentContext auto-pull in AppShell. This hook adds the
+  // page-local UI stage so the chat can answer "why is this taking so
+  // long" mid-run.
+  useChatPageContext("audit", {
+    tab: "Audit",
+    summary: [
+      `Run stage: ${stage}.`,
+      validationError ? `Validation issue: ${validationError}.` : "",
+      errorMessage ? `Last error: ${errorMessage}.` : "",
+      targetLocationsParsed.length > 0
+        ? `${targetLocationsParsed.length} target location(s) parsed.`
+        : "",
+    ]
+      .filter(Boolean)
+      .join(" "),
+    data: {
+      stage,
+      hasValidationError: !!validationError,
+      lastErrorMessage: errorMessage,
+      parsedLocationCount: targetLocationsParsed.length,
+    },
+  })
 
   const validate = useCallback((): string | null => {
     if (!state.websiteUrl.trim()) return "Website URL is required."

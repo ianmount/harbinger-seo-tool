@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { useAssessment } from "@/lib/assessment-context"
+import { useChatPageContext } from "@/lib/chat-context"
 import { parseTargetLocationLines } from "@/lib/locations"
 import type {
   CompAnalysisDomainRow,
@@ -167,6 +168,40 @@ export default function CompAnalysisPage() {
     cityCount > 0 &&
     everyLocationHasCompetitor &&
     seedCount > 0
+
+  // Comp Analysis form/result state already flows into the chat via the
+  // AssessmentContext auto-pull in AppShell. This hook adds the
+  // page-local UI state (loading, current per-location competitor edits,
+  // CSV/manual seed source) so the chat can answer "why can't I run yet"
+  // and "what competitors did I list for Sarasota".
+  useChatPageContext("comp-analysis", {
+    tab: "Comp Analysis",
+    summary: [
+      `Partner URL: ${partnerUrl || "(empty)"}.`,
+      `${cityCount} location(s) selected, ${seedCount} seed keyword(s).`,
+      everyLocationHasCompetitor
+        ? "All locations have competitors."
+        : "At least one location is missing competitors.",
+      running ? "Run in progress." : canRun ? "Ready to run." : "Run blocked.",
+      errorMessage ? `Last error: ${errorMessage}.` : "",
+    ]
+      .filter(Boolean)
+      .join(" "),
+    data: {
+      partnerUrl,
+      seedSource: csvKeywords.length > 0 ? "csv" : "manual",
+      seedCount,
+      seedSampleKeywords: seedKeywords.slice(0, 30),
+      locations: state.compDfsLocations.map((loc) => ({
+        code: loc.location_code,
+        name: loc.location_name,
+        competitors: competitorsByCode.get(loc.location_code) ?? [],
+      })),
+      running,
+      canRun,
+      estimatedCostUsd: estimatedCost,
+    },
+  })
 
   const handleFile = useCallback(async (file: File) => {
     try {
