@@ -901,6 +901,94 @@ export interface AuditLocalPerformance {
   narrative: string
 }
 
+// ── PageSpeed Insights ─────────────────────────────────────────────────────
+//
+// PageSpeed Insights API output, normalized to the subset we actually use in
+// the audit. Mobile is the primary signal because that's what Google ranks
+// on; desktop is captured for completeness but findings are mobile-first.
+//
+// `inpMs` and other CrUX-derived metrics may be null when the page has too
+// little real-user data for Google to publish a percentile. Lab metrics
+// (LCP/CLS/TTFB from Lighthouse) are usually present even on cold sites.
+
+export interface PageSpeedOpportunity {
+  /** Lighthouse audit id, e.g. "render-blocking-resources". */
+  id: string
+  /** Human-readable title from the Lighthouse audit. */
+  title: string
+  /** Estimated savings in milliseconds, when the audit reports them. */
+  estimatedSavingsMs?: number
+}
+
+export interface PageSpeedMetrics {
+  /** 0–100, rounded. Null when Lighthouse failed for this strategy. */
+  performanceScore: number | null
+  /** Largest Contentful Paint in milliseconds. Null when unavailable. */
+  lcpMs: number | null
+  /** Interaction to Next Paint in milliseconds (CrUX field data). */
+  inpMs: number | null
+  /** Cumulative Layout Shift (unitless). */
+  cls: number | null
+  /** Time to First Byte in milliseconds. */
+  ttfbMs: number | null
+  /** Top-3 Lighthouse opportunities sorted by estimated savings desc. */
+  opportunities: PageSpeedOpportunity[]
+}
+
+export interface PageSpeedUrlResult {
+  url: string
+  /** Mobile metrics — the primary signal because Google ranks on mobile. */
+  mobile: PageSpeedMetrics | null
+  /** Desktop metrics — secondary, for context only. */
+  desktop: PageSpeedMetrics | null
+  /** Populated when both strategies failed for this URL. */
+  error?: string
+}
+
+export interface PageSpeedReport {
+  /** Whether the homepage was included in the audited set. */
+  homepageIncluded: boolean
+  /** Homepage URL audited (canonical form, with trailing slash). */
+  homepageUrl: string
+  /** Per-URL results in the order they were submitted. */
+  pages: PageSpeedUrlResult[]
+  /** Aggregates computed off mobile metrics — see CLAUDE.md notes. */
+  aggregates: {
+    /** Average mobile performance score across pages with a score. */
+    averageMobileScore: number | null
+    /** Mobile score for the homepage, when audited. */
+    homepageMobileScore: number | null
+    /** Mobile score < 50. */
+    lowScorePages: { url: string; score: number }[]
+    /** Mobile LCP > 2500 ms. */
+    poorLcpPages: { url: string; lcpMs: number }[]
+    /** Mobile CLS > 0.1. */
+    poorClsPages: { url: string; cls: number }[]
+  }
+  /**
+   * Number of URLs we tried but skipped (not present in this report) for
+   * any reason. Surfaced for transparency only — non-fatal.
+   */
+  skippedCount: number
+  /** When the API key was missing and the whole pass was skipped. */
+  skippedReason?: string
+}
+
+/**
+ * Performance section emitted by Claude synthesis when at least one audited
+ * page has a mobile performance score below 70. Mirrors the shape of other
+ * synthesis sub-sections (positionDistribution, etc.) — narrative is
+ * Claude's read; the lists are echoed from the server-computed aggregates.
+ */
+export interface AuditPerformanceSection {
+  averageMobileScore: number | null
+  homepageMobileScore: number | null
+  lowScorePages: { url: string; score: number }[]
+  poorLcpPages: { url: string; lcpMs: number }[]
+  poorClsPages: { url: string; cls: number }[]
+  narrative: string
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Assessment workflow (Audit tab + Competitive Analysis tab) — stateless,
 // in-memory only. The shared frontend context in `components/AssessmentProvider.tsx`
@@ -1041,6 +1129,12 @@ export interface AuditSynthesis {
   quickWins?: AuditQuickWins
   megaImpressionHubs?: AuditMegaImpressionHubs
   localPerformance?: AuditLocalPerformance
+  /**
+   * PageSpeed-driven Performance section. Populated only when the audit
+   * pipeline ran the PageSpeed pass AND at least one audited page had a
+   * mobile performance score below 70 (see CLAUDE.md → Audit tab).
+   */
+  performance?: AuditPerformanceSection
   dataSources: {
     crawlPagesAnalyzed: number
     gscIncluded: boolean
@@ -1050,6 +1144,8 @@ export interface AuditSynthesis {
     competitorsAutoSuggested: boolean
     /** True when partner data was pulled from Airtable; false for raw prospect. */
     partnerDriven: boolean
+    /** True when the PageSpeed pass actually ran (key configured). */
+    pageSpeedIncluded?: boolean
   }
   /** Populated by the PDF route before upload, used for the footer note. */
   costUsd?: number

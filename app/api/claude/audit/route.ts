@@ -8,6 +8,7 @@ import type {
   CrawlReport,
   AuditGa4Slice,
   AuditGscSlice,
+  PageSpeedReport,
   Prospect,
 } from "@/lib/types"
 
@@ -52,6 +53,7 @@ const bodySchema = z.object({
   backlinks: z.unknown(),
   gsc: z.unknown().optional().nullable(),
   ga4: z.unknown().optional().nullable(),
+  pageSpeed: z.unknown().optional().nullable(),
   gscShortHistory: z.boolean().optional(),
 })
 
@@ -63,6 +65,7 @@ interface ParsedBody {
   backlinks: BacklinkReport
   gsc?: AuditGscSlice
   ga4?: AuditGa4Slice
+  pageSpeed?: PageSpeedReport
   gscShortHistory: boolean
 }
 
@@ -283,6 +286,105 @@ function buildGscBlock(gsc: AuditGscSlice): string {
   return lines.join("\n")
 }
 
+function buildPageSpeedBlock(report: PageSpeedReport): string {
+  const lines: string[] = []
+  lines.push(`# PageSpeed Insights (mobile-first; Google ranks on mobile)`)
+  if (report.skippedReason) {
+    lines.push(report.skippedReason)
+    lines.push(
+      `Performance section required: no (PageSpeed pass did not run)`,
+    )
+    return lines.join("\n")
+  }
+  if (report.pages.length === 0) {
+    lines.push(`No pages were audited.`)
+    lines.push(
+      `Performance section required: no (PageSpeed pass returned no pages)`,
+    )
+    return lines.join("\n")
+  }
+
+  const a = report.aggregates
+  lines.push(
+    `Pages audited: ${report.pages.length}${report.homepageIncluded ? " (includes homepage)" : ""}`,
+  )
+  lines.push(
+    `Average mobile performance score: ${a.averageMobileScore ?? "n/a"}/100`,
+  )
+  lines.push(
+    `Homepage mobile performance score: ${a.homepageMobileScore ?? "n/a"}/100`,
+  )
+
+  const homepageTier1 =
+    typeof a.homepageMobileScore === "number" && a.homepageMobileScore < 50
+  lines.push(
+    `Tier 1 performance finding required: ${homepageTier1 ? "YES — homepage mobile score < 50. Surface in executiveSummary AND keyFindings." : "no"}`,
+  )
+
+  const anyBelow70 = report.pages.some(
+    (p) =>
+      typeof p.mobile?.performanceScore === "number" &&
+      p.mobile.performanceScore < 70,
+  )
+  lines.push(
+    `Performance section required: ${anyBelow70 ? "YES — at least one audited page has mobile score < 70. Emit synthesis.performance with a narrative." : "no"}`,
+  )
+
+  if (a.lowScorePages.length > 0) {
+    lines.push("")
+    lines.push(`## Pages with mobile performance score < 50`)
+    for (const p of a.lowScorePages) {
+      lines.push(`  - ${truncate(p.url, 120)} — score ${p.score}/100`)
+    }
+  }
+  if (a.poorLcpPages.length > 0) {
+    lines.push("")
+    lines.push(`## Pages with mobile LCP > 2.5s`)
+    for (const p of a.poorLcpPages) {
+      lines.push(
+        `  - ${truncate(p.url, 120)} — LCP ${(p.lcpMs / 1000).toFixed(2)}s`,
+      )
+    }
+  }
+  if (a.poorClsPages.length > 0) {
+    lines.push("")
+    lines.push(`## Pages with mobile CLS > 0.1`)
+    for (const p of a.poorClsPages) {
+      lines.push(`  - ${truncate(p.url, 120)} — CLS ${p.cls.toFixed(3)}`)
+    }
+  }
+
+  lines.push("")
+  lines.push(`## Per-page mobile metrics`)
+  for (const p of report.pages) {
+    const m = p.mobile
+    if (!m) {
+      lines.push(`  - ${truncate(p.url, 120)} — mobile data unavailable`)
+      continue
+    }
+    const lcp =
+      typeof m.lcpMs === "number" ? `${(m.lcpMs / 1000).toFixed(2)}s` : "n/a"
+    const inp = typeof m.inpMs === "number" ? `${m.inpMs}ms` : "n/a"
+    const cls = typeof m.cls === "number" ? m.cls.toFixed(3) : "n/a"
+    const ttfb = typeof m.ttfbMs === "number" ? `${m.ttfbMs}ms` : "n/a"
+    const score =
+      typeof m.performanceScore === "number" ? `${m.performanceScore}/100` : "n/a"
+    lines.push(
+      `  - ${truncate(p.url, 100)} — score ${score}, LCP ${lcp}, INP ${inp}, CLS ${cls}, TTFB ${ttfb}`,
+    )
+    if (m.opportunities.length > 0) {
+      const opps = m.opportunities
+        .map(
+          (o) =>
+            `${o.title}${typeof o.estimatedSavingsMs === "number" ? ` (save ~${(o.estimatedSavingsMs / 1000).toFixed(2)}s)` : ""}`,
+        )
+        .join("; ")
+      lines.push(`      top opportunities: ${opps}`)
+    }
+  }
+  return lines.join("\n")
+}
+
 function buildGa4Block(ga4: AuditGa4Slice): string {
   const lines: string[] = []
   const cur = ga4.currentYear
@@ -397,6 +499,12 @@ HARD CONSTRAINTS (violations cause the audit to be rejected):
 6. The 90-day roadmap must reference findings by number using "#N" format.
 7. No generic recommendations. Specify the exact pages, queries, and metrics being addressed.
 
+PERFORMANCE RULES (apply when the PageSpeed Insights block is present):
+P1. When the PageSpeed block reports "Performance section required: YES", populate the synthesis "performance" object with a 2-3 sentence narrative that names the worst-performing audited page by URL, calls out the average mobile score, and recommends 1-2 of the top opportunities returned for that page. Echo the server-computed lowScorePages / poorLcpPages / poorClsPages lists verbatim.
+P2. When the PageSpeed block reports "Tier 1 performance finding required: YES" (homepage mobile score < 50), the homepage performance issue MUST appear (a) in executiveSummary as one of the headline takeaways and (b) as a numbered Key Finding with a headlineMetric of the form "Homepage mobile score: N/100" citing the exact URL of the homepage. The Tier 1 rule is independent of the indexation Tier 1 rule — both can fire at once.
+P3. When the PageSpeed block was skipped or no page is below 70, omit the synthesis "performance" object entirely (set it to null).
+P4. Every performance recommendation cites a specific URL and a specific metric value taken VERBATIM from the PageSpeed block. No generic "improve LCP" guidance.
+
 CALIBRATION RULES (apply when GSC is connected):
 A. Every CTR uplift estimate MUST be calibrated against the partner's OWN observed CTR at top-3 by impression tier (provided in the GSC block under "Partner's OWN observed CTR at top-3"). DO NOT use industry CTR averages. DO NOT cite Backlinko / Sistrix / Advanced Web Ranking studies. The partner's data is the only source of truth.
 B. Be honest about AI Overview suppression: high-impression informational queries (10K+ impressions) will NOT earn 30%+ CTR at top-3 even with perfect titles. Numbers in your output must reflect that — a 6–12% top-3 CTR is realistic for high-impression queries today.
@@ -412,8 +520,16 @@ For each target market (city + state in prospect.targetMarkets), report counts d
 OUTPUT FORMAT: return ONLY a single JSON object (no preamble, no trailing text, no markdown fences) matching the schema in the user message. JSON must be valid and parseable.`
 
 function buildUserPrompt(body: ParsedBody): string {
-  const { prospect, partnerDriven, crawl, competitive, backlinks, gsc, ga4 } =
-    body
+  const {
+    prospect,
+    partnerDriven,
+    crawl,
+    competitive,
+    backlinks,
+    gsc,
+    ga4,
+    pageSpeed,
+  } = body
   const lines: string[] = []
 
   lines.push(`# Audit subject`)
@@ -428,6 +544,9 @@ function buildUserPrompt(body: ParsedBody): string {
   )
   lines.push(`GSC access: ${gsc ? "yes" : "no — fall back to third-party estimates and FLAG the gap"}`)
   lines.push(`GA4 access: ${ga4 ? "yes" : "no — fall back to third-party estimates and FLAG the gap"}`)
+  lines.push(
+    `PageSpeed access: ${pageSpeed && !pageSpeed.skippedReason ? "yes" : "no — performance section will be omitted"}`,
+  )
   if (body.gscShortHistory) {
     lines.push(
       `GSC short-history flag: TRUE — long-range window covers <6 months. Cap seasonality commentary accordingly.`,
@@ -447,6 +566,10 @@ function buildUserPrompt(body: ParsedBody): string {
   if (ga4) {
     lines.push("")
     lines.push(buildGa4Block(ga4))
+  }
+  if (pageSpeed) {
+    lines.push("")
+    lines.push(buildPageSpeedBlock(pageSpeed))
   }
 
   lines.push("")
@@ -611,6 +734,24 @@ function buildUserPrompt(body: ParsedBody): string {
                 "<2-3 sentences naming the strongest and weakest market by GSC click volume.>",
             }
           : null,
+        performance:
+          pageSpeed &&
+          !pageSpeed.skippedReason &&
+          pageSpeed.pages.some(
+            (p) =>
+              typeof p.mobile?.performanceScore === "number" &&
+              p.mobile.performanceScore < 70,
+          )
+            ? {
+                averageMobileScore: pageSpeed.aggregates.averageMobileScore,
+                homepageMobileScore: pageSpeed.aggregates.homepageMobileScore,
+                lowScorePages: pageSpeed.aggregates.lowScorePages,
+                poorLcpPages: pageSpeed.aggregates.poorLcpPages,
+                poorClsPages: pageSpeed.aggregates.poorClsPages,
+                narrative:
+                  "<2-3 sentences. Name the worst-scoring audited URL, cite its mobile score, and recommend 1-2 of the top opportunities listed for it. If homepage mobile < 50, frame it as the lead headline.>",
+              }
+            : null,
         dataSources: {
           crawlPagesAnalyzed: 0,
           gscIncluded: Boolean(gsc),
@@ -618,6 +759,7 @@ function buildUserPrompt(body: ParsedBody): string {
           gscShortHistory: Boolean(body.gscShortHistory),
           competitorsAutoSuggested: competitive.competitorsAutoSuggested,
           partnerDriven: Boolean(body.partnerDriven),
+          pageSpeedIncluded: Boolean(pageSpeed && !pageSpeed.skippedReason),
         },
       },
       null,
