@@ -9,6 +9,8 @@ import { emailFor } from "@/lib/google-auth"
 import {
   GSCError,
   getDailyClicks,
+  getIndexCoverage,
+  getTopPages,
   getTopPagesPaginated,
   getTopQueriesPaginated,
   listSites,
@@ -139,6 +141,7 @@ async function tryFetchGsc(
       topQueries,
       topPages,
       dailyClicks,
+      indexCoverage: null,
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown GSC error"
@@ -146,6 +149,49 @@ async function tryFetchGsc(
       `GSC access not yet granted for this property. Please ensure ${emailFor("assessments")} has been added as a user on Search Console. The audit will continue using crawl data only. (${msg})`,
     )
     return null
+  }
+}
+
+/**
+ * Compute the 90-day indexation-coverage proxy. Sequenced after the crawl
+ * because we need `crawl.sitemapUrls`. Errors are non-fatal: a warning is
+ * pushed and the audit continues without indexation data.
+ */
+async function tryFetchIndexCoverage(
+  gsc: AssessmentGscData,
+  sitemapUrls: string[],
+  warnings: string[],
+): Promise<void> {
+  if (sitemapUrls.length === 0) return
+  const startDate = isoDaysAgo(90)
+  const endDate = isoDaysAgo(2)
+  try {
+    // GSC search analytics: pages-only, last 90 days. We pull a wide rowLimit
+    // because the 90-day list of pages-with-impressions is the entire denom
+    // for "is this URL being seen". Rate-limit cap is 25,000 in one call.
+    const recentPages = await getTopPages({
+      account: "assessments",
+      siteUrl: gsc.siteUrl,
+      startDate,
+      endDate,
+      rowLimit: 25_000,
+    })
+    const coverage = await getIndexCoverage({
+      account: "assessments",
+      siteUrl: gsc.siteUrl,
+      sitemapUrls,
+      gscPages: recentPages,
+      dateRange: { startDate, endDate },
+    })
+    gsc.indexCoverage = coverage
+    console.log(
+      `[audit:index-coverage] site=${gsc.siteUrl} sitemap=${coverage.sitemapCount} indexed=${coverage.indexedUrls.length} probably_not_indexed=${coverage.probablyNotIndexed.length} inspected=${coverage.inspectedSample.length}`,
+    )
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error"
+    warnings.push(
+      `Indexation coverage check failed; the audit will continue without indexation data. (${msg})`,
+    )
   }
 }
 
@@ -288,6 +334,60 @@ function buildPrompt(params: {
       )
     }
     lines.push("")
+
+    // Indexation-coverage proxy (last 90 days). Surfaced in its own section
+    // so Claude can apply the Tier 1 rule without re-deriving the math.
+    if (gsc.indexCoverage) {
+      const cov = gsc.indexCoverage
+      const sitemapPct =
+        cov.sitemapCount > 0
+          ? (cov.probablyNotIndexed.length / cov.sitemapCount) * 100
+          : 0
+      const tierOne =
+        cov.probablyNotIndexed.length > 20 || sitemapPct > 10
+      lines.push(
+        `## Indexation coverage (last 90 days — ${cov.dateRange.startDate} → ${cov.dateRange.endDate})`,
+      )
+      lines.push(`Sitemap URLs: ${cov.sitemapCount.toLocaleString()}`)
+      lines.push(
+        `Indexed (≥1 impression in window): ${cov.indexedUrls.length.toLocaleString()}`,
+      )
+      lines.push(
+        `Probably NOT indexed (zero impressions): ${cov.probablyNotIndexed.length.toLocaleString()} (${sitemapPct.toFixed(1)}% of sitemap)`,
+      )
+      lines.push(
+        `Tier 1 indexation-gap finding required: ${tierOne ? "YES — must appear in Key Findings AND Executive Summary" : "no"}`,
+      )
+      if (cov.probablyNotIndexed.length > 0) {
+        lines.push(``)
+        lines.push(`### Sample of probably-not-indexed sitemap URLs (first 25)`)
+        for (const u of cov.probablyNotIndexed.slice(0, 25)) {
+          lines.push(`  - ${truncate(u, 140)}`)
+        }
+      }
+      if (cov.inspectedSample.length > 0) {
+        lines.push(``)
+        lines.push(
+          `### URL Inspection results (up to ${cov.inspectedSample.length} confirmed via Search Console)`,
+        )
+        for (const s of cov.inspectedSample) {
+          if (s.error) {
+            lines.push(
+              `  - ${truncate(s.url, 120)} — inspection failed: ${s.error}`,
+            )
+            continue
+          }
+          const parts = [
+            `coverage="${s.coverageState ?? "unknown"}"`,
+            `verdict=${s.verdict ?? "n/a"}`,
+            `pageFetchState=${s.pageFetchState ?? "n/a"}`,
+            `lastCrawl=${s.lastCrawlTime ?? "never"}`,
+          ]
+          lines.push(`  - ${truncate(s.url, 100)} — ${parts.join(", ")}`)
+        }
+      }
+      lines.push("")
+    }
   } else {
     lines.push(`# Google Search Console`)
     lines.push(
@@ -387,6 +487,12 @@ Rules for prioritization (apply silently — surface findings, not the rules):
 4. Where target locations have no corresponding location pages or GSC visibility, flag this as a gap.
 5. Do NOT invent data. If the crawl, GSC, or GA4 data does not support a recommendation, do not make it.
 6. When GSC or GA4 is absent, acknowledge the gap honestly in the executive summary rather than fabricating numbers.
+7. Indexation gap is a Tier 1 priority. When the "Indexation coverage" section reports "Tier 1 indexation-gap finding required: YES" (i.e. probably_not_indexed > 20 URLs OR > 10% of sitemap), you MUST:
+   (a) include an indexation-gap finding in the Key Findings list with a bolded headline metric of the form "**X of Y sitemap URLs (Z%) have not received a single impression in 90 days**",
+   (b) cite at least 2-3 specific URLs from the "Sample of probably-not-indexed sitemap URLs" list,
+   (c) reference the URL Inspection results when present (e.g. "Search Console confirms coverage state 'Crawled - currently not indexed' on the inspected sample"), and
+   (d) name the indexation gap explicitly in the Executive Summary — this is the single highest-impact finding type for partner sites.
+   When the rule is not triggered, only mention indexation if the data warrants it.
 
 Output format (Markdown):
 
@@ -457,6 +563,9 @@ export async function POST(request: Request) {
     gsc = gscRes
     ga4 = ga4Res
     crawl = crawlRes
+    if (gsc) {
+      await tryFetchIndexCoverage(gsc, crawl.sitemapUrls, warnings)
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error"
     return NextResponse.json(

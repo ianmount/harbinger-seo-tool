@@ -181,6 +181,56 @@ export interface GSCDailyRow {
 }
 
 /**
+ * One sample URL inspected via the GSC URL Inspection API. Fields are the
+ * subset of `inspectionResult.indexStatusResult` we use to triage whether a
+ * sitemap URL is genuinely missing from Google's index. `coverageState` is
+ * the human-readable string Google returns ("Submitted and indexed", "URL is
+ * unknown to Google", "Crawled - currently not indexed", etc.).
+ *
+ * `error` is set when the inspection call itself failed for that URL — the
+ * audit pipeline keeps the row so the user sees the gap instead of silently
+ * dropping inspection failures.
+ */
+export interface InspectedUrl {
+  url: string
+  coverageState: string | null
+  lastCrawlTime: string | null
+  pageFetchState: string | null
+  /** "PASS" | "PARTIAL" | "FAIL" | "NEUTRAL" | "VERDICT_UNSPECIFIED" or null. */
+  verdict: string | null
+  error?: string
+}
+
+/**
+ * Indexation-coverage proxy derived from sitemap + GSC search analytics.
+ *
+ * GSC's full Coverage report is not exposed via API, so we approximate:
+ *   1. `sitemapUrls` are what SHOULD be indexed (caller-supplied from crawl).
+ *   2. `indexedUrls` are sitemap URLs that received any impressions in the
+ *      90-day window — they're at minimum being seen by Google.
+ *   3. `probablyNotIndexed` = sitemapUrls − indexedUrls (set difference on
+ *      normalized URLs — see `normalizeUrlForIndexComparison` in lib/gsc.ts).
+ *   4. `inspectedSample` is up to 10 URLs from `probablyNotIndexed`, run
+ *      through urlInspection.index.inspect() to confirm the coverage state.
+ *
+ * URL Inspection API has a 2,000-call/day quota per property; capping the
+ * sample at 10 keeps audits well clear of that limit.
+ */
+export interface IndexCoverageReport {
+  siteUrl: string
+  /** 90-day window the comparison was run against. */
+  dateRange: { startDate: string; endDate: string }
+  /** Total sitemap URLs the caller supplied (pre-normalization). */
+  sitemapCount: number
+  /** Sitemap URLs that received >=1 impression in the window. */
+  indexedUrls: string[]
+  /** Sitemap URLs that received zero impressions in the window. */
+  probablyNotIndexed: string[]
+  /** Up to 10 inspected sample URLs from `probablyNotIndexed`. */
+  inspectedSample: InspectedUrl[]
+}
+
+/**
  * GA4 types. GA4 integration is optional per partner; code paths that surface
  * GA4 data must handle a missing `ga4PropertyId` gracefully.
  */
@@ -866,6 +916,12 @@ export interface AssessmentGscData {
   topQueries: GSCTopQueryRow[]
   topPages: GSCTopPageRow[]
   dailyClicks: GSCDailyRow[]
+  /**
+   * 90-day indexation-coverage proxy. Null when the sitemap is empty, the
+   * URL Inspection call failed before producing any data, or the call wasn't
+   * attempted (e.g. site verification mismatch). See `IndexCoverageReport`.
+   */
+  indexCoverage: IndexCoverageReport | null
 }
 
 /** GA4 slice the assessment Audit tab returns to the client. */
