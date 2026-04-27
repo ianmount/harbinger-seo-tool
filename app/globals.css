@@ -223,3 +223,186 @@
     color: var(--color-brand-red);
   }
 }
+
+/* ─────────────────────────────────────────────────────────────────────
+   Print styles for the audit dashboard (`/audits/[id]`).
+
+   Rules: expand every collapsed section, hide interactive controls
+   (sort buttons, filter inputs, drawer toggles, tab strips), fall back
+   to a serif body / sans heading typography pair, force a page break
+   before each major section, surface the cover page + footer.
+   ───────────────────────────────────────────────────────────────── */
+.audit-print-cover,
+.audit-print-footer {
+  display: none;
+}
+
+@media print {
+  @page {
+    margin: 0.75in;
+    size: letter portrait;
+    @bottom-center {
+      content: "Harbinger Marketing — Confidential   ·   Page " counter(page) " of " counter(pages);
+      font-family: "Georgia", serif;
+      font-style: italic;
+      font-size: 9.5pt;
+      color: rgba(3, 41, 58, 0.55);
+    }
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #03293a !important;
+    font-family: "Source Serif 4", "Source Serif Pro", Georgia, serif !important;
+    font-size: 10.5pt;
+    line-height: 1.5;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: "Montserrat", "Gotham", system-ui, sans-serif !important;
+    color: #03293a !important;
+  }
+
+  /* Hide app chrome — header, tab nav, chat widget, sidebar TOC, FAB. */
+  header.sticky,
+  nav[aria-label="Workflows"],
+  aside,
+  [data-print-hide],
+  button[aria-label="Open table of contents"] {
+    display: none !important;
+  }
+
+  main {
+    max-width: none !important;
+    padding: 0 !important;
+  }
+
+  .audit-dashboard {
+    display: block !important;
+  }
+
+  .audit-dashboard > div {
+    display: block !important;
+  }
+
+  /* Cover page */
+  .audit-print-cover {
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    min-height: 9in;
+    page-break-after: always;
+    text-align: center;
+    background: #faf7f2 !important;
+    padding: 1in;
+  }
+  .audit-print-cover-eyebrow {
+    font-family: "Montserrat", system-ui, sans-serif !important;
+    font-size: 10pt;
+    font-weight: 800;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: #ff1e00;
+    margin-bottom: 0.5in;
+  }
+  .audit-print-cover-title {
+    font-family: "Montserrat", system-ui, sans-serif !important;
+    font-size: 36pt;
+    font-weight: 900;
+    letter-spacing: -0.01em;
+    margin: 0 0 0.25in 0;
+    color: #03293a;
+  }
+  .audit-print-cover-domain {
+    font-family: "Source Serif 4", Georgia, serif !important;
+    font-style: italic;
+    font-size: 18pt;
+    margin: 0 0 1in 0;
+    color: rgba(3, 41, 58, 0.74);
+  }
+  .audit-print-cover-meta {
+    font-family: "Montserrat", system-ui, sans-serif !important;
+    font-size: 10pt;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: rgba(3, 41, 58, 0.6);
+  }
+
+  /* Force every collapsible section open, hide its toggle chevron. */
+  [data-section] {
+    page-break-before: always;
+    break-before: page;
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    padding: 0 !important;
+    margin: 0 0 0.4in 0 !important;
+  }
+  [data-section]:first-of-type {
+    page-break-before: auto;
+    break-before: auto;
+  }
+  [data-section][data-collapsed="true"] [data-section-body],
+  [data-section] [data-section-body] {
+    display: block !important;
+    border: none !important;
+    padding: 0 !important;
+  }
+  [data-section] > button[data-section-toggle] svg,
+  [data-cluster] > button[data-cluster-toggle] svg {
+    display: none !important;
+  }
+  [data-section] > button[data-section-toggle],
+  [data-cluster] > button[data-cluster-toggle] {
+    pointer-events: none;
+    padding: 0 !important;
+  }
+
+  /* Cannibalization clusters: open them all. */
+  [data-cluster] {
+    border: 1px solid #e5ded2 !important;
+    margin-bottom: 0.15in;
+  }
+  [data-cluster][data-collapsed="true"] > div[hidden],
+  [data-cluster][data-collapsed="true"] > div {
+    display: block !important;
+  }
+
+  /* Competitor location panels: show every panel, not just the active tab. */
+  [data-location-panel] {
+    display: block !important;
+    page-break-inside: avoid;
+    margin-top: 0.25in;
+  }
+
+  /* Tables — print legibly, alternate row tint, page-break-inside avoid. */
+  table {
+    width: 100% !important;
+    border-collapse: collapse;
+    page-break-inside: auto;
+  }
+  thead {
+    display: table-header-group;
+  }
+  tr {
+    page-break-inside: avoid;
+  }
+  th {
+    background: #faf7f2 !important;
+    border-bottom: 1px solid #cfc6b6 !important;
+  }
+  td {
+    border-bottom: 1px solid #e5ded2 !important;
+  }
+  a {
+    color: #03293a !important;
+    text-decoration: underline;
+  }
+}

@@ -1,9 +1,11 @@
 "use client"
 
 import { useCallback, useMemo, useState } from "react"
+import { useRouter } from "next/navigation"
+import Link from "next/link"
 import ReactMarkdown from "react-markdown"
 import rehypeRaw from "rehype-raw"
-import { Download, Loader2 } from "lucide-react"
+import { Download, ExternalLink, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/PageHeader"
 import { Button } from "@/components/ui/button"
@@ -13,6 +15,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { useAssessment } from "@/lib/assessment-context"
 import { useChatPageContext } from "@/lib/chat-context"
 import { parseTargetLocationLines } from "@/lib/locations"
+import { generateAuditId, saveAudit } from "@/lib/audit-storage"
 import type { AssessmentAuditResult } from "@/lib/types"
 
 /**
@@ -42,10 +45,12 @@ const STAGE_LABEL: Record<Exclude<Stage, "idle" | "done" | "error">, string> = {
 const URL_REGEX = /^(https?:\/\/)?[\w-]+(\.[\w-]+)+([/?#].*)?$/i
 
 export default function AuditPage() {
+  const router = useRouter()
   const { state, setField, setMany } = useAssessment()
   const [stage, setStage] = useState<Stage>("idle")
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [validationError, setValidationError] = useState<string | null>(null)
+  const [lastAuditId, setLastAuditId] = useState<string | null>(null)
 
   const running =
     stage !== "idle" && stage !== "done" && stage !== "error"
@@ -135,6 +140,14 @@ export default function AuditPage() {
       }
       const data = (await res.json()) as AssessmentAuditResult
       setField("auditResult", data)
+      const id = generateAuditId()
+      saveAudit({
+        id,
+        result: data,
+        compAnalysisRows: state.compAnalysisRows,
+        storedAt: new Date().toISOString(),
+      })
+      setLastAuditId(id)
       setStage("done")
       if (data.warnings.length > 0) {
         toast.warning("Audit completed with warnings", {
@@ -143,6 +156,8 @@ export default function AuditPage() {
       } else {
         toast.success("Audit ready")
       }
+      // Navigate straight to the rich dashboard view.
+      router.push(`/audits/${id}`)
     } catch (err) {
       setStage("error")
       const message = err instanceof Error ? err.message : "Unknown error"
@@ -158,8 +173,10 @@ export default function AuditPage() {
     state.negativeKeywords,
     state.existingTargetKeywords,
     state.idealCustomer,
+    state.compAnalysisRows,
     targetLocationsParsed,
     setField,
+    router,
   ])
 
   const downloadMarkdown = useCallback(() => {
@@ -332,7 +349,11 @@ export default function AuditPage() {
       )}
 
       {auditResult && stage !== "idle" && (
-        <AuditResult result={auditResult} onDownload={downloadMarkdown} />
+        <AuditResult
+          result={auditResult}
+          auditId={lastAuditId}
+          onDownload={downloadMarkdown}
+        />
       )}
     </div>
   )
@@ -340,9 +361,11 @@ export default function AuditPage() {
 
 function AuditResult({
   result,
+  auditId,
   onDownload,
 }: {
   result: AssessmentAuditResult
+  auditId: string | null
   onDownload: () => void
 }) {
   const minutes = Math.max(1, Math.round(result.durationSeconds / 60))
@@ -360,9 +383,18 @@ function AuditResult({
               {result.crawlSummary?.pagesAnalyzed ?? 0} pages crawled
             </p>
           </div>
-          <Button type="button" onClick={onDownload}>
-            <Download className="mr-2 h-4 w-4" /> Download as Markdown
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            {auditId ? (
+              <Button asChild>
+                <Link href={`/audits/${auditId}`}>
+                  <ExternalLink className="mr-2 h-4 w-4" /> Open dashboard
+                </Link>
+              </Button>
+            ) : null}
+            <Button type="button" variant="outline" onClick={onDownload}>
+              <Download className="mr-2 h-4 w-4" /> Download as Markdown
+            </Button>
+          </div>
         </div>
 
         {result.warnings.length > 0 && (
@@ -378,6 +410,10 @@ function AuditResult({
       </div>
 
       <article className="rounded-lg border bg-card p-6">
+        <p className="mb-4 font-serif text-[13.5px] italic text-ink-2">
+          Markdown narrative shown below for reference. The interactive
+          dashboard is the primary deliverable — open it via the button above.
+        </p>
         <div className="prose prose-sm max-w-none dark:prose-invert prose-headings:font-sans prose-headings:font-extrabold prose-headings:tracking-[-0.005em] prose-h1:text-[24px] prose-h2:text-[18px] prose-h3:text-[15px] prose-strong:text-foreground">
           <ReactMarkdown rehypePlugins={[rehypeRaw]}>
             {result.auditMarkdown}
