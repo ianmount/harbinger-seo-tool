@@ -55,6 +55,11 @@ const bodySchema = z.object({
   idealCustomer: z.string().optional().default(""),
   /** "City, ST" preferred; objects work too if the client already split them. */
   targetMarkets: z.array(targetMarketSchema).min(1).max(10),
+  /**
+   * `"full"` (default) crawls every URL in the sitemap; `"sample"` caps at
+   * 50 prioritized URLs for fast testing.
+   */
+  crawlMode: z.enum(["full", "sample"]).optional().default("full"),
 })
 
 type Body = z.infer<typeof bodySchema>
@@ -327,17 +332,31 @@ function buildPrompt(params: {
   // Crawl summary.
   lines.push(`# Site crawl`)
   lines.push(
-    `Pages analyzed: ${crawl.crawledCount} (sitemap reports ${crawl.sitemapUrls.length} URLs)`,
+    `Pages analyzed: ${crawl.crawledCount} (sitemap reports ${crawl.sitemapUrls.length} URLs; mode=${crawl.mode})`,
+  )
+  const distEntries = Object.entries(crawl.statusCodeDistribution).sort(
+    (a, b) => b[1] - a[1],
+  )
+  lines.push(
+    `Status code distribution: ${
+      distEntries.length > 0
+        ? distEntries.map(([code, n]) => `${code}: ${n}`).join(", ")
+        : "(no responses)"
+    }`,
   )
   lines.push(`Non-200 pages: ${crawl.nonOkPages.length}`)
   for (const p of crawl.nonOkPages.slice(0, 10)) {
     lines.push(`  - ${p.status} ${truncate(p.url, 120)}`)
   }
-  lines.push(`Missing titles: ${crawl.missingTitles.length}`)
+  lines.push(`Pages missing titles: ${crawl.missingTitles.length}`)
   for (const u of crawl.missingTitles.slice(0, 5)) {
     lines.push(`  - ${truncate(u, 120)}`)
   }
-  lines.push(`Missing meta descriptions: ${crawl.missingDescriptions.length}`)
+  lines.push(`Pages missing meta descriptions: ${crawl.missingDescriptions.length}`)
+  lines.push(`Pages with no canonical tag: ${crawl.missingCanonicals.length}`)
+  lines.push(
+    `Pages with no meaningful schema (no JSON-LD beyond Article/Person/ImageObject): ${crawl.pagesMissingMeaningfulSchema}`,
+  )
   lines.push(`Duplicate title groups: ${crawl.duplicateTitles.length}`)
   for (const g of crawl.duplicateTitles.slice(0, 5)) {
     lines.push(
@@ -430,7 +449,10 @@ export async function POST(request: Request) {
     const [gscRes, ga4Res, crawlRes] = await Promise.all([
       tryFetchGsc(websiteUrl, warnings),
       tryFetchGa4(websiteUrl, warnings),
-      crawlSite({ domain: websiteUrl }),
+      crawlSite({
+        domain: websiteUrl,
+        options: { mode: body.crawlMode },
+      }),
     ])
     gsc = gscRes
     ga4 = ga4Res

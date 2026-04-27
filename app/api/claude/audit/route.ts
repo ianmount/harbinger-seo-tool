@@ -86,20 +86,39 @@ function pctDelta(current: number, prior: number): number {
 
 function buildCrawlBlock(crawl: CrawlReport): string {
   const lines: string[] = []
-  lines.push(`# Site crawl (${crawl.crawledCount} pages; sitemap reports ${crawl.sitemapUrls.length} URLs)`)
-  lines.push(`Duration: ${Math.round(crawl.crawlDurationMs / 100) / 10}s. Max pages: ${crawl.maxPages}.`)
+  lines.push(
+    `# Site crawl (${crawl.crawledCount} pages crawled; sitemap reports ${crawl.sitemapUrls.length} URLs; mode=${crawl.mode})`,
+  )
+  lines.push(
+    `Duration: ${Math.round(crawl.crawlDurationMs / 100) / 10}s. Max pages: ${crawl.maxPages}. Crawl-delay applied: ${crawl.crawlDelaySec}s.`,
+  )
+
+  // Status code distribution — sorted by count desc so the dominant bucket
+  // shows first. This is the "are most pages 200?" sanity check.
+  const distEntries = Object.entries(crawl.statusCodeDistribution).sort(
+    (a, b) => b[1] - a[1],
+  )
+  const distString =
+    distEntries.length > 0
+      ? distEntries.map(([code, n]) => `${code}: ${n}`).join(", ")
+      : "(no responses)"
+  lines.push(`Status code distribution: ${distString}`)
+
   lines.push(`Non-200 pages: ${crawl.nonOkPages.length}`)
   if (crawl.nonOkPages.length > 0) {
     for (const p of crawl.nonOkPages.slice(0, 10)) {
       lines.push(`  - ${p.status} ${truncate(p.url, 120)}`)
     }
   }
-  lines.push(`Missing titles: ${crawl.missingTitles.length}`)
+  lines.push(`Pages missing titles: ${crawl.missingTitles.length}`)
   for (const u of crawl.missingTitles.slice(0, 5)) lines.push(`  - ${truncate(u, 120)}`)
-  lines.push(`Missing meta descriptions: ${crawl.missingDescriptions.length}`)
+  lines.push(`Pages missing meta descriptions: ${crawl.missingDescriptions.length}`)
   for (const u of crawl.missingDescriptions.slice(0, 5)) lines.push(`  - ${truncate(u, 120)}`)
-  lines.push(`Missing canonical tags: ${crawl.missingCanonicals.length}`)
+  lines.push(`Pages with no canonical tag: ${crawl.missingCanonicals.length}`)
   for (const u of crawl.missingCanonicals.slice(0, 5)) lines.push(`  - ${truncate(u, 120)}`)
+  lines.push(
+    `Pages with no meaningful schema (no JSON-LD beyond Article/Person/ImageObject): ${crawl.pagesMissingMeaningfulSchema}`,
+  )
   lines.push(`Duplicate title groups: ${crawl.duplicateTitles.length}`)
   for (const g of crawl.duplicateTitles.slice(0, 5)) {
     lines.push(`  - "${truncate(g.title, 80)}" on ${g.urls.length} pages: ${g.urls.slice(0, 3).map((u) => truncate(u, 80)).join(", ")}`)

@@ -9,7 +9,14 @@ export const maxDuration = 300
 
 const bodySchema = z.object({
   domain: z.string().min(3),
-  maxPages: z.number().int().min(1).max(50).optional(),
+  /**
+   * `"full"` (default) — crawl every URL the sitemap reports, subject to the
+   * crawler's safety ceiling. `"sample"` caps at 50 prioritized URLs and is
+   * intended for fast iteration during development.
+   */
+  crawlMode: z.enum(["full", "sample"]).optional(),
+  /** Override the default ceiling for the chosen mode. Capped at 50 in sample. */
+  maxPages: z.number().int().min(1).max(2000).optional(),
 })
 
 export async function POST(request: Request) {
@@ -33,7 +40,10 @@ export async function POST(request: Request) {
   try {
     const report = await crawlSite({
       domain: parsed.data.domain,
-      options: { maxPages: parsed.data.maxPages },
+      options: {
+        mode: parsed.data.crawlMode ?? "full",
+        maxPages: parsed.data.maxPages,
+      },
     })
     return NextResponse.json({ report })
   } catch (error) {

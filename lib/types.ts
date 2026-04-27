@@ -342,6 +342,15 @@ export interface Prospect {
 
 // ── Crawler outputs ────────────────────────────────────────────────────────
 
+/**
+ * Crawl mode the audit pipeline runs in.
+ *
+ *   - `"full"`    — crawl every URL discovered in the sitemap (subject to the
+ *                   crawler's safety ceiling). Default for production audits.
+ *   - `"sample"`  — cap at 50 prioritized URLs. Fast-path for testing.
+ */
+export type CrawlMode = "full" | "sample"
+
 /** Per-URL result from the cheerio crawl. */
 export interface CrawledPage {
   url: string
@@ -349,19 +358,32 @@ export interface CrawledPage {
   status: number
   /** True if the HTTP chain included at least one redirect. */
   redirected: boolean
+  /**
+   * Ordered list of intermediate URLs traversed before `finalUrl`. Empty
+   * when the request returned 200 directly. The first entry is the URL the
+   * crawler hit; the last entry is the final URL (same as `finalUrl`).
+   */
+  redirectChain: string[]
   title: string | null
   metaDescription: string | null
   metaRobots: string | null
   canonical: string | null
+  /** Headings in document order. */
   h1s: string[]
-  h2Count: number
-  /** JSON-LD schema blocks parsed from <script type="application/ld+json">. */
+  h2s: string[]
+  h3s: string[]
+  /** Distinct @type values pulled from JSON-LD blocks on the page. */
   schemaTypes: string[]
+  /** Raw parsed JSON-LD objects, kept verbatim for downstream analysis. */
+  schemaBlocks: unknown[]
   /** <img> tags total vs. ones with non-empty alt. */
   imagesTotal: number
   imagesWithAlt: number
-  internalLinks: number
+  /** Resolved absolute URLs for every same-domain `<a href>` on the page. */
+  internalLinksOut: string[]
   wordCount: number
+  /** Wall-clock time spent fetching + parsing this URL, in milliseconds. */
+  loadTimeMs: number
   /**
    * True when the page appears to be a client-rendered SPA shell (empty
    * body text + React/Next/Vue root div). Surfaced as an audit finding
@@ -375,9 +397,15 @@ export interface CrawledPage {
 /**
  * Aggregate findings across the whole crawl. Groups are keyed by the
  * duplicate value (title / description string) and list the offending URLs.
+ *
+ * Named `CrawlResults` so synthesis-layer code reads naturally
+ * (`crawl: CrawlResults`); `CrawlReport` is kept as a backwards-compat
+ * alias for existing call sites.
  */
-export interface CrawlReport {
+export interface CrawlResults {
   domain: string
+  /** Crawl mode that produced this report. */
+  mode: CrawlMode
   sitemapUrls: string[]
   /** URLs actually fetched (may be a subset of sitemap if capped). */
   crawledCount: number
@@ -398,7 +426,23 @@ export interface CrawlReport {
   schemaTypesRecommended: string[]
   imageAltCoveragePercent: number
   crawlDurationMs: number
+  /**
+   * Status code → page count. Includes 0 for pages that failed to fetch
+   * before getting a status (timeouts, DNS errors, etc.).
+   */
+  statusCodeDistribution: Record<string, number>
+  /**
+   * Count of OK pages with no JSON-LD beyond Article / Person / ImageObject —
+   * i.e. nothing that helps a local business rank (LocalBusiness, Service,
+   * BreadcrumbList, FAQPage, Review, Organization).
+   */
+  pagesMissingMeaningfulSchema: number
+  /** robots.txt Crawl-delay value applied (seconds). 0 when none was set. */
+  crawlDelaySec: number
 }
+
+/** Backwards-compatible alias. Prefer `CrawlResults` in new code. */
+export type CrawlReport = CrawlResults
 
 // ── DataForSEO extended types for audit ────────────────────────────────────
 
