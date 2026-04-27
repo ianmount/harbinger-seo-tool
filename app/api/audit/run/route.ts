@@ -19,6 +19,7 @@ import {
   partnerWebsiteToGscSiteUrl,
 } from "@/lib/gsc"
 import { findGscSiteCandidates } from "@/lib/gsc-site-match"
+import { runPageSpeedAudit } from "@/lib/pagespeed"
 import type {
   AssessmentAuditResult,
   AssessmentGa4Data,
@@ -27,6 +28,7 @@ import type {
   CannibalizationCluster,
   CrawlReport,
   GSCQueryRow,
+  PageSpeedReport,
 } from "@/lib/types"
 
 /**
@@ -301,14 +303,109 @@ function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s
 }
 
+function truncatePsiUrl(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s
+}
+
+function buildPageSpeedSection(report: PageSpeedReport): string[] {
+  const lines: string[] = []
+  if (report.skippedReason) {
+    lines.push(`# PageSpeed Insights`)
+    lines.push(report.skippedReason)
+    lines.push("")
+    return lines
+  }
+  if (report.pages.length === 0) return lines
+
+  const a = report.aggregates
+  lines.push(`# PageSpeed Insights (mobile-first; Google ranks on mobile)`)
+  lines.push(
+    `Pages audited: ${report.pages.length} (top GSC pages by impressions${report.homepageIncluded ? " + homepage" : ""})`,
+  )
+  lines.push(
+    `Average mobile performance score: ${a.averageMobileScore ?? "n/a"}/100`,
+  )
+  lines.push(
+    `Homepage mobile performance score: ${a.homepageMobileScore ?? "n/a"}/100`,
+  )
+  if (typeof a.homepageMobileScore === "number" && a.homepageMobileScore < 50) {
+    lines.push(
+      `Tier 1 performance finding required: YES — homepage mobile performance is below 50. Surface in Executive Summary AND Key Findings.`,
+    )
+  }
+
+  const anyBelow70 = report.pages.some(
+    (p) =>
+      typeof p.mobile?.performanceScore === "number" &&
+      p.mobile.performanceScore < 70,
+  )
+  lines.push(
+    `Performance section required: ${anyBelow70 ? "YES — at least one audited page has mobile score < 70" : "no"}`,
+  )
+
+  if (a.lowScorePages.length > 0) {
+    lines.push("")
+    lines.push(`## Pages with mobile performance score < 50`)
+    for (const p of a.lowScorePages) {
+      lines.push(`  - ${truncatePsiUrl(p.url, 120)} — score ${p.score}/100`)
+    }
+  }
+  if (a.poorLcpPages.length > 0) {
+    lines.push("")
+    lines.push(`## Pages with mobile LCP > 2.5s`)
+    for (const p of a.poorLcpPages) {
+      lines.push(
+        `  - ${truncatePsiUrl(p.url, 120)} — LCP ${(p.lcpMs / 1000).toFixed(2)}s`,
+      )
+    }
+  }
+  if (a.poorClsPages.length > 0) {
+    lines.push("")
+    lines.push(`## Pages with mobile CLS > 0.1`)
+    for (const p of a.poorClsPages) {
+      lines.push(`  - ${truncatePsiUrl(p.url, 120)} — CLS ${p.cls.toFixed(3)}`)
+    }
+  }
+
+  lines.push("")
+  lines.push(`## Per-page mobile metrics`)
+  for (const p of report.pages) {
+    const m = p.mobile
+    if (!m) {
+      lines.push(`  - ${truncatePsiUrl(p.url, 120)} — mobile data unavailable`)
+      continue
+    }
+    const lcp = typeof m.lcpMs === "number" ? `${(m.lcpMs / 1000).toFixed(2)}s` : "n/a"
+    const inp = typeof m.inpMs === "number" ? `${m.inpMs}ms` : "n/a"
+    const cls = typeof m.cls === "number" ? m.cls.toFixed(3) : "n/a"
+    const ttfb = typeof m.ttfbMs === "number" ? `${m.ttfbMs}ms` : "n/a"
+    const score = typeof m.performanceScore === "number" ? `${m.performanceScore}/100` : "n/a"
+    lines.push(
+      `  - ${truncatePsiUrl(p.url, 100)} — score ${score}, LCP ${lcp}, INP ${inp}, CLS ${cls}, TTFB ${ttfb}`,
+    )
+    if (m.opportunities.length > 0) {
+      const opps = m.opportunities
+        .map(
+          (o) =>
+            `${o.title}${typeof o.estimatedSavingsMs === "number" ? ` (save ~${(o.estimatedSavingsMs / 1000).toFixed(2)}s)` : ""}`,
+        )
+        .join("; ")
+      lines.push(`      top opportunities: ${opps}`)
+    }
+  }
+  lines.push("")
+  return lines
+}
+
 function buildPrompt(params: {
   body: Body
   gsc: AssessmentGscData | null
   ga4: AssessmentGa4Data | null
   crawl: CrawlReport
   cannibalization: CannibalizationCluster[]
+  pageSpeed: PageSpeedReport
 }): string {
-  const { body, gsc, ga4, crawl, cannibalization } = params
+  const { body, gsc, ga4, crawl, cannibalization, pageSpeed } = params
   const lines: string[] = []
 
   lines.push(`# Prospect business context`)
@@ -500,6 +597,13 @@ function buildPrompt(params: {
   lines.push(`Image alt coverage: ${crawl.imageAltCoveragePercent}%`)
   lines.push("")
 
+  // PageSpeed Insights — emitted before cannibalization so performance
+  // findings can compete for the top of the Key Findings list. The block
+  // self-reports whether the Performance section + Tier 1 rule should fire.
+  for (const line of buildPageSpeedSection(pageSpeed)) {
+    lines.push(line)
+  }
+
   // Cannibalization clusters — pre-computed by lib/cannibalization.ts so
   // Claude doesn't have to re-derive them from the title list. Only emit the
   // section when there's at least one cluster; absence is meaningful too,
@@ -539,6 +643,7 @@ Rules for prioritization (apply silently — surface findings, not the rules):
    (c) reference the URL Inspection results when present (e.g. "Search Console confirms coverage state 'Crawled - currently not indexed' on the inspected sample"), and
    (d) name the indexation gap explicitly in the Executive Summary — this is the single highest-impact finding type for partner sites.
    When the rule is not triggered, only mention indexation if the data warrants it.
+8. Performance is a Core Web Vitals signal. When the "PageSpeed Insights" section reports "Performance section required: YES" you MUST include a "## Performance" section in the Markdown output, citing exact URLs and metrics from the PageSpeed block (mobile performance score, LCP in seconds, INP in ms when available, CLS). When that section reports "Tier 1 performance finding required: YES" (homepage mobile score < 50), the homepage performance issue MUST also appear in the Executive Summary AND as a numbered Key Finding with a bolded headline metric like "**Homepage mobile performance score: N/100**". When the PageSpeed section was skipped (no API key) or no page is below 70, omit the Performance section entirely.
 
 Output format (Markdown):
 
@@ -555,6 +660,9 @@ Read of the GSC + GA4 data. Highlight the priority-service queries the site alre
 
 ## Technical Findings
 Specific issues from the crawl, ordered by impact. Cite exact pages.
+
+## Performance
+Include this section ONLY when the PageSpeed Insights block reports "Performance section required: YES". Lead with the average mobile performance score and call out the homepage score by itself. List the specific pages that scored below 50, and pages with mobile LCP > 2.5s or CLS > 0.1, citing the exact URLs and metric values verbatim from the PageSpeed block. Reference the top opportunities by name when they appear (e.g. "Eliminate render-blocking resources"). Do NOT cite generic Core Web Vitals advice; tie every recommendation to a specific page from the block.
 
 ## Target Location Coverage
 One short row per target location: does the site have a corresponding page? Is it ranking? Use the data provided.
@@ -640,9 +748,26 @@ export async function POST(request: Request) {
     `[audit:cannibalization] domain=${websiteUrl} clusters=${cannibalization.length} pages=${crawl.pages.length} gsc_query_pages=${gscQueryPages.length}`,
   )
 
+  // PageSpeed runs after GSC because the URL set is "top GSC pages by
+  // impressions + homepage". When GSC didn't connect we still audit the
+  // homepage. Failures are non-fatal — `runPageSpeedAudit` returns a
+  // skipped report rather than throwing.
+  const topGscPages = gsc
+    ? [...gsc.topPages]
+        .sort((a, b) => b.impressions - a.impressions)
+        .map((p) => p.page)
+    : []
+  const pageSpeed = await runPageSpeedAudit({
+    domain: websiteUrl,
+    topGscPages,
+  })
+  if (pageSpeed.skippedReason) {
+    warnings.push(pageSpeed.skippedReason)
+  }
+
   let auditMarkdown: string
   try {
-    const prompt = buildPrompt({ body, gsc, ga4, crawl, cannibalization })
+    const prompt = buildPrompt({ body, gsc, ga4, crawl, cannibalization, pageSpeed })
     auditMarkdown = await callClaude(prompt, {
       model: "claude-opus-4-7",
       system: SYSTEM_PROMPT,

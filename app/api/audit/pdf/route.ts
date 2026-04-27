@@ -28,12 +28,14 @@ import {
 import { findGa4PropertyCandidates } from "@/lib/ga4-site-match"
 import { findGscSiteCandidates } from "@/lib/gsc-site-match"
 import { env } from "@/lib/env"
+import { runPageSpeedAudit } from "@/lib/pagespeed"
 import type {
   AuditGa4Slice,
   AuditGscSlice,
   AuditGscWindow,
   AuditSynthesis,
   CompetitiveReport,
+  PageSpeedReport,
   Partner,
   Prospect,
   TargetMarket,
@@ -486,8 +488,21 @@ async function runPipeline(params: {
     ga4Promise,
   ])
 
+  // PageSpeed runs after GSC because the URL set is "top GSC pages by
+  // impressions + homepage". We don't parallelize it with the GSC fetch to
+  // keep the URL set deterministic when GSC is connected; the homepage-only
+  // path used when GSC is unavailable is fast enough that the wait is fine.
+  const topGscPages = (gsc?.longRange.topPages ?? [])
+    .slice()
+    .sort((a, b) => b.impressions - a.impressions)
+    .map((p) => p.page)
+  const pageSpeed = await runPageSpeedAudit({
+    domain: prospect.domain,
+    topGscPages,
+  })
+
   console.log(
-    `[api/audit/pdf] data: crawl=${crawl.crawledCount}pp competitive=${competitive.rows.length}rows backlinks=${backlinks.referringDomains}rd gsc=${gsc ? "yes" : "no"} ga4=${ga4 ? "yes" : "no"}`,
+    `[api/audit/pdf] data: crawl=${crawl.crawledCount}pp competitive=${competitive.rows.length}rows backlinks=${backlinks.referringDomains}rd gsc=${gsc ? "yes" : "no"} ga4=${ga4 ? "yes" : "no"} pagespeed=${pageSpeed.skippedReason ? "skipped" : `${pageSpeed.pages.length}p`}`,
   )
 
   // Detect short GSC history so the prompt + report can scale down trend
@@ -515,6 +530,7 @@ async function runPipeline(params: {
       backlinks,
       gsc,
       ga4,
+      pageSpeed,
       gscShortHistory,
     },
     baseUrl,
@@ -529,10 +545,12 @@ async function runPipeline(params: {
     gscShortHistory,
     competitorsAutoSuggested: competitive.competitorsAutoSuggested,
     partnerDriven,
+    pageSpeedIncluded: !pageSpeed.skippedReason,
   }
 
   void crawl
   void backlinks
+  void pageSpeed
 
   const pdfBuffer = await renderAuditPdf(synthesis)
   return { synthesis, pdfBuffer }

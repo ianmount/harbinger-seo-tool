@@ -1800,6 +1800,117 @@ function LocalPerformancePage({ s }: { s: AuditSynthesis }) {
   )
 }
 
+function PerformancePage({ s }: { s: AuditSynthesis }) {
+  const p = s.performance
+  if (!p) return null
+  const footer = pageFooterText(s)
+
+  // Combine the three risk lists into one rendered table — readers want the
+  // worst-offending pages in one place rather than three small tables.
+  type Row = { url: string; metric: string; value: string }
+  const rows: Row[] = []
+  for (const lp of p.lowScorePages) {
+    rows.push({ url: lp.url, metric: "Mobile score", value: `${lp.score}/100` })
+  }
+  for (const lp of p.poorLcpPages) {
+    rows.push({
+      url: lp.url,
+      metric: "Mobile LCP",
+      value: `${(lp.lcpMs / 1000).toFixed(2)}s`,
+    })
+  }
+  for (const lp of p.poorClsPages) {
+    rows.push({ url: lp.url, metric: "Mobile CLS", value: lp.cls.toFixed(3) })
+  }
+
+  const summaryText = [
+    p.averageMobileScore !== null
+      ? `Average mobile performance: ${p.averageMobileScore}/100.`
+      : null,
+    p.homepageMobileScore !== null
+      ? `Homepage mobile: ${p.homepageMobileScore}/100.`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" ")
+
+  return React.createElement(
+    Page,
+    { size: "LETTER", style: styles.page },
+    React.createElement(Text, { style: styles.sectionLabel }, "Performance"),
+    React.createElement(
+      Text,
+      { style: styles.sectionTitle },
+      "Core Web Vitals on the homepage and top GSC pages",
+    ),
+    React.createElement(Text, { style: styles.body }, p.narrative),
+    summaryText
+      ? React.createElement(
+          View,
+          { style: styles.narrativeBox },
+          React.createElement(Text, null, summaryText),
+        )
+      : null,
+    rows.length > 0
+      ? React.createElement(
+          View,
+          { style: [styles.table, { marginTop: 12 }] },
+          React.createElement(
+            View,
+            { style: styles.tableHeaderRow },
+            React.createElement(
+              Text,
+              { style: [styles.tableHeaderCell, { flex: 5 }] },
+              "Page",
+            ),
+            React.createElement(
+              Text,
+              { style: [styles.tableHeaderCell, { flex: 1.4 }] },
+              "Issue",
+            ),
+            React.createElement(
+              Text,
+              { style: [styles.tableHeaderCell, { flex: 1, textAlign: "right" }] },
+              "Value",
+            ),
+          ),
+          ...rows.map((r, i) =>
+            React.createElement(
+              View,
+              { key: `perf-${i}`, style: styles.tableRow },
+              React.createElement(
+                Text,
+                { style: [styles.tableCell, { flex: 5 }] },
+                r.url,
+              ),
+              React.createElement(
+                Text,
+                { style: [styles.tableCell, { flex: 1.4 }] },
+                r.metric,
+              ),
+              React.createElement(
+                Text,
+                {
+                  style: [
+                    styles.tableCell,
+                    { flex: 1, textAlign: "right", fontFamily: "Helvetica-Bold" },
+                  ],
+                },
+                r.value,
+              ),
+            ),
+          ),
+        )
+      : null,
+    React.createElement(
+      View,
+      { style: styles.pageFooter, fixed: true },
+      React.createElement(Text, null, footer.left),
+      React.createElement(Text, null, footer.right),
+    ),
+  )
+}
+
 export async function renderAuditPdf(synthesis: AuditSynthesis): Promise<Buffer> {
   const doc = React.createElement(
     Document,
@@ -1827,6 +1938,7 @@ export async function renderAuditPdf(synthesis: AuditSynthesis): Promise<Buffer>
     synthesis.localPerformance ? LocalPerformancePage({ s: synthesis }) : null,
     CompetitivePage({ s: synthesis }),
     TechnicalPage({ s: synthesis }),
+    synthesis.performance ? PerformancePage({ s: synthesis }) : null,
     BacklinkPage({ s: synthesis }),
     RoadmapPage({ s: synthesis }),
   )

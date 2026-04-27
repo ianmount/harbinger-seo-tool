@@ -30,6 +30,11 @@ const envSchema = z.object({
   // Vercel Blob storage token for the SEO Audit PDF output. Required only
   // for the /audit tab — the rest of the app works without it.
   BLOB_READ_WRITE_TOKEN: optionalString,
+  // Google PageSpeed Insights API key. Optional but recommended — without a
+  // key the API rate-limits aggressively (a handful of calls per minute);
+  // with a free key from Google Cloud Console you get 25,000/day. When
+  // unset, the audit pipeline skips the PageSpeed pass with a warning.
+  PAGESPEED_API_KEY: optionalString,
 })
 
 export type Env = z.infer<typeof envSchema>
