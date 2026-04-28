@@ -352,7 +352,10 @@ export async function getDailyClicks(params: {
 
 /** Cap on URL Inspection calls per audit. The API quota is 2,000/day per
  *  property; 10 keeps audits well clear and matches the spec. */
-const URL_INSPECTION_SAMPLE_SIZE = 10
+// Lowered from 10 → 5 because URL Inspection is sequential (~3-6s/call) and
+// the audit pipeline needed the budget back. Five spot-checks is plenty for
+// confirming "yes, GSC actually reports these as not-indexed."
+const URL_INSPECTION_SAMPLE_SIZE = 5
 
 /**
  * Normalize a URL for comparing sitemap entries against GSC search-analytics
