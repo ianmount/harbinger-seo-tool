@@ -15,10 +15,23 @@ const POLL_INITIAL_WAIT_MS = 30_000
 const POLL_INTERVAL_MS = 10_000
 /**
  * Hard ceiling on poll wait. Vercel Pro / Fluid Compute caps function
- * runtime at 800s; 5 minutes here leaves breathing room for the adapter,
- * link-graph fetch, and Claude synthesis to all run after the crawl.
+ * runtime at 800s. We give the crawl up to 9 minutes, which leaves
+ * breathing room for the adapter, link-graph fetch, schema sampling
+ * (~16 raw_html calls), and the Claude synthesis to all run after the
+ * crawl. If polling exceeds this we fall through and try to fetch
+ * whatever pages are already in the result set — partial data is more
+ * useful than failing the audit, and DFS often hasn't flipped to
+ * "finished" status even when the queue is fully drained.
  */
-const POLL_TIMEOUT_MS = 300_000
+const POLL_TIMEOUT_MS = 540_000
+/**
+ * Stable-progress short-circuit. If `pages_crawled` doesn't move across
+ * this many consecutive polls, treat the crawl as effectively done even
+ * when the status field is still "in_progress" — DFS sometimes lags the
+ * status update behind the actual crawl completion.
+ */
+const STABLE_PROGRESS_POLLS = 3
+const POLL_TIMEOUT_MS_LABEL = `${POLL_TIMEOUT_MS / 1000}s`
 
 const PAGES_FETCH_LIMIT = 1_000
 
@@ -508,6 +521,10 @@ export async function runOnPageCrawl(opts: {
   await sleep(POLL_INITIAL_WAIT_MS)
 
   const pollDeadline = Date.now() + POLL_TIMEOUT_MS
+  let lastCrawled: number | undefined = undefined
+  let stableCount = 0
+  let progressFinished = false
+  let timedOut = false
   while (Date.now() < pollDeadline) {
     const summaryEnv = await dfsOnPageRequest("/v3/on_page/summary", [
       { id: taskId },
@@ -522,21 +539,46 @@ export async function runOnPageCrawl(opts: {
     } else {
       const progress = sum.data.crawl_progress
       const status = sum.data.crawl_status
+      const crawled = status?.pages_crawled
       console.log(
-        `[dataforseo-onpage] poll task=${taskId} progress=${progress} crawled=${status?.pages_crawled ?? "?"} queue=${status?.pages_in_queue ?? "?"}`,
+        `[dataforseo-onpage] poll task=${taskId} progress=${progress} crawled=${crawled ?? "?"} queue=${status?.pages_in_queue ?? "?"}`,
       )
-      if (progress === "finished") break
+      if (progress === "finished") {
+        progressFinished = true
+        break
+      }
+      // Stable-progress short-circuit: when DFS is slow to flip
+      // crawl_progress to "finished" but pages_crawled has stopped
+      // moving, treat the crawl as done.
+      if (typeof crawled === "number") {
+        if (crawled === lastCrawled && crawled > 0) {
+          stableCount += 1
+          if (stableCount >= STABLE_PROGRESS_POLLS) {
+            console.log(
+              `[dataforseo-onpage] task=${taskId} stable at ${crawled} pages for ${stableCount} polls — proceeding`,
+            )
+            break
+          }
+        } else {
+          stableCount = 0
+          lastCrawled = crawled
+        }
+      }
     }
     await sleep(POLL_INTERVAL_MS)
   }
 
-  if (Date.now() >= pollDeadline) {
-    throw new OnPageError(
-      `DataForSEO On-Page poll timed out after ${POLL_TIMEOUT_MS / 1000}s for task ${taskId}`,
+  if (!progressFinished && Date.now() >= pollDeadline) {
+    timedOut = true
+    console.warn(
+      `[dataforseo-onpage] poll exceeded ${POLL_TIMEOUT_MS_LABEL} for task ${taskId} — fetching whatever pages are ready`,
     )
   }
 
-  // Page through /pages until we run out of items.
+  // Page through /pages until we run out of items. On timeout this
+  // returns whatever DFS has crawled so far; if that's zero, we throw
+  // below with the timeout error so the audit fails loudly rather than
+  // silently producing an empty crawl.
   const pages: OnPagePageRow[] = []
   let offset = 0
   for (let i = 0; i < 50; i++) {
@@ -556,9 +598,15 @@ export async function runOnPageCrawl(opts: {
     offset += items.length
   }
 
+  if (timedOut && pages.length === 0) {
+    throw new OnPageError(
+      `DataForSEO On-Page poll timed out after ${POLL_TIMEOUT_MS_LABEL} for task ${taskId} and no pages were ready. Re-run; if this repeats, the site is too large for the current poll budget.`,
+    )
+  }
+
   const durationMs = Date.now() - startedAt
   console.log(
-    `[dataforseo-onpage] task=${taskId} pages=${pages.length} duration=${durationMs}ms`,
+    `[dataforseo-onpage] task=${taskId} pages=${pages.length} duration=${durationMs}ms${timedOut ? " (partial — poll timed out)" : ""}`,
   )
 
   return {
