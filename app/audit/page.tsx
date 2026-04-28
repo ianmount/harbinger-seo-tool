@@ -40,10 +40,79 @@ const STAGE_LABEL: Record<Exclude<Stage, "idle" | "done" | "error">, string> = {
 
 const URL_REGEX = /^(https?:\/\/)?[\w-]+(\.[\w-]+)+([/?#].*)?$/i
 
+/**
+ * NDJSON stream reader for /api/audit/run. Yields the bundle from the
+ * terminal `result` event. Throws on the terminal `error` event or if
+ * the stream closes without a result. Ignores `ping` events and
+ * surfaces stage / warning events via `onStage`.
+ */
+async function readGatherStream(
+  body: ReadableStream<Uint8Array>,
+  onStage: (label: string | null) => void,
+): Promise<AuditDataBundle> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let bundle: AuditDataBundle | null = null
+  let streamError: string | null = null
+
+  const labelFor = (stage: string, detail?: string): string => {
+    const friendly: Record<string, string> = {
+      starting: "Starting audit",
+      gsc_ready: "Search Console data ready",
+      crawl_done: "Crawl complete",
+      pagespeed_done: "PageSpeed complete",
+      parallel_done: "Gather phase complete",
+      index_coverage_started: "Checking indexation coverage",
+      index_coverage_done: "Indexation coverage complete",
+    }
+    const base = friendly[stage] ?? stage.replace(/_/g, " ")
+    return detail ? `${base} — ${detail}` : base
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split("\n")
+    buffer = lines.pop() ?? ""
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let event: { type: string; [k: string]: unknown }
+      try {
+        event = JSON.parse(trimmed) as { type: string; [k: string]: unknown }
+      } catch {
+        continue
+      }
+      if (event.type === "ping") continue
+      if (event.type === "stage") {
+        onStage(
+          labelFor(
+            String(event.stage ?? ""),
+            typeof event.detail === "string" ? event.detail : undefined,
+          ),
+        )
+      } else if (event.type === "result") {
+        bundle = event.bundle as AuditDataBundle
+      } else if (event.type === "error") {
+        streamError =
+          typeof event.error === "string" ? event.error : "Stream error"
+      }
+    }
+  }
+  if (streamError) throw new Error(streamError)
+  if (!bundle) {
+    throw new Error("Gather stream closed without a result event")
+  }
+  return bundle
+}
+
 export default function AuditPage() {
   const router = useRouter()
   const { state, setField, setMany } = useAssessment()
   const [stage, setStage] = useState<Stage>("idle")
+  const [stageDetail, setStageDetail] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [validationError, setValidationError] = useState<string | null>(null)
   const [lastAuditId, setLastAuditId] = useState<string | null>(null)
@@ -64,7 +133,7 @@ export default function AuditPage() {
   useChatPageContext("audit", {
     tab: "Audit",
     summary: [
-      `Run stage: ${stage}.`,
+      `Run stage: ${stage}${stageDetail ? ` (${stageDetail})` : ""}.`,
       validationError ? `Validation issue: ${validationError}.` : "",
       errorMessage ? `Last error: ${errorMessage}.` : "",
       targetLocationsParsed.length > 0
@@ -75,6 +144,7 @@ export default function AuditPage() {
       .join(" "),
     data: {
       stage,
+      stageDetail,
       hasValidationError: !!validationError,
       lastErrorMessage: errorMessage,
       parsedLocationCount: targetLocationsParsed.length,
@@ -101,8 +171,14 @@ export default function AuditPage() {
     setValidationError(null)
     setErrorMessage(null)
 
-    // Step 1: gather data. /api/audit/run returns AuditDataBundle.
+    // Step 1: gather data. /api/audit/run streams NDJSON — pings every
+    // 10s keep the connection alive across the multi-minute crawl, stage
+    // events drive the progress label, and the terminal `result` event
+    // carries the bundle. Without streaming, idle-connection timeouts in
+    // browsers and intermediate proxies surface as "Failed to fetch" on
+    // the client even when the function is still running cleanly.
     setStage("gathering")
+    setStageDetail(null)
     let bundle: AuditDataBundle
     try {
       const res = await fetch("/api/audit/run", {
@@ -117,13 +193,14 @@ export default function AuditPage() {
           targetMarkets: targetLocationsParsed,
         }),
       })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        throw new Error(body.error ?? `HTTP ${res.status}`)
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => "")
+        throw new Error(text.slice(0, 300) || `HTTP ${res.status}`)
       }
-      bundle = (await res.json()) as AuditDataBundle
+      bundle = await readGatherStream(res.body, setStageDetail)
     } catch (err) {
       setStage("error")
+      setStageDetail(null)
       const message = err instanceof Error ? err.message : "Unknown error"
       setErrorMessage(`Data gather failed: ${message}`)
       toast.error("Audit failed", { description: message })
@@ -133,6 +210,7 @@ export default function AuditPage() {
     // Step 2: synthesize. /api/audit/synthesize takes the bundle, returns
     // the markdown. Each request gets its own 800s Vercel function budget.
     setStage("synthesizing")
+    setStageDetail(null)
     let auditMarkdown: string
     let synthesisDurationSeconds = 0
     try {
@@ -354,7 +432,9 @@ export default function AuditPage() {
             {running ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />{" "}
-                {STAGE_LABEL[stage as keyof typeof STAGE_LABEL] ?? "Running…"}
+                {stageDetail ??
+                  STAGE_LABEL[stage as keyof typeof STAGE_LABEL] ??
+                  "Running…"}
               </>
             ) : (
               "Run Audit"

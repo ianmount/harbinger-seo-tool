@@ -315,28 +315,36 @@ function summarizeCrawl(crawl: CrawlReport): AuditCrawlSummary {
 }
 
 
-export async function POST(request: Request) {
-  let raw: unknown
-  try {
-    raw = await request.json()
-  } catch {
-    return NextResponse.json(
-      { error: "Request body must be valid JSON" },
-      { status: 400 },
-    )
-  }
-  const parsed = bodySchema.safeParse(raw)
-  if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Invalid request body", issues: parsed.error.flatten() },
-      { status: 400 },
-    )
-  }
-  const body: Body = parsed.data
+/**
+ * NDJSON event types streamed back to the client. The client ignores
+ * `ping` events (they exist only to keep the connection alive) and
+ * uses `stage` events to drive the progress label. Exactly one
+ * terminal event — `result` (success) or `error` (failure) — closes
+ * the stream.
+ */
+type StreamEvent =
+  | { type: "ping"; t: number }
+  | { type: "stage"; stage: string; tElapsedMs: number; detail?: string }
+  | { type: "warning"; message: string }
+  | { type: "result"; bundle: AuditDataBundle }
+  | { type: "error"; error: string }
 
+async function gatherAuditData(
+  body: Body,
+  send: (event: StreamEvent) => void,
+): Promise<AuditDataBundle> {
   const startedAt = Date.now()
+  const elapsed = () => Date.now() - startedAt
+  const stage = (s: string, detail?: string) =>
+    send({ type: "stage", stage: s, tElapsedMs: elapsed(), detail })
+  const pushWarning = (warnings: string[], message: string) => {
+    warnings.push(message)
+    send({ type: "warning", message })
+  }
+
   const warnings: string[] = []
   const websiteUrl = cleanWebsite(body.websiteUrl)
+  stage("starting", `domain=${websiteUrl}`)
 
   let gsc: AssessmentGscData | null = null
   let gscQueryPages: GSCQueryRow[] = []
@@ -344,63 +352,76 @@ export async function POST(request: Request) {
   let crawl: CrawlReport
   let backlinkProfileData: BacklinkProfile | null = null
   let pageSpeed: PageSpeedReport
-  try {
-    // Kick off the four parallel data fetches. PageSpeed depends on the GSC
-    // result (top pages) but NOT on the crawl, so we start it as soon as
-    // GSC resolves and let it overlap with the rest of the still-running
-    // crawl. This saves ~60-90s on the critical path.
-    const gscPromise = tryFetchGsc(websiteUrl, warnings)
-    const ga4Promise = tryFetchGa4(websiteUrl, warnings)
-    const crawlPromise = crawlSite({
-      domain: websiteUrl,
-      options: { mode: body.crawlMode },
-    })
-    // Non-fatal: surface as a warning if it fails but keep the audit going.
-    // The synthesis prompt's Backlink Profile section is gated on the
-    // returned shares, so a null here just suppresses the section.
-    const backlinkPromise = backlinkProfile(websiteUrl).catch((err) => {
-      const msg = err instanceof Error ? err.message : "Unknown error"
-      warnings.push(`Backlink profile fetch failed; the audit will continue without it. (${msg})`)
-      return null
-    })
-    const pageSpeedPromise = (async () => {
-      const gscRes = await gscPromise
-      const topGscPages = gscRes?.data
-        ? [...gscRes.data.topPages]
-            .sort((a, b) => b.impressions - a.impressions)
-            .map((p) => p.page)
-        : []
-      const ps = await runPageSpeedAudit({
-        domain: websiteUrl,
-        topGscPages,
-      })
-      if (ps.skippedReason) warnings.push(ps.skippedReason)
-      return ps
-    })()
 
-    const [gscRes, ga4Res, crawlRes, backlinkProfileRes, pageSpeedRes] =
-      await Promise.all([
-        gscPromise,
-        ga4Promise,
-        crawlPromise,
-        backlinkPromise,
-        pageSpeedPromise,
-      ])
-    gsc = gscRes?.data ?? null
-    gscQueryPages = gscRes?.queryPages ?? []
-    ga4 = ga4Res
-    crawl = crawlRes
-    backlinkProfileData = backlinkProfileRes
-    pageSpeed = pageSpeedRes
-    if (gsc) {
-      await tryFetchIndexCoverage(gsc, crawl.sitemapUrls, warnings)
-    }
-  } catch (err) {
+  // Kick off the four parallel data fetches. PageSpeed depends on the GSC
+  // result (top pages) but NOT on the crawl, so we start it as soon as
+  // GSC resolves and let it overlap with the rest of the still-running
+  // crawl. This saves ~60-90s on the critical path.
+  const gscPromise = tryFetchGsc(websiteUrl, warnings)
+  const ga4Promise = tryFetchGa4(websiteUrl, warnings)
+  const crawlPromise = crawlSite({
+    domain: websiteUrl,
+    options: { mode: body.crawlMode },
+  })
+  const backlinkPromise = backlinkProfile(websiteUrl).catch((err) => {
     const msg = err instanceof Error ? err.message : "Unknown error"
-    return NextResponse.json(
-      { error: `Audit data fetch failed: ${msg}` },
-      { status: 500 },
+    pushWarning(
+      warnings,
+      `Backlink profile fetch failed; the audit will continue without it. (${msg})`,
     )
+    return null
+  })
+  const pageSpeedPromise = (async () => {
+    const gscRes = await gscPromise
+    stage("gsc_ready")
+    const topGscPages = gscRes?.data
+      ? [...gscRes.data.topPages]
+          .sort((a, b) => b.impressions - a.impressions)
+          .map((p) => p.page)
+      : []
+    const ps = await runPageSpeedAudit({
+      domain: websiteUrl,
+      topGscPages,
+    })
+    if (ps.skippedReason) pushWarning(warnings, ps.skippedReason)
+    stage("pagespeed_done", `urls=${ps.pages.length}`)
+    return ps
+  })()
+
+  // Surface "crawl_done" as soon as the crawl resolves so the client
+  // sees the bottleneck stage flip. The other three (gsc/ga4/backlinks)
+  // are normally faster and finish silently.
+  crawlPromise
+    .then((c) =>
+      stage(
+        "crawl_done",
+        `pages=${c.crawledCount} sitemap=${c.sitemapUrls.length}`,
+      ),
+    )
+    .catch(() => {
+      /* error surfaced by Promise.all below */
+    })
+
+  const [gscRes, ga4Res, crawlRes, backlinkProfileRes, pageSpeedRes] =
+    await Promise.all([
+      gscPromise,
+      ga4Promise,
+      crawlPromise,
+      backlinkPromise,
+      pageSpeedPromise,
+    ])
+  gsc = gscRes?.data ?? null
+  gscQueryPages = gscRes?.queryPages ?? []
+  ga4 = ga4Res
+  crawl = crawlRes
+  backlinkProfileData = backlinkProfileRes
+  pageSpeed = pageSpeedRes
+  stage("parallel_done", `pages=${crawl.crawledCount} ga4=${ga4 ? "yes" : "no"} gsc=${gsc ? "yes" : "no"}`)
+
+  if (gsc) {
+    stage("index_coverage_started")
+    await tryFetchIndexCoverage(gsc, crawl.sitemapUrls, warnings)
+    stage("index_coverage_done")
   }
 
   const cannibalization = detectCannibalization({
@@ -413,8 +434,6 @@ export async function POST(request: Request) {
     `[audit:cannibalization] domain=${websiteUrl} clusters=${cannibalization.length} pages=${crawl.pages.length} gsc_query_pages=${gscQueryPages.length}`,
   )
 
-  // URL structure + broken-internal-link analyses are pure functions over
-  // the existing crawl output — no extra network calls.
   const urlStructureIssues = detectUrlStructureIssues(crawl)
   const brokenInternalLinks = detectBrokenInternalLinks(crawl)
   console.log(
@@ -424,15 +443,12 @@ export async function POST(request: Request) {
     `[audit:broken-links] domain=${websiteUrl} broken_targets=${brokenInternalLinks.totalBrokenLinks} typos=${brokenInternalLinks.brokenTargets.filter((t) => t.likelyTypoOf).length}`,
   )
 
-  // Sanity check: if the crawler reports ~100% of pages missing both
-  // <title> and meta description, that's almost certainly a crawler-side
-  // problem (WAF challenge pages or JS-rendered head), not a real SEO
-  // issue. Warn the user and tell the synthesis to skip the finding.
   const metaCheck = detectMetaUnreliable(crawl)
   if (metaCheck.unreliable) {
     const titlePct = Math.round(metaCheck.missingTitleRate * 100)
     const descPct = Math.round(metaCheck.missingDescriptionRate * 100)
-    warnings.push(
+    pushWarning(
+      warnings,
       `Title/description detection looks unreliable: ${titlePct}% of crawled pages were missing <title> and ${descPct}% were missing meta descriptions. That pattern is implausible for a real site and usually means the site's CDN/WAF served stripped responses to the crawler, or the site renders its <head> via JavaScript. The audit will skip the missing-titles/descriptions finding — open the homepage in your browser, view source, and confirm whether the tags are present in the static HTML.`,
     )
     console.log(
@@ -440,12 +456,12 @@ export async function POST(request: Request) {
     )
   }
 
-  const gatherDurationSeconds = Math.round((Date.now() - startedAt) / 1000)
+  const gatherDurationSeconds = Math.round(elapsed() / 1000)
   console.log(
     `[audit:gather-done] domain=${websiteUrl} duration=${gatherDurationSeconds}s pages=${crawl.crawledCount} warnings=${warnings.length}`,
   )
 
-  const bundle: AuditDataBundle = {
+  return {
     websiteUrl,
     generatedAt: new Date().toISOString(),
     gatherDurationSeconds,
@@ -470,5 +486,72 @@ export async function POST(request: Request) {
     metaUnreliable: metaCheck.unreliable,
     crawlSummary: summarizeCrawl(crawl),
   }
-  return NextResponse.json(bundle)
+}
+
+export async function POST(request: Request) {
+  let raw: unknown
+  try {
+    raw = await request.json()
+  } catch {
+    return NextResponse.json(
+      { error: "Request body must be valid JSON" },
+      { status: 400 },
+    )
+  }
+  const parsed = bodySchema.safeParse(raw)
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "Invalid request body", issues: parsed.error.flatten() },
+      { status: 400 },
+    )
+  }
+  const body: Body = parsed.data
+
+  // Stream NDJSON. The client reads the stream and looks for the
+  // terminal `result` (success) or `error` (failure) event. `ping`
+  // events keep browser/edge connections alive across the multi-minute
+  // gather phase — without them, idle-connection timeouts in browsers
+  // and intermediate proxies surface as "Failed to fetch" on the
+  // client even when the function is still running cleanly.
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const enc = new TextEncoder()
+      let closed = false
+      const send = (event: StreamEvent) => {
+        if (closed) return
+        try {
+          controller.enqueue(enc.encode(JSON.stringify(event) + "\n"))
+        } catch {
+          /* controller already closed; nothing to do */
+        }
+      }
+
+      const pinger = setInterval(() => {
+        send({ type: "ping", t: Date.now() })
+      }, 10_000)
+
+      try {
+        const bundle = await gatherAuditData(body, send)
+        send({ type: "result", bundle })
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Unknown error"
+        console.error("[audit:gather-failed]", msg)
+        send({ type: "error", error: `Audit data fetch failed: ${msg}` })
+      } finally {
+        clearInterval(pinger)
+        closed = true
+        controller.close()
+      }
+    },
+  })
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/x-ndjson",
+      "Cache-Control": "no-cache, no-transform",
+      // Disable buffering at any intermediate proxy so the heartbeats
+      // actually reach the client at the cadence we send them.
+      "X-Accel-Buffering": "no",
+    },
+  })
 }
