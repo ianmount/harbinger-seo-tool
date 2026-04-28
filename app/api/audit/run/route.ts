@@ -610,6 +610,39 @@ function buildLocationCompetitorSection(
   return lines
 }
 
+/**
+ * Detect when title/description extraction looks unreliable. A real site
+ * essentially never has 90%+ of OK pages missing both <title> and the
+ * meta description — that pattern means the crawler couldn't read the
+ * head, almost always due to (a) the site's CDN/WAF returning a stripped
+ * challenge body to non-browser UAs, or (b) the site rendering its head
+ * via JavaScript (which our static cheerio crawler can't see).
+ *
+ * When this fires, we push a UI warning AND tell Claude not to generate
+ * any "missing titles/descriptions" findings — they'd be fabricated,
+ * not real.
+ */
+function detectMetaUnreliable(crawl: CrawlReport): {
+  unreliable: boolean
+  okPagesCount: number
+  missingTitleRate: number
+  missingDescriptionRate: number
+} {
+  const okPagesCount = Math.max(0, crawl.crawledCount - crawl.nonOkPages.length)
+  if (okPagesCount <= 5) {
+    return {
+      unreliable: false,
+      okPagesCount,
+      missingTitleRate: 0,
+      missingDescriptionRate: 0,
+    }
+  }
+  const missingTitleRate = crawl.missingTitles.length / okPagesCount
+  const missingDescriptionRate = crawl.missingDescriptions.length / okPagesCount
+  const unreliable = missingTitleRate >= 0.9 && missingDescriptionRate >= 0.9
+  return { unreliable, okPagesCount, missingTitleRate, missingDescriptionRate }
+}
+
 function buildPrompt(params: {
   body: Body
   gsc: AssessmentGscData | null
@@ -621,6 +654,7 @@ function buildPrompt(params: {
   urlStructureIssues?: UrlStructureIssues | null
   brokenInternalLinks?: BrokenInternalLinks | null
   locationCompetitorSnippets?: LocationCompetitorSnippet[] | null
+  metaUnreliable?: boolean
 }): string {
   const {
     body,
@@ -633,6 +667,7 @@ function buildPrompt(params: {
     urlStructureIssues,
     brokenInternalLinks,
     locationCompetitorSnippets,
+    metaUnreliable,
   } = params
   const lines: string[] = []
 
@@ -798,11 +833,17 @@ function buildPrompt(params: {
   for (const p of crawl.nonOkPages.slice(0, 10)) {
     lines.push(`  - ${p.status} ${truncate(p.url, 120)}`)
   }
-  lines.push(`Pages missing titles: ${crawl.missingTitles.length}`)
-  for (const u of crawl.missingTitles.slice(0, 5)) {
-    lines.push(`  - ${truncate(u, 120)}`)
+  if (metaUnreliable) {
+    lines.push(
+      `Title and meta-description detection is UNRELIABLE for this audit. The crawler could not read <title> or <meta name="description"> on the overwhelming majority of pages, which is structurally implausible for a real site. Most likely cause: the site's CDN/WAF returned challenge pages instead of real HTML, or the site renders its <head> via JavaScript (which the static crawler cannot see). DO NOT generate any findings about missing titles or missing meta descriptions, and DO NOT cite the missing-title/description counts. Treat that data as not collected.`,
+    )
+  } else {
+    lines.push(`Pages missing titles: ${crawl.missingTitles.length}`)
+    for (const u of crawl.missingTitles.slice(0, 5)) {
+      lines.push(`  - ${truncate(u, 120)}`)
+    }
+    lines.push(`Pages missing meta descriptions: ${crawl.missingDescriptions.length}`)
   }
-  lines.push(`Pages missing meta descriptions: ${crawl.missingDescriptions.length}`)
   lines.push(`Pages with no canonical tag: ${crawl.missingCanonicals.length}`)
   lines.push(
     `Pages with no meaningful schema (no JSON-LD beyond Article/Person/ImageObject): ${crawl.pagesMissingMeaningfulSchema}`,
@@ -1175,6 +1216,22 @@ export async function POST(request: Request) {
     warnings.push(pageSpeed.skippedReason)
   }
 
+  // Sanity check: if the crawler reports ~100% of pages missing both
+  // <title> and meta description, that's almost certainly a crawler-side
+  // problem (WAF challenge pages or JS-rendered head), not a real SEO
+  // issue. Warn the user and tell the synthesis to skip the finding.
+  const metaCheck = detectMetaUnreliable(crawl)
+  if (metaCheck.unreliable) {
+    const titlePct = Math.round(metaCheck.missingTitleRate * 100)
+    const descPct = Math.round(metaCheck.missingDescriptionRate * 100)
+    warnings.push(
+      `Title/description detection looks unreliable: ${titlePct}% of crawled pages were missing <title> and ${descPct}% were missing meta descriptions. That pattern is implausible for a real site and usually means the site's CDN/WAF served stripped responses to the crawler, or the site renders its <head> via JavaScript. The audit will skip the missing-titles/descriptions finding — open the homepage in your browser, view source, and confirm whether the tags are present in the static HTML.`,
+    )
+    console.log(
+      `[audit:meta-check] domain=${websiteUrl} ok_pages=${metaCheck.okPagesCount} missing_titles=${titlePct}% missing_descriptions=${descPct}% → suppressing finding`,
+    )
+  }
+
   let auditMarkdown: string
   try {
     const prompt = buildPrompt({
@@ -1187,6 +1244,7 @@ export async function POST(request: Request) {
       backlinkProfile: backlinkProfileData,
       urlStructureIssues,
       brokenInternalLinks,
+      metaUnreliable: metaCheck.unreliable,
     })
     auditMarkdown = await callClaude(prompt, {
       model: "claude-opus-4-7",
