@@ -31,6 +31,7 @@ import type {
   BacklinkProfile,
   CrawlReport,
   GSCQueryRow,
+  PageSpeedReport,
 } from "@/lib/types"
 
 /**
@@ -342,28 +343,55 @@ export async function POST(request: Request) {
   let ga4: AssessmentGa4Data | null = null
   let crawl: CrawlReport
   let backlinkProfileData: BacklinkProfile | null = null
+  let pageSpeed: PageSpeedReport
   try {
-    const [gscRes, ga4Res, crawlRes, backlinkProfileRes] = await Promise.all([
-      tryFetchGsc(websiteUrl, warnings),
-      tryFetchGa4(websiteUrl, warnings),
-      crawlSite({
+    // Kick off the four parallel data fetches. PageSpeed depends on the GSC
+    // result (top pages) but NOT on the crawl, so we start it as soon as
+    // GSC resolves and let it overlap with the rest of the still-running
+    // crawl. This saves ~60-90s on the critical path.
+    const gscPromise = tryFetchGsc(websiteUrl, warnings)
+    const ga4Promise = tryFetchGa4(websiteUrl, warnings)
+    const crawlPromise = crawlSite({
+      domain: websiteUrl,
+      options: { mode: body.crawlMode },
+    })
+    // Non-fatal: surface as a warning if it fails but keep the audit going.
+    // The synthesis prompt's Backlink Profile section is gated on the
+    // returned shares, so a null here just suppresses the section.
+    const backlinkPromise = backlinkProfile(websiteUrl).catch((err) => {
+      const msg = err instanceof Error ? err.message : "Unknown error"
+      warnings.push(`Backlink profile fetch failed; the audit will continue without it. (${msg})`)
+      return null
+    })
+    const pageSpeedPromise = (async () => {
+      const gscRes = await gscPromise
+      const topGscPages = gscRes?.data
+        ? [...gscRes.data.topPages]
+            .sort((a, b) => b.impressions - a.impressions)
+            .map((p) => p.page)
+        : []
+      const ps = await runPageSpeedAudit({
         domain: websiteUrl,
-        options: { mode: body.crawlMode },
-      }),
-      // Non-fatal: surface as a warning if it fails but keep the audit going.
-      // The synthesis prompt's Backlink Profile section is gated on the
-      // returned shares, so a null here just suppresses the section.
-      backlinkProfile(websiteUrl).catch((err) => {
-        const msg = err instanceof Error ? err.message : "Unknown error"
-        warnings.push(`Backlink profile fetch failed; the audit will continue without it. (${msg})`)
-        return null
-      }),
-    ])
+        topGscPages,
+      })
+      if (ps.skippedReason) warnings.push(ps.skippedReason)
+      return ps
+    })()
+
+    const [gscRes, ga4Res, crawlRes, backlinkProfileRes, pageSpeedRes] =
+      await Promise.all([
+        gscPromise,
+        ga4Promise,
+        crawlPromise,
+        backlinkPromise,
+        pageSpeedPromise,
+      ])
     gsc = gscRes?.data ?? null
     gscQueryPages = gscRes?.queryPages ?? []
     ga4 = ga4Res
     crawl = crawlRes
     backlinkProfileData = backlinkProfileRes
+    pageSpeed = pageSpeedRes
     if (gsc) {
       await tryFetchIndexCoverage(gsc, crawl.sitemapUrls, warnings)
     }
@@ -395,23 +423,6 @@ export async function POST(request: Request) {
   console.log(
     `[audit:broken-links] domain=${websiteUrl} broken_targets=${brokenInternalLinks.totalBrokenLinks} typos=${brokenInternalLinks.brokenTargets.filter((t) => t.likelyTypoOf).length}`,
   )
-
-  // PageSpeed runs after GSC because the URL set is "top GSC pages by
-  // impressions + homepage". When GSC didn't connect we still audit the
-  // homepage. Failures are non-fatal — `runPageSpeedAudit` returns a
-  // skipped report rather than throwing.
-  const topGscPages = gsc
-    ? [...gsc.topPages]
-        .sort((a, b) => b.impressions - a.impressions)
-        .map((p) => p.page)
-    : []
-  const pageSpeed = await runPageSpeedAudit({
-    domain: websiteUrl,
-    topGscPages,
-  })
-  if (pageSpeed.skippedReason) {
-    warnings.push(pageSpeed.skippedReason)
-  }
 
   // Sanity check: if the crawler reports ~100% of pages missing both
   // <title> and meta description, that's almost certainly a crawler-side
