@@ -35,13 +35,19 @@ import type {
  *   - max 5 redirects per URL
  *   - small inter-batch delay (>= robots.txt Crawl-delay if present)
  *
- * The crawl is mobile-first (Googlebot mobile UA) — this matches Google's
+ * The crawl is mobile-first (mobile Chrome UA) — this matches Google's
  * real indexing behavior and occasionally trips cloaked or desktop-only
- * experiences, which is itself signal.
+ * experiences, which is itself signal. The UA is plain mobile Chrome
+ * (no "HarbingerSEOAudit" identifier or +url marker) because bot-
+ * management products (Cloudflare, Sucuri, etc.) preemptively flag UAs
+ * containing those tokens — they'd return a 200 with a stripped
+ * challenge body, and the audit would then report ~100% of pages
+ * "missing titles and descriptions" because the challenge body has no
+ * real <head>. We trade transparency for getting accurate data.
  */
 
 const MOBILE_UA =
-  "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.109 Mobile Safari/537.36 (compatible; HarbingerSEOAudit/1.0; +https://harbinger-seo-tool.vercel.app)"
+  "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.109 Mobile Safari/537.36"
 const ROBOTS_UA_TOKEN = "Googlebot"
 
 const PAGE_FETCH_TIMEOUT_MS = 8_000
