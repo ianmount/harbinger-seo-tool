@@ -157,11 +157,8 @@ export default function AuditPage() {
     if (!URL_REGEX.test(state.websiteUrl.trim())) {
       return "Website URL doesn't look valid (e.g. https://example.com)."
     }
-    if (targetLocationsParsed.length === 0) {
-      return 'At least one target location is required (one per line, "City, State" format).'
-    }
     return null
-  }, [state.websiteUrl, targetLocationsParsed])
+  }, [state.websiteUrl])
 
   const runAudit = useCallback(async () => {
     const problem = validate()
@@ -398,7 +395,7 @@ export default function AuditPage() {
 
         <div className="space-y-1.5">
           <Label htmlFor="targetLocations">
-            Target locations (one per line — &ldquo;City, State&rdquo;)
+            Target locations (optional, one per line — &ldquo;City, State&rdquo;)
           </Label>
           <Textarea
             id="targetLocations"
@@ -413,6 +410,11 @@ export default function AuditPage() {
             <p className="text-xs text-destructive">
               Could not parse any locations. Use &ldquo;City, ST&rdquo; or
               &ldquo;City, Full State&rdquo; per line.
+            </p>
+          ) : targetLocationsParsed.length === 0 ? (
+            <p className="text-xs text-ink-3">
+              No target locations — the audit will skip location-specific
+              coverage findings.
             </p>
           ) : (
             <p className="text-xs text-ink-3">

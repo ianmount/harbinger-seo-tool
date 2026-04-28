@@ -68,8 +68,13 @@ const bodySchema = z.object({
   negativeKeywords: z.string().optional().default(""),
   existingTargetKeywords: z.string().optional().default(""),
   idealCustomer: z.string().optional().default(""),
-  /** "City, ST" preferred; objects work too if the client already split them. */
-  targetMarkets: z.array(targetMarketSchema).min(1).max(10),
+  /**
+   * "City, ST" preferred; objects work too if the client already split them.
+   * Optional — when omitted/empty the audit skips location-specific coverage
+   * findings (Target Location Coverage section + city-token cannibalization
+   * grouping).
+   */
+  targetMarkets: z.array(targetMarketSchema).max(10).optional().default([]),
   /**
    * `"full"` (default) crawls every URL in the sitemap; `"sample"` caps at
    * 50 prioritized URLs for fast testing.
