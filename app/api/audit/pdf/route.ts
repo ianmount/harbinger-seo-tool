@@ -10,7 +10,7 @@ import {
 import { renderAuditPdf } from "@/lib/audit-pdf"
 import { buildGscAnalyses } from "@/lib/audit-analyses"
 import { getPartner } from "@/lib/airtable"
-import { crawlSite } from "@/lib/crawler"
+import { crawlSite } from "@/lib/audit-crawl"
 import {
   backlinkProfile,
   referringDomainsWithSpamScore,
