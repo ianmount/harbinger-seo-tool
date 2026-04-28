@@ -138,11 +138,23 @@ async function dfsOnPageRequest(
   // Per-task success check. Task-level failures should throw so callers
   // surface the underlying error instead of silently producing an empty
   // crawl report.
+  //
+  // DFS status codes for async On-Page tasks:
+  //   20000  Ok (task complete, results ready)
+  //   20100  Task Created (just submitted, not yet picked up)
+  //   40601  Task Not Ready (response not yet available)
+  //   40602  Task In Queue (queued, hasn't started)
+  //   40603  Task Handed (handed to a worker, processing)
+  // The 4060x codes are transient "poll again" states, not errors —
+  // letting them through means the polling loop in runOnPageCrawl gets
+  // the envelope, sees no usable result yet, and retries on its
+  // schedule. Anything else (40500-range failures, 40400 Not Found,
+  // 5xxxx server errors) is a real failure and throws.
+  const TRANSIENT_TASK_CODES = new Set([20000, 20100, 40601, 40602, 40603])
   for (const task of envelope.tasks) {
-    if (task.status_code !== 20000 && task.status_code !== 20100) {
-      // 20100 = "Task Created"; legitimate for task_post responses.
+    if (!TRANSIENT_TASK_CODES.has(task.status_code)) {
       throw new OnPageError(
-        `DataForSEO On-Page task failed with status ${task.status_code}: ${task.status_message}`,
+        `DataForSEO On-Page task failed with status ${task.status_code}: ${task.status_message} (endpoint=${endpoint})`,
         { dfsStatus: task.status_code },
       )
     }
