@@ -62,11 +62,12 @@ import type {
  * synthesis call. Wrapped in withAuditCost so per-call DataForSEO and
  * Claude costs land in the PDF footer.
  *
- * Node runtime, 300s max — full audits run 3-8 min.
+ * Node runtime, 800s max (Fluid Compute on Vercel Pro) — full audits
+ * run 3-8 min.
  */
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
-export const maxDuration = 300
+export const maxDuration = 800
 
 // ────────────────────────────────────────────────────────────────────────────
 // Request schema. Accept either partner mode or pre-sales mode; reject

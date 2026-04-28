@@ -13,7 +13,7 @@ import type {
 } from "@/lib/types"
 
 export const dynamic = "force-dynamic"
-export const maxDuration = 300
+export const maxDuration = 800
 
 const targetMarketSchema = z.object({
   city: z.string().min(1),
