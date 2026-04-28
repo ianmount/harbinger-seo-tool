@@ -3,13 +3,60 @@ import { z } from "zod"
 import { getPartner } from "@/lib/airtable"
 import { crawlSite, CrawlError } from "@/lib/audit-crawl"
 import {
+  GSCError,
+  getTopPagesPaginated,
+  partnerWebsiteToGscSiteUrl,
+} from "@/lib/gsc"
+import {
   runInitialStrategy,
+  type CarryoverInputPage,
   type RunInitialStrategyResult,
 } from "@/lib/initial-strategy"
 import {
   parseSitemapText,
   SitemapParseError,
 } from "@/lib/sitemap-parser"
+import type {
+  ContentCarryover,
+  CrawledPage,
+  GSCTopPageRow,
+  InitialStrategyOutput,
+} from "@/lib/types"
+
+/**
+ * GSC traffic floor for the content-carryover analysis. A crawled URL is
+ * sent to Claude only when its 180-day GSC stats clear EITHER threshold.
+ * Permissive on impressions (≥50) is intentional — pages ranking on page 2
+ * or 3 are usually the best refresh candidates, and they tend to show
+ * impressions without clicks. Homepage is always included regardless of
+ * GSC data because GSC URL canonicalization is unreliable for the bare
+ * domain.
+ */
+const GSC_LOOKBACK_DAYS = 180
+const GSC_MIN_CLICKS = 1
+const GSC_MIN_IMPRESSIONS = 50
+
+/** Drop trailing slash, lowercase host. Used to join crawl URLs to GSC URLs. */
+function normalizeUrlForJoin(raw: string): string | null {
+  try {
+    const u = new URL(raw)
+    const path = u.pathname.replace(/\/+$/, "") || "/"
+    return `${u.protocol}//${u.hostname.toLowerCase()}${path}${u.search}`
+  } catch {
+    return null
+  }
+}
+
+/** YYYY-MM-DD, UTC, N days before today. */
+function isoDateNDaysAgo(n: number): string {
+  const d = new Date(Date.now() - n * 24 * 60 * 60 * 1000)
+  return d.toISOString().slice(0, 10)
+}
+
+/** YYYY-MM-DD for "today" in UTC. */
+function isoToday(): string {
+  return new Date().toISOString().slice(0, 10)
+}
 
 /**
  * Onboarding → Initial Strategy.
@@ -159,20 +206,28 @@ export async function POST(request: Request) {
   }
 
   // 4. Crawl current site (uncapped within the 2000-page safety ceiling).
+  // Keep the per-page metadata for the carryover analysis — earlier
+  // versions threw it away and only kept the URL list.
   let crawledUrls: string[]
+  let crawledPagesByUrl: Map<string, CrawledPage>
   try {
     const report = await crawlSite({
       domain: partner.website,
       options: { unlimited: true },
     })
-    // Use the final (post-redirect) URLs and dedupe — we don't want the
-    // mapping to redirect a 301-target to itself.
-    const set = new Set<string>()
+    const urlSet = new Set<string>()
+    crawledPagesByUrl = new Map<string, CrawledPage>()
     for (const page of report.pages) {
       const url = page.finalUrl || page.url
-      if (url) set.add(url)
+      if (!url) continue
+      urlSet.add(url)
+      // Keep the OK pages — non-OK URLs (404, 5xx) shouldn't be carryover
+      // candidates regardless of GSC traffic.
+      if (page.status >= 200 && page.status < 300) {
+        crawledPagesByUrl.set(url, page)
+      }
     }
-    crawledUrls = [...set]
+    crawledUrls = [...urlSet]
   } catch (err: unknown) {
     if (err instanceof CrawlError) {
       return NextResponse.json(
@@ -195,7 +250,144 @@ export async function POST(request: Request) {
     )
   }
 
-  // 5. Run the Claude strategy step.
+  // 5. Pull GSC search analytics by page over the lookback window. Optional —
+  // a GSC failure (no refresh token, site not verified, partner not in GSC)
+  // degrades to metadata-only carryover analysis without aborting the job.
+  const gscStartDate = isoDateNDaysAgo(GSC_LOOKBACK_DAYS)
+  const gscEndDate = isoToday()
+  let gscRows: GSCTopPageRow[] = []
+  let gscEnabled = false
+  let gscNotice: string | null = null
+  try {
+    gscRows = await getTopPagesPaginated({
+      account: "partners",
+      siteUrl: partnerWebsiteToGscSiteUrl(partner.website),
+      startDate: gscStartDate,
+      endDate: gscEndDate,
+    })
+    gscEnabled = true
+    if (gscRows.length === 0) {
+      gscNotice =
+        "GSC returned zero rows for the last 180 days — falling back to metadata-only carryover analysis."
+    }
+  } catch (err: unknown) {
+    if (err instanceof GSCError) {
+      gscNotice =
+        err.code === "NO_REFRESH_TOKEN"
+          ? "GSC refresh token not configured — carryover recommendations are based on crawl metadata only."
+          : `GSC fetch failed (${err.message}) — carryover recommendations are based on crawl metadata only.`
+    } else {
+      gscNotice = `GSC fetch failed (${err instanceof Error ? err.message : "unknown"}) — carryover recommendations are based on crawl metadata only.`
+    }
+    console.warn("[api/onboarding/initial-strategy] GSC fetch failed:", err)
+  }
+
+  // 6. Build the carryover-eligible page set.
+  //
+  // - When GSC is available: filter to crawled pages whose normalized URL
+  //   matches a GSC row meeting the click/impression threshold. Always
+  //   include the homepage (GSC's URL canonicalization for bare domains
+  //   is flaky enough that homepage joins miss often).
+  // - When GSC is unavailable: every crawled page becomes eligible; Claude
+  //   judges purely on crawl metadata.
+  const gscByNormalizedUrl = new Map<string, GSCTopPageRow>()
+  for (const row of gscRows) {
+    const norm = normalizeUrlForJoin(row.page)
+    if (norm) gscByNormalizedUrl.set(norm, row)
+  }
+  const homepageNormalized = normalizeUrlForJoin(
+    partnerWebsiteToGscSiteUrl(partner.website),
+  )
+
+  const carryoverPages: CarryoverInputPage[] = []
+  const autoRetirePages: ContentCarryover[] = []
+  for (const url of crawledUrls) {
+    const crawled = crawledPagesByUrl.get(url)
+    if (!crawled) {
+      // Non-OK page (404/5xx) or otherwise filtered. Auto-retire — Claude
+      // shouldn't waste tokens on broken URLs.
+      autoRetirePages.push({
+        oldUrl: url,
+        recommendation: "retire",
+        targetPagePath: null,
+        newUrl: null,
+        rationale: "Page returned a non-OK HTTP status during crawl.",
+        title: "",
+        wordCount: 0,
+        gsc: null,
+        autoGenerated: true,
+      })
+      continue
+    }
+    const normalized = normalizeUrlForJoin(url)
+    const gscRow = normalized ? gscByNormalizedUrl.get(normalized) : undefined
+    const isHomepage =
+      !!normalized &&
+      !!homepageNormalized &&
+      normalized === homepageNormalized
+
+    let qualifies: boolean
+    let gscStats: CarryoverInputPage["gsc"]
+    if (!gscEnabled) {
+      // Metadata-only mode: every crawled page is eligible.
+      qualifies = true
+      gscStats = null
+    } else if (gscRow) {
+      qualifies =
+        gscRow.clicks >= GSC_MIN_CLICKS ||
+        gscRow.impressions >= GSC_MIN_IMPRESSIONS
+      gscStats = {
+        clicks: gscRow.clicks,
+        impressions: gscRow.impressions,
+        ctr: gscRow.ctr,
+        position: gscRow.position,
+      }
+    } else {
+      qualifies = isHomepage
+      gscStats = null
+    }
+
+    if (!qualifies) {
+      const impressions = gscRow?.impressions ?? 0
+      const clicks = gscRow?.clicks ?? 0
+      autoRetirePages.push({
+        oldUrl: url,
+        recommendation: "retire",
+        targetPagePath: null,
+        newUrl: null,
+        rationale: `No qualifying GSC traffic in the last ${GSC_LOOKBACK_DAYS} days (clicks=${clicks}, impressions=${impressions}).`,
+        title: crawled.title ?? "",
+        wordCount: crawled.wordCount,
+        gsc: gscRow
+          ? {
+              clicks: gscRow.clicks,
+              impressions: gscRow.impressions,
+              ctr: gscRow.ctr,
+              position: gscRow.position,
+            }
+          : null,
+        autoGenerated: true,
+      })
+      continue
+    }
+
+    carryoverPages.push({
+      url,
+      title: crawled.title ?? "",
+      metaDescription: crawled.metaDescription ?? "",
+      h1: crawled.h1s[0] ?? "",
+      h2s: crawled.h2s,
+      wordCount: crawled.wordCount,
+      schemaTypes: crawled.schemaTypes,
+      gsc: gscStats,
+    })
+  }
+
+  console.log(
+    `[api/onboarding/initial-strategy] carryover gsc=${gscEnabled} eligible=${carryoverPages.length} auto-retire=${autoRetirePages.length} crawled=${crawledUrls.length}`,
+  )
+
+  // 7. Run the Claude strategy step.
   let result: RunInitialStrategyResult
   try {
     result = await runInitialStrategy({
@@ -204,6 +396,8 @@ export async function POST(request: Request) {
       sitemapRawText: sitemapText,
       keywords,
       crawledUrls,
+      carryoverPages,
+      autoRetirePages,
     })
   } catch (err: unknown) {
     console.error("[api/onboarding/initial-strategy] strategy failed:", err)
@@ -211,5 +405,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: message }, { status: 502 })
   }
 
-  return NextResponse.json({ result: result.output })
+  const fullOutput: InitialStrategyOutput = {
+    ...result.output,
+    gscEnabled,
+    gscNotice,
+    gscLookbackDays: GSC_LOOKBACK_DAYS,
+  }
+
+  return NextResponse.json({ result: fullOutput })
 }
