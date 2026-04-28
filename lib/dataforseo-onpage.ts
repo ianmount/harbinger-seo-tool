@@ -496,10 +496,24 @@ export async function instantPageProbe(
  * Submit a multi-page crawl and poll until it finishes. Throws
  * `OnPageError` if the poll times out or DataForSEO reports task failure.
  */
+export interface OnPageProgress {
+  pagesCrawled: number
+  pagesInQueue: number
+  /** "in_progress" | "finished" | "unknown" — verbatim from DFS. */
+  status: string
+}
+
 export async function runOnPageCrawl(opts: {
   domain: string
   maxPages: number
   enableJavaScript: boolean
+  /**
+   * Called once per poll with the current crawl progress. Used to surface
+   * live "Crawling site — pages=142" labels in the streaming gather UI.
+   * Optional — when absent the loop is silent on the call side and only
+   * the per-poll server log fires.
+   */
+  onProgress?: (progress: OnPageProgress) => void
 }): Promise<OnPageCrawlResult> {
   const startedAt = Date.now()
 
@@ -555,6 +569,16 @@ export async function runOnPageCrawl(opts: {
       console.log(
         `[dataforseo-onpage] poll task=${taskId} progress=${progress} crawled=${crawled ?? "?"} queue=${status?.pages_in_queue ?? "?"}`,
       )
+      if (opts.onProgress) {
+        opts.onProgress({
+          pagesCrawled: typeof crawled === "number" ? crawled : 0,
+          pagesInQueue:
+            typeof status?.pages_in_queue === "number"
+              ? status.pages_in_queue
+              : 0,
+          status: progress ?? "unknown",
+        })
+      }
       if (progress === "finished") {
         progressFinished = true
         break

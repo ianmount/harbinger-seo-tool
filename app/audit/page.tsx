@@ -60,6 +60,7 @@ async function readGatherStream(
     const friendly: Record<string, string> = {
       starting: "Starting audit",
       gsc_ready: "Search Console data ready",
+      crawl_progress: "Crawling site",
       crawl_done: "Crawl complete",
       pagespeed_done: "PageSpeed complete",
       parallel_done: "Gather phase complete",
