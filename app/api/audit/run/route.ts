@@ -9,7 +9,7 @@ import { backlinkProfile } from "@/lib/dataforseo"
 import { GA4Error, getMonthlyOrganic, getSeoReport } from "@/lib/ga4"
 import { findGa4PropertyCandidates } from "@/lib/ga4-site-match"
 import { listProperties } from "@/lib/ga4"
-import { emailFor } from "@/lib/google-auth"
+import { emailFor, type GoogleAccount } from "@/lib/google-auth"
 import {
   GSCError,
   getDailyClicks,
@@ -43,11 +43,15 @@ import type {
  * inside Vercel's 800s function budget.
  *
  * Stateless. Always pre-sales mode (manual inputs only — no Airtable
- * lookup). Uses the assessments Google account exclusively.
+ * lookup). GSC/GA4 lookups run on both Google accounts (`assessments`
+ * and `partners`) in parallel; whichever account verifies the prospect's
+ * domain wins. Catches the case where a prospect site was granted to the
+ * partners account by mistake.
  *
  * Sequence:
  *   1. Validate inputs (websiteUrl + at least one targetMarket required)
- *   2. Fetch GSC + GA4 (assessments token), tolerating both being absent
+ *   2. Fetch GSC + GA4 (try both tokens, prefer assessments on tie),
+ *      tolerating both being absent
  *   3. Crawl the site
  *   4. Synthesize markdown via Claude (claude-opus-4-7)
  *   5. Return AuditDataBundle (the synthesize route handles step 5).
@@ -104,52 +108,117 @@ function cleanWebsite(raw: string): string {
 
 interface GscFetchResult {
   data: AssessmentGscData
+  /** Account whose refresh token resolved this site. Threaded into the
+   * follow-up index-coverage fetch so it talks to the same GSC identity. */
+  account: GoogleAccount
   /** Long-range [query, page] export used by the cannibalization detector. */
   queryPages: GSCQueryRow[]
+}
+
+/**
+ * Resolve the prospect's GSC site URL across both Google accounts. We list
+ * sites on `assessments` and `partners` in parallel and pick the first
+ * account that returns a hostname match. Most prospect sites are shared
+ * with the assessments account, but a handful end up granted to the
+ * partners account by mistake — supporting both prevents a silent
+ * "GSC not connected" downgrade in that case.
+ *
+ * Priority is `assessments` → `partners` when both match; we surface a
+ * warning so the user knows which token won.
+ */
+async function resolveGscAccountAndSite(
+  websiteUrl: string,
+  warnings: string[],
+): Promise<{ account: GoogleAccount; siteUrl: string } | null> {
+  const accounts: GoogleAccount[] = ["assessments", "partners"]
+  const results = await Promise.all(
+    accounts.map(async (account) => {
+      try {
+        const sites = await listSites(account)
+        return { account, sites, error: null as unknown }
+      } catch (err) {
+        return { account, sites: null, error: err }
+      }
+    }),
+  )
+
+  const matched: { account: GoogleAccount; siteUrl: string }[] = []
+  for (const r of results) {
+    if (!r.sites) continue
+    const candidates = findGscSiteCandidates(websiteUrl, r.sites)
+    if (candidates.length > 0) {
+      matched.push({ account: r.account, siteUrl: candidates[0].siteUrl })
+    }
+  }
+
+  if (matched.length > 1) {
+    warnings.push(
+      `GSC: site verified on multiple Google accounts (${matched.map((m) => emailFor(m.account)).join(", ")}). Using ${emailFor(matched[0].account)}.`,
+    )
+  }
+  if (matched.length > 0) {
+    return matched[0]
+  }
+
+  // No hostname match anywhere. If at least one listSites succeeded, fall
+  // back to the URL-prefix guess on assessments — preserves the legacy
+  // behavior where unverified-but-typed-in URLs sometimes work. Subsequent
+  // fetches will fail loudly if the property isn't actually verified.
+  const okResults = results.filter((r) => r.sites !== null)
+  if (okResults.length > 0) {
+    const fallback =
+      okResults.find((r) => r.account === "assessments") ?? okResults[0]
+    return {
+      account: fallback.account,
+      siteUrl: partnerWebsiteToGscSiteUrl(websiteUrl),
+    }
+  }
+
+  // Both accounts errored. Distinguish missing-token from API failures so
+  // the warning is actionable.
+  const allMissingToken = results.every(
+    (r) => r.error instanceof GSCError && r.error.code === "NO_REFRESH_TOKEN",
+  )
+  if (allMissingToken) {
+    warnings.push(
+      `GSC: no refresh token configured for either Google account (${emailFor("assessments")}, ${emailFor("partners")}). The audit will continue using crawl data only.`,
+    )
+  } else {
+    warnings.push(
+      `GSC: failed to list sites for both Google accounts (${emailFor("assessments")}, ${emailFor("partners")}). The audit will continue without GSC.`,
+    )
+  }
+  return null
 }
 
 async function tryFetchGsc(
   websiteUrl: string,
   warnings: string[],
 ): Promise<GscFetchResult | null> {
-  let siteUrl: string | null = null
-  try {
-    const sites = await listSites("assessments")
-    const matches = findGscSiteCandidates(websiteUrl, sites)
-    siteUrl = matches[0]?.siteUrl ?? partnerWebsiteToGscSiteUrl(websiteUrl)
-  } catch (err) {
-    if (err instanceof GSCError && err.code === "NO_REFRESH_TOKEN") {
-      warnings.push(
-        `GSC: ${err.message}. The audit will continue using crawl data only.`,
-      )
-      return null
-    }
-    warnings.push(
-      `GSC: failed to list sites for the assessments account (${emailFor("assessments")}). The audit will continue without GSC.`,
-    )
-    return null
-  }
+  const resolved = await resolveGscAccountAndSite(websiteUrl, warnings)
+  if (!resolved) return null
+  const { account, siteUrl } = resolved
 
   const startDate = isoMonthsAgo(16)
   const endDate = isoDaysAgo(2)
   try {
     const [topQueries, topPages, dailyClicks, queryPages] = await Promise.all([
       getTopQueriesPaginated({
-        account: "assessments",
+        account,
         siteUrl,
         startDate,
         endDate,
         maxRows: 100,
       }),
       getTopPagesPaginated({
-        account: "assessments",
+        account,
         siteUrl,
         startDate,
         endDate,
         maxRows: 50,
       }),
       getDailyClicks({
-        account: "assessments",
+        account,
         siteUrl,
         startDate,
         endDate,
@@ -158,7 +227,7 @@ async function tryFetchGsc(
       // cannibalization detector. Capped at one API call (5k rows) since
       // ranking pages with positions in the top 20 don't need a deep tail.
       getQueries({
-        account: "assessments",
+        account,
         siteUrl,
         startDate,
         endDate,
@@ -178,12 +247,13 @@ async function tryFetchGsc(
         dailyClicks,
         indexCoverage: null,
       },
+      account,
       queryPages,
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown GSC error"
     warnings.push(
-      `GSC access not yet granted for this property. Please ensure ${emailFor("assessments")} has been added as a user on Search Console. The audit will continue using crawl data only. (${msg})`,
+      `GSC access not yet granted for this property. Please ensure ${emailFor(account)} has been added as a user on Search Console. The audit will continue using crawl data only. (${msg})`,
     )
     return null
   }
@@ -195,6 +265,7 @@ async function tryFetchGsc(
  * pushed and the audit continues without indexation data.
  */
 async function tryFetchIndexCoverage(
+  account: GoogleAccount,
   gsc: AssessmentGscData,
   sitemapUrls: string[],
   warnings: string[],
@@ -207,14 +278,14 @@ async function tryFetchIndexCoverage(
     // because the 90-day list of pages-with-impressions is the entire denom
     // for "is this URL being seen". Rate-limit cap is 25,000 in one call.
     const recentPages = await getTopPages({
-      account: "assessments",
+      account,
       siteUrl: gsc.siteUrl,
       startDate,
       endDate,
       rowLimit: 25_000,
     })
     const coverage = await getIndexCoverage({
-      account: "assessments",
+      account,
       siteUrl: gsc.siteUrl,
       sitemapUrls,
       gscPages: recentPages,
@@ -232,33 +303,78 @@ async function tryFetchIndexCoverage(
   }
 }
 
+/**
+ * Resolve the prospect's GA4 property across both Google accounts. Same
+ * dual-account strategy as `resolveGscAccountAndSite`: list properties on
+ * `assessments` and `partners` in parallel, take the first hostname match.
+ */
+async function resolveGa4AccountAndProperty(
+  websiteUrl: string,
+  warnings: string[],
+): Promise<{ account: GoogleAccount; propertyId: string } | null> {
+  const accounts: GoogleAccount[] = ["assessments", "partners"]
+  const results = await Promise.all(
+    accounts.map(async (account) => {
+      try {
+        const properties = await listProperties({ account })
+        return { account, properties, error: null as unknown }
+      } catch (err) {
+        return { account, properties: null, error: err }
+      }
+    }),
+  )
+
+  const matched: { account: GoogleAccount; propertyId: string }[] = []
+  for (const r of results) {
+    if (!r.properties) continue
+    const candidates = findGa4PropertyCandidates(websiteUrl, r.properties)
+    if (candidates.length > 0) {
+      matched.push({ account: r.account, propertyId: candidates[0].propertyId })
+    }
+  }
+
+  if (matched.length > 1) {
+    warnings.push(
+      `GA4: property visible on multiple Google accounts (${matched.map((m) => emailFor(m.account)).join(", ")}). Using ${emailFor(matched[0].account)}.`,
+    )
+  }
+  if (matched.length > 0) {
+    return matched[0]
+  }
+
+  // No match. If at least one listProperties call worked, the access just
+  // hasn't been granted on a property either account can see.
+  const okResults = results.filter((r) => r.properties !== null)
+  if (okResults.length > 0) {
+    warnings.push(
+      `GA4 access not yet granted for this property. Please ensure ${emailFor("assessments")} or ${emailFor("partners")} has been added as a Viewer on the GA4 property. The audit will continue using GSC + crawl data only.`,
+    )
+    return null
+  }
+
+  // Both accounts errored.
+  const allMissingToken = results.every(
+    (r) => r.error instanceof GA4Error && r.error.code === "NO_REFRESH_TOKEN",
+  )
+  if (allMissingToken) {
+    warnings.push(
+      `GA4: no refresh token configured for either Google account. The audit will continue without GA4.`,
+    )
+  } else {
+    warnings.push(
+      `GA4: failed to list properties for both Google accounts (${emailFor("assessments")}, ${emailFor("partners")}). The audit will continue without GA4.`,
+    )
+  }
+  return null
+}
+
 async function tryFetchGa4(
   websiteUrl: string,
   warnings: string[],
 ): Promise<AssessmentGa4Data | null> {
-  let propertyId: string | null = null
-  try {
-    const properties = await listProperties({ account: "assessments" })
-    const matches = findGa4PropertyCandidates(websiteUrl, properties)
-    propertyId = matches[0]?.propertyId ?? null
-  } catch (err) {
-    if (err instanceof GA4Error && err.code === "NO_REFRESH_TOKEN") {
-      warnings.push(
-        `GA4: ${err.message}. The audit will continue without GA4.`,
-      )
-      return null
-    }
-    warnings.push(
-      `GA4: failed to list properties for the assessments account (${emailFor("assessments")}). The audit will continue without GA4.`,
-    )
-    return null
-  }
-  if (!propertyId) {
-    warnings.push(
-      `GA4 access not yet granted for this property. Please ensure ${emailFor("assessments")} has been added as a Viewer on the GA4 property. The audit will continue using GSC + crawl data only.`,
-    )
-    return null
-  }
+  const resolved = await resolveGa4AccountAndProperty(websiteUrl, warnings)
+  if (!resolved) return null
+  const { account, propertyId } = resolved
 
   const today = new Date()
   const endDate = fmtDate(today)
@@ -278,9 +394,9 @@ async function tryFetchGa4(
 
   try {
     const [report, monthlyOrganic] = await Promise.all([
-      getSeoReport({ account: "assessments", propertyId, startDate, endDate }),
+      getSeoReport({ account, propertyId, startDate, endDate }),
       getMonthlyOrganic({
-        account: "assessments",
+        account,
         propertyId,
         startDate: monthlyStartDate,
         endDate,
@@ -428,9 +544,14 @@ async function gatherAuditData(
   pageSpeed = pageSpeedRes
   stage("parallel_done", `pages=${crawl.crawledCount} ga4=${ga4 ? "yes" : "no"} gsc=${gsc ? "yes" : "no"}`)
 
-  if (gsc) {
+  if (gsc && gscRes) {
     stage("index_coverage_started")
-    await tryFetchIndexCoverage(gsc, crawl.sitemapUrls, warnings)
+    await tryFetchIndexCoverage(
+      gscRes.account,
+      gsc,
+      crawl.sitemapUrls,
+      warnings,
+    )
     stage("index_coverage_done")
   }
 
