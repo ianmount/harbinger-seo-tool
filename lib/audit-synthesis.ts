@@ -391,7 +391,9 @@ export function buildSynthesisPrompt(params: {
     `Ideal customer & problems they need solved:\n${body.idealCustomer || "(none provided)"}`,
   )
   lines.push(
-    `Target locations: ${body.targetMarkets.map((m) => `${m.city}, ${m.state}`).join("; ")}`,
+    body.targetMarkets.length > 0
+      ? `Target locations: ${body.targetMarkets.map((m) => `${m.city}, ${m.state}`).join("; ")}`
+      : `Target locations: (none provided — skip the Target Location Coverage section and any location-specific findings)`,
   )
   lines.push("")
 
@@ -749,7 +751,7 @@ Include ONLY when the "URL structure issues" block is present. Group by issue ty
 Render the "Schema coverage matrix" as a Markdown table with columns: Page Type | Pages Crawled | Expected | Found | Missing. After the table, list 1-3 prioritized recommendations in the order from the "Prioritized schema additions" block (P1 first), each citing exact bucket counts and at least one sample URL per gap. When every bucket is fully covered, say so in one sentence and skip the recommendations. Do NOT recommend types the matrix already shows as present. When a bucket has any missing required type AND at least one page exists, that gap MUST also appear as a numbered Key Finding with a bolded headline metric of the form "**X of Y <bucket> pages missing <type>**".
 
 ## Target Location Coverage
-One short row per target location: does the site have a corresponding page? Is it ranking? Use the data provided.
+Include ONLY when target locations were provided in the prospect business context. One short row per target location: does the site have a corresponding page? Is it ranking? Use the data provided.
 
 ## Competitive Position by Location
 Include ONLY when the "Location competitor snippets" block is present. One subsection per target market. Name the top 3 competitors by organic-traffic estimate, the prospect's gap vs. each, and 1-2 high-value queries the prospect is missing (cite query + position + search volume verbatim).
