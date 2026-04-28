@@ -16,7 +16,7 @@ import { useAssessment } from "@/lib/assessment-context"
 import { useChatPageContext } from "@/lib/chat-context"
 import { parseTargetLocationLines } from "@/lib/locations"
 import { generateAuditId, saveAudit } from "@/lib/audit-storage"
-import type { AssessmentAuditResult } from "@/lib/types"
+import type { AssessmentAuditResult, AuditDataBundle } from "@/lib/types"
 
 /**
  * Assessment Audit tab.
@@ -28,17 +28,13 @@ import type { AssessmentAuditResult } from "@/lib/types"
 
 type Stage =
   | "idle"
-  | "fetching-gsc"
-  | "fetching-ga4"
-  | "crawling"
+  | "gathering"
   | "synthesizing"
   | "done"
   | "error"
 
 const STAGE_LABEL: Record<Exclude<Stage, "idle" | "done" | "error">, string> = {
-  "fetching-gsc": "Pulling GSC data",
-  "fetching-ga4": "Pulling GA4 data",
-  crawling: "Crawling site",
+  gathering: "Gathering audit data",
   synthesizing: "Synthesizing audit",
 }
 
@@ -104,23 +100,10 @@ export default function AuditPage() {
     }
     setValidationError(null)
     setErrorMessage(null)
-    setStage("fetching-gsc")
 
-    // Stage simulation — the backend runs all four steps in parallel, so
-    // these labels are aspirational rather than precise. Cycle through them
-    // so the user sees motion while the request is in flight.
-    const stages: Exclude<Stage, "idle" | "done" | "error">[] = [
-      "fetching-gsc",
-      "fetching-ga4",
-      "crawling",
-      "synthesizing",
-    ]
-    let stageIdx = 0
-    const stageInterval = setInterval(() => {
-      stageIdx = Math.min(stageIdx + 1, stages.length - 1)
-      setStage(stages[stageIdx])
-    }, 15000)
-
+    // Step 1: gather data. /api/audit/run returns AuditDataBundle.
+    setStage("gathering")
+    let bundle: AuditDataBundle
     try {
       const res = await fetch("/api/audit/run", {
         method: "POST",
@@ -138,34 +121,75 @@ export default function AuditPage() {
         const body = await res.json().catch(() => ({}))
         throw new Error(body.error ?? `HTTP ${res.status}`)
       }
-      const data = (await res.json()) as AssessmentAuditResult
-      setField("auditResult", data)
-      const id = generateAuditId()
-      saveAudit({
-        id,
-        result: data,
-        compAnalysisRows: state.compAnalysisRows,
-        storedAt: new Date().toISOString(),
-      })
-      setLastAuditId(id)
-      setStage("done")
-      if (data.warnings.length > 0) {
-        toast.warning("Audit completed with warnings", {
-          description: data.warnings[0],
-        })
-      } else {
-        toast.success("Audit ready")
-      }
-      // Navigate straight to the rich dashboard view.
-      router.push(`/audits/${id}`)
+      bundle = (await res.json()) as AuditDataBundle
     } catch (err) {
       setStage("error")
       const message = err instanceof Error ? err.message : "Unknown error"
-      setErrorMessage(message)
+      setErrorMessage(`Data gather failed: ${message}`)
       toast.error("Audit failed", { description: message })
-    } finally {
-      clearInterval(stageInterval)
+      return
     }
+
+    // Step 2: synthesize. /api/audit/synthesize takes the bundle, returns
+    // the markdown. Each request gets its own 800s Vercel function budget.
+    setStage("synthesizing")
+    let auditMarkdown: string
+    let synthesisDurationSeconds = 0
+    try {
+      const res = await fetch("/api/audit/synthesize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bundle),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error ?? `HTTP ${res.status}`)
+      }
+      const json = (await res.json()) as {
+        auditMarkdown: string
+        synthesisDurationSeconds: number
+      }
+      auditMarkdown = json.auditMarkdown
+      synthesisDurationSeconds = json.synthesisDurationSeconds
+    } catch (err) {
+      setStage("error")
+      const message = err instanceof Error ? err.message : "Unknown error"
+      setErrorMessage(
+        `Audit data was gathered but Claude synthesis failed: ${message}. Re-run to retry.`,
+      )
+      toast.error("Synthesis failed", { description: message })
+      return
+    }
+
+    const result: AssessmentAuditResult = {
+      websiteUrl: bundle.websiteUrl,
+      generatedAt: bundle.generatedAt,
+      auditMarkdown,
+      warnings: bundle.warnings,
+      gscData: bundle.gsc,
+      ga4Data: bundle.ga4,
+      crawlSummary: bundle.crawlSummary,
+      cannibalization: bundle.cannibalization,
+      durationSeconds: bundle.gatherDurationSeconds + synthesisDurationSeconds,
+    }
+    setField("auditResult", result)
+    const id = generateAuditId()
+    saveAudit({
+      id,
+      result,
+      compAnalysisRows: state.compAnalysisRows,
+      storedAt: new Date().toISOString(),
+    })
+    setLastAuditId(id)
+    setStage("done")
+    if (result.warnings.length > 0) {
+      toast.warning("Audit completed with warnings", {
+        description: result.warnings[0],
+      })
+    } else {
+      toast.success("Audit ready")
+    }
+    router.push(`/audits/${id}`)
   }, [
     validate,
     state.websiteUrl,

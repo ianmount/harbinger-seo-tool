@@ -1,3 +1,6 @@
+import type { BrokenInternalLinks } from "@/lib/audit-broken-links"
+import type { UrlStructureIssues } from "@/lib/audit-url-structure"
+
 /**
  * Shared TypeScript types.
  *
@@ -1227,6 +1230,45 @@ export interface AssessmentAuditResult {
   crawlSummary: AuditCrawlSummary | null
   cannibalization: CannibalizationCluster[]
   durationSeconds: number
+}
+
+/**
+ * Bundle returned by `/api/audit/run` and consumed by `/api/audit/synthesize`.
+ *
+ * The audit pipeline is split into two HTTP requests so each fits inside
+ * Vercel's 800s function budget. `/api/audit/run` gathers crawl + GSC + GA4
+ * + backlinks + analyses and returns this bundle; the client posts it to
+ * `/api/audit/synthesize` to get the Opus-rendered markdown back.
+ *
+ * Treat the shape as load-bearing — the synthesize route reads it directly
+ * to build the prompt. The full crawl/GSC/GA4 slices are included so the
+ * prompt builder has everything it needs without re-fetching.
+ */
+export interface AuditDataBundle {
+  websiteUrl: string
+  generatedAt: string
+  gatherDurationSeconds: number
+  warnings: string[]
+  body: {
+    websiteUrl: string
+    partnerName: string
+    priorityServices: string
+    negativeKeywords: string
+    existingTargetKeywords: string
+    idealCustomer: string
+    targetMarkets: { city: string; state: string }[]
+  }
+  gsc: AssessmentGscData | null
+  ga4: AssessmentGa4Data | null
+  crawl: CrawlReport
+  pageSpeed: PageSpeedReport
+  cannibalization: CannibalizationCluster[]
+  backlinkProfile: BacklinkProfile | null
+  urlStructureIssues: UrlStructureIssues | null
+  brokenInternalLinks: BrokenInternalLinks | null
+  metaUnreliable: boolean
+  /** Pre-computed for the client so it doesn't need to re-summarize. */
+  crawlSummary: AuditCrawlSummary
 }
 
 /**
