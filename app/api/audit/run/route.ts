@@ -362,6 +362,11 @@ async function gatherAuditData(
   const crawlPromise = crawlSite({
     domain: websiteUrl,
     options: { mode: body.crawlMode },
+    onProgress: (p) =>
+      stage(
+        "crawl_progress",
+        `pages=${p.pagesCrawled} queue=${p.pagesInQueue} status=${p.status}`,
+      ),
   })
   const backlinkPromise = backlinkProfile(websiteUrl).catch((err) => {
     const msg = err instanceof Error ? err.message : "Unknown error"

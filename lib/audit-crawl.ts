@@ -164,6 +164,16 @@ async function fetchSchemaSamples(
 export async function crawlSite(params: {
   domain: string
   options?: CrawlOptions
+  /**
+   * Optional progress callback fired once per DFS poll. The streaming
+   * gather route uses it to surface live "Crawling site — pages=142"
+   * labels in the audit UI.
+   */
+  onProgress?: (progress: {
+    pagesCrawled: number
+    pagesInQueue: number
+    status: string
+  }) => void
 }): Promise<CrawlResults> {
   const startedAt = Date.now()
   const domain = normalizeDomain(params.domain)
@@ -225,6 +235,7 @@ export async function crawlSite(params: {
       domain,
       maxPages,
       enableJavaScript,
+      onProgress: params.onProgress,
     })
   } catch (err) {
     if (err instanceof OnPageError) {
