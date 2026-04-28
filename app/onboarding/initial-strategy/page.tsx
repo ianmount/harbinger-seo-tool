@@ -17,6 +17,8 @@ import {
 } from "@/components/ui/table"
 import { useSelectedPartner } from "@/lib/use-selected-partner"
 import type {
+  CarryoverRecommendation,
+  ContentCarryover,
   InitialStrategyOutput,
   Partner,
 } from "@/lib/types"
@@ -258,8 +260,10 @@ export default function InitialStrategyPage() {
             </Button>
             {phase.status === "running" ? (
               <span className="text-xs text-muted-foreground" aria-live="polite">
-                Crawling current site, parsing inputs, and calling Claude. This
-                usually takes 1–3 minutes for a small site.
+                Crawling{" "}
+                <code className="font-mono">{partner.website}</code>, pulling
+                last 180 days of GSC traffic, and calling Claude. This usually
+                takes 1–3 minutes for a small site.
               </span>
             ) : null}
           </div>
@@ -352,6 +356,19 @@ function ResultView({
           <Badge
             variant="secondary"
             className="text-[10px]"
+            title={
+              result.gscEnabled
+                ? `${result.carryoverAnalyzedCount} pages cleared the last-${result.gscLookbackDays}-day GSC traffic floor.`
+                : "GSC unavailable — carryover analysis ran on crawl metadata only."
+            }
+          >
+            {result.gscEnabled
+              ? `${result.carryoverAnalyzedCount}/${result.crawledUrlCount} carryover-analyzed`
+              : "No GSC — metadata only"}
+          </Badge>
+          <Badge
+            variant="secondary"
+            className="text-[10px]"
             title="Estimated cost based on the actual Anthropic token usage."
           >
             ~{formatCurrency(result.costUsd)} · {result.durationSeconds.toFixed(1)}s
@@ -362,6 +379,15 @@ function ResultView({
           {downloading ? "Building XLSX…" : "Download XLSX"}
         </Button>
       </div>
+
+      {result.gscNotice ? (
+        <p
+          className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-900 dark:text-amber-200"
+          role="status"
+        >
+          {result.gscNotice}
+        </p>
+      ) : null}
 
       {result.warnings.length > 0 ? (
         <details className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs">
@@ -380,6 +406,7 @@ function ResultView({
       <KeywordTable result={result} />
       <UrlTable result={result} />
       <LinkingTable result={result} />
+      <CarryoverTable result={result} />
     </section>
   )
 }
@@ -469,6 +496,130 @@ function UrlTable({ result }: { result: InitialStrategyOutput }) {
         </Table>
       </div>
     </div>
+  )
+}
+
+const RECOMMENDATION_ORDER: Record<CarryoverRecommendation, number> = {
+  "port-as-is": 0,
+  "port-and-refresh": 1,
+  rewrite: 2,
+  retire: 3,
+}
+
+const RECOMMENDATION_LABEL: Record<CarryoverRecommendation, string> = {
+  "port-as-is": "Port as-is",
+  "port-and-refresh": "Port & refresh",
+  rewrite: "Rewrite",
+  retire: "Retire",
+}
+
+function CarryoverTable({ result }: { result: InitialStrategyOutput }) {
+  const sorted = useMemo(() => {
+    return [...result.contentCarryover].sort((a, b) => {
+      const recDelta =
+        RECOMMENDATION_ORDER[a.recommendation] -
+        RECOMMENDATION_ORDER[b.recommendation]
+      if (recDelta !== 0) return recDelta
+      // Within a bucket, push higher-traffic pages to the top.
+      const aClicks = a.gsc?.clicks ?? 0
+      const bClicks = b.gsc?.clicks ?? 0
+      if (aClicks !== bClicks) return bClicks - aClicks
+      const aImp = a.gsc?.impressions ?? 0
+      const bImp = b.gsc?.impressions ?? 0
+      return bImp - aImp
+    })
+  }, [result.contentCarryover])
+
+  const counts = useMemo(() => {
+    const c: Record<CarryoverRecommendation, number> = {
+      "port-as-is": 0,
+      "port-and-refresh": 0,
+      rewrite: 0,
+      retire: 0,
+    }
+    for (const row of result.contentCarryover) c[row.recommendation]++
+    return c
+  }, [result.contentCarryover])
+
+  return (
+    <div className="space-y-2">
+      <h3 className="text-sm font-medium">
+        Content carryover ({result.contentCarryover.length} pages ·{" "}
+        {counts["port-as-is"]} port · {counts["port-and-refresh"]} refresh ·{" "}
+        {counts.rewrite} rewrite · {counts.retire} retire)
+      </h3>
+      <div className="overflow-x-auto rounded-md border">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Old URL</TableHead>
+              <TableHead>Recommendation</TableHead>
+              <TableHead>Target</TableHead>
+              <TableHead className="text-right">Clicks</TableHead>
+              <TableHead className="text-right">Impressions</TableHead>
+              <TableHead className="text-right">Position</TableHead>
+              <TableHead className="text-right">Words</TableHead>
+              <TableHead>Rationale</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sorted.map((row) => (
+              <CarryoverRow key={row.oldUrl} row={row} />
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  )
+}
+
+function CarryoverRow({ row }: { row: ContentCarryover }) {
+  const isRetire = row.recommendation === "retire"
+  return (
+    <TableRow className={isRetire ? "bg-amber-500/5" : undefined}>
+      <TableCell className="font-mono text-xs">
+        <div className="font-medium">{row.oldUrl}</div>
+        {row.title ? (
+          <div className="font-sans text-[10px] text-muted-foreground">
+            {row.title}
+          </div>
+        ) : null}
+      </TableCell>
+      <TableCell>
+        <Badge
+          variant={
+            row.recommendation === "port-as-is"
+              ? "default"
+              : row.recommendation === "retire"
+                ? "secondary"
+                : "outline"
+          }
+          className="text-[10px]"
+          title={row.autoGenerated ? "Auto-generated (no Claude tokens spent on this row)." : undefined}
+        >
+          {RECOMMENDATION_LABEL[row.recommendation]}
+          {row.autoGenerated ? " ·  auto" : ""}
+        </Badge>
+      </TableCell>
+      <TableCell className="font-mono text-xs">
+        {row.newUrl ?? "—"}
+      </TableCell>
+      <TableCell className="text-right font-mono text-xs">
+        {row.gsc ? row.gsc.clicks.toLocaleString() : "—"}
+      </TableCell>
+      <TableCell className="text-right font-mono text-xs">
+        {row.gsc ? row.gsc.impressions.toLocaleString() : "—"}
+      </TableCell>
+      <TableCell className="text-right font-mono text-xs">
+        {row.gsc ? row.gsc.position.toFixed(1) : "—"}
+      </TableCell>
+      <TableCell className="text-right font-mono text-xs">
+        {row.wordCount.toLocaleString()}
+      </TableCell>
+      <TableCell className="text-xs text-muted-foreground">
+        {row.rationale}
+      </TableCell>
+    </TableRow>
   )
 }
 
