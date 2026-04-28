@@ -15,7 +15,7 @@ import {
 } from "@/lib/audit-url-structure"
 import { detectCannibalization } from "@/lib/cannibalization"
 import { callClaude, ClaudeApiError } from "@/lib/claude"
-import { crawlSite } from "@/lib/crawler"
+import { crawlSite } from "@/lib/audit-crawl"
 import { backlinkProfile } from "@/lib/dataforseo"
 import { GA4Error, getMonthlyOrganic, getSeoReport } from "@/lib/ga4"
 import { findGa4PropertyCandidates } from "@/lib/ga4-site-match"

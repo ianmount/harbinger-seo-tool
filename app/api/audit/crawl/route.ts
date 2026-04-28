@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
-import { crawlSite, CrawlError } from "@/lib/crawler"
+import { crawlSite, CrawlError } from "@/lib/audit-crawl"
 
 export const dynamic = "force-dynamic"
 // Crawl can take several minutes on large sitemaps in full mode. Request

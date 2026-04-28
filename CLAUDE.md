@@ -26,10 +26,11 @@ An internal tool for Harbinger Marketing's SEO engineer to run the full 6-month 
 5. **Airtable** — source of truth for partner info (name, services, location, site URL, GA4 property ID, GSC siteUrl format). Read-only for MVP.
 
 ### Libraries added for the Audit tab
-- **`cheerio` + native `fetch`** — SEO crawler (no headless browser; see Audit tab notes). Max 50 pages, 5 concurrent, 8s/page timeout, mobile Googlebot UA.
+- **DataForSEO On-Page API** — site crawl (replaces the old cheerio + native-fetch crawler, which was being defeated by Cloudflare-class WAFs that returned stripped 200 challenge bodies). Auto-detects whether JS rendering is needed via `/v3/on_page/instant_pages`; static crawls run as-is, JS-rendered crawls add the surcharge. See `lib/dataforseo-onpage.ts`.
+- **`cheerio`** — still used, but only for JSON-LD extraction on a sample (~16 pages) of raw HTML pulled from `/v3/on_page/raw_html`. No longer used for crawling. See `lib/schema-parse.ts`.
 - **`@react-pdf/renderer`** — PDF output for the Audit tab. Pure JS, no Chromium dep. Fonts use built-in Helvetica; register custom fonts later via `Font.register`.
 - **`@vercel/blob`** — public-with-unguessable-slug storage for the generated audit PDFs. Requires `BLOB_READ_WRITE_TOKEN`.
-- **`fast-xml-parser`** — sitemap.xml / sitemap_index.xml parsing in the crawler.
+- **`fast-xml-parser`** — sitemap.xml / sitemap_index.xml parsing in `lib/sitemap.ts`. Sitemap/robots fetches still use native `fetch` because those endpoints aren't usually WAF-protected.
 
 ## Folder Structure
 - `app/` — Next.js pages and API routes
@@ -118,16 +119,16 @@ Note: `Prospect` (Audit tab, in-memory only) is distinct from `Partner` (Airtabl
 
 ## Audit tab — in-progress state (branch `claude/add-seo-audit-tab-w4g9i`)
 
-Pre-sales SEO audit tab that produces a polished PDF for a prospective partner. Subject is a `Prospect` (in-memory, not in Airtable), distinct from `Partner`. GSC/GA4 are optional per prospect; falls back to DataForSEO-only when absent. Real site crawl via cheerio + fetch (no headless browser — SPA shells are flagged as a finding, not re-fetched). Max 50 pages, 5 concurrent, 8s/page timeout. Requires Vercel Pro for the 300s function limit.
+Pre-sales SEO audit tab that produces a polished PDF for a prospective partner. Subject is a `Prospect` (in-memory, not in Airtable), distinct from `Partner`. GSC/GA4 are optional per prospect; falls back to DataForSEO-only when absent. Crawl runs on **DataForSEO's On-Page API** (their crawl infrastructure bypasses the Cloudflare-class WAFs that were defeating the old native-fetch crawler). JS rendering is auto-detected via a single-page `instant_pages` probe — if the static probe returns title + description, we run a static crawl; otherwise we re-run with `enable_javascript: true`. Requires Vercel Pro for the 800s Fluid Compute function limit.
 
 ### Four up-front decisions (confirmed with user)
-- **Crawler:** `cheerio` + native `fetch` — no puppeteer/playwright. SPA shells flagged, not re-rendered.
+- **Crawler:** DataForSEO On-Page API. Public surface lives in `lib/audit-crawl.ts` (was `lib/crawler.ts`). JS rendering decided per-audit by the `instant_pages` probe — no manual flag.
 - **PDF library:** `@react-pdf/renderer` — pure JS, no Chrome dep.
 - **PDF storage:** Vercel Blob (public-via-unguessable-slug, ≥16 chars entropy). Requires `BLOB_READ_WRITE_TOKEN` env var.
-- **Vercel plan:** Pro, 300s max function duration.
+- **Vercel plan:** Pro, 800s max function duration (Fluid Compute).
 
 ### Additional constraints
-- Log actual DataForSEO + Claude cost per audit to server console. Surface total cost + duration in the PDF footer ("Audit generated in X minutes using verified first-party data") so the user can validate the ~$0.85-$1.00/audit estimate during pilot.
+- Log actual DataForSEO + Claude cost per audit to server console. Surface total cost + duration in the PDF footer ("Audit generated in X minutes using verified first-party data") so the user can validate the per-audit cost estimate during pilot. **Cost has moved up vs. the old crawler:** budget **~$1.00–$2.50/audit** depending on site size and whether JS rendering kicks in (static crawl ≈ +$0.10–0.50, JS-rendered ≈ +$0.30–1.50 above the previous Claude + competitive/backlink baseline).
 - Audit synthesis uses **`claude-sonnet-4-6`** (not Opus 4.7). Opus was hitting stream-idle timeouts on the 30-40k-token audit payload; Sonnet streams faster and is sufficient for structured JSON output. If finding quality regresses, swap back to Opus with a different workaround (shorter prompt, chunked synthesis).
 - Hard constraint: Claude produces EXACTLY 5-7 findings. Extras go into `appendixIssues` as one-liners. Validated server-side — route returns 502 if the count is wrong.
 - Every finding must cite a specific URL/count/percentage from the data. Generic claims forbidden.
@@ -135,11 +136,18 @@ Pre-sales SEO audit tab that produces a polished PDF for a prospective partner. 
 - Backlink risk must list 3-5 actual spam domain strings from the data.
 - Business-impact framing: if GA4 conversions are configured, translate traffic findings to leads/revenue. If not, acknowledge the gap.
 - 90-day roadmap must reference findings by number ("Resolves Finding #3").
+- **Schema coverage is sample-based** (~16 raw-HTML samples per audit: homepage + up to 4 reps each from service / location / blog buckets). DataForSEO's `/v3/on_page/pages` doesn't expose JSON-LD, so we pull raw HTML for representative URLs and parse with cheerio (`lib/schema-parse.ts`). Trade-off: long-tail pages outside the sample contribute zero schema signal. Acceptable for the audit's narrative; revisit if a finding requires per-page schema fidelity.
 
 ### Implementation status
 - **Completed:**
   - `lib/types.ts` — `Prospect`, `TargetMarket`, `CrawledPage`, `CrawlReport`, `DomainRankOverview`, `CompetitiveRow`, `CompetitiveReport`, `ReferringDomainSample`, `BacklinkReport`, `AuditGscSlice`, `AuditGa4Slice`, `AuditFinding`, `AuditSynthesis`, etc.
-  - `lib/crawler.ts` — sitemap discovery (robots.txt + `/sitemap.xml` + `/sitemap_index.xml`), mobile UA, nested sitemap-index support, 8s/page timeout, prioritized URL selection (home + service pages over blog archives), SPA-shell detection via `#root`/`#__next` + empty body.
+  - `lib/audit-crawl.ts` — public crawl entry point. Orchestrates sitemap discovery (`lib/sitemap.ts`), JS-render auto-detect (`lib/dataforseo-onpage.ts` / `instant_pages`), the multi-page On-Page crawl, link-graph fetch, raw-HTML schema sampling, and shape adaptation back to the legacy `CrawlResults` interface (`lib/onpage-to-crawl.ts`).
+  - `lib/dataforseo-onpage.ts` — On-Page API client (`instant_pages`, `task_post`, `summary` polling, `pages`, `links`, `raw_html`). Same auth + 429-retry pattern as `lib/dataforseo.ts`. Schemas use `.passthrough()` and `.optional()` liberally because the documented response shape is best-effort.
+  - `lib/schema-parse.ts` — cheerio-based JSON-LD extraction + `buildSchemaCoverageMatrix` + the page-classification helpers.
+  - `lib/sitemap.ts` — robots.txt + sitemap.xml / sitemap_index.xml discovery via native fetch (these endpoints aren't typically WAF-protected).
+  - `lib/dataforseo.ts` — added `domainRankOverview`, `rankedKeywords`, `serpCompetitors`, `backlinksSummary`, `referringDomainsWithSpamScore`. Competitive rollup runs at **state granularity** (not city) because Labs endpoints reject city-level location names — PDF still labels each row with the original city.
+  - `lib/audit-cost.ts` — per-audit cost accumulator using `AsyncLocalStorage`. `lib/claude.ts` + `lib/dataforseo.ts` + `lib/dataforseo-onpage.ts` report into it via `recordClaudeCost` / `recordDataForSEOCost`. Route wraps pipeline with `withAuditCost(...)`.
+  - `app/api/audit/crawl/route.ts` — POST, `maxDuration=800`. Delegates to `crawlSite` (now from `@/lib/audit-crawl`).
   - `lib/dataforseo.ts` — added `domainRankOverview`, `rankedKeywords`, `serpCompetitors`, `backlinksSummary`, `referringDomainsWithSpamScore`. Competitive rollup runs at **state granularity** (not city) because Labs endpoints reject city-level location names — PDF still labels each row with the original city.
   - `lib/audit-cost.ts` — per-audit cost accumulator using `AsyncLocalStorage`. `lib/claude.ts` + `lib/dataforseo.ts` report into it via `recordClaudeCost` / `recordDataForSEOCost`. Route wraps pipeline with `withAuditCost(...)`.
   - `app/api/audit/crawl/route.ts` — POST, `maxDuration=300`. Delegates to `crawlSite`.
