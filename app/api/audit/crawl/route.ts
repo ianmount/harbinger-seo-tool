@@ -3,9 +3,9 @@ import { z } from "zod"
 import { crawlSite, CrawlError } from "@/lib/crawler"
 
 export const dynamic = "force-dynamic"
-// Crawl can take up to ~60s for 50 pages at 5 concurrent. Request the full
-// 300s allowance on Vercel Pro.
-export const maxDuration = 300
+// Crawl can take several minutes on large sitemaps in full mode. Request
+// the 800s allowance available on Vercel Pro with Fluid Compute enabled.
+export const maxDuration = 800
 
 const bodySchema = z.object({
   domain: z.string().min(3),
