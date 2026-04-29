@@ -32,12 +32,16 @@ const SAMPLE_MAX_PAGES = 50
 const FULL_MAX_PAGES_CEILING = 2_000
 
 /**
- * Cap on raw-HTML schema samples per audit. Each call costs one
- * `/v3/on_page/raw_html` request; 16 keeps the schema slice meaningful
- * without ballooning the per-audit DataForSEO bill.
+ * Cap on raw-HTML schema samples per crawl. Each call costs one
+ * `/v3/on_page/raw_html` request (~$0.0005). 50 buys meaningful
+ * deployment-depth signal — for a 12-page service section the matrix
+ * can now report "Service deployed on 3 of 12 service pages" instead
+ * of the binary "exists somewhere" view that masked partial deployment.
  */
-const SCHEMA_SAMPLE_CAP = 16
+const SCHEMA_SAMPLE_CAP = 50
 const SCHEMA_SAMPLE_CONCURRENCY = 5
+/** Per-bucket cap inside SCHEMA_SAMPLE_CAP. ~12 each + homepage + tail. */
+const SCHEMA_SAMPLE_PER_BUCKET = 12
 
 export class CrawlError extends Error {
   constructor(message: string) {
@@ -96,11 +100,20 @@ function pickSchemaSampleUrls(crawledUrls: string[]): string[] {
     const bucket = classifyPageType(url)
     if (bucket === "homepage" && !slots.homepage) {
       slots.homepage = url
-    } else if (bucket === "service" && slots.serviceUrls.length < 4) {
+    } else if (
+      bucket === "service" &&
+      slots.serviceUrls.length < SCHEMA_SAMPLE_PER_BUCKET
+    ) {
       slots.serviceUrls.push(url)
-    } else if (bucket === "location" && slots.locationUrls.length < 4) {
+    } else if (
+      bucket === "location" &&
+      slots.locationUrls.length < SCHEMA_SAMPLE_PER_BUCKET
+    ) {
       slots.locationUrls.push(url)
-    } else if (bucket === "blog" && slots.blogUrls.length < 4) {
+    } else if (
+      bucket === "blog" &&
+      slots.blogUrls.length < SCHEMA_SAMPLE_PER_BUCKET
+    ) {
       slots.blogUrls.push(url)
     } else if (bucket === null) {
       slots.unclassified.push(url)
