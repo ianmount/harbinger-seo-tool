@@ -398,66 +398,6 @@ export function CrawlDetail({ runId }: { runId: string }) {
           <h3 className="font-sans text-sm font-extrabold uppercase tracking-[0.18em] text-muted-foreground">
             Schema coverage
           </h3>
-          <details className="rounded-md border border-border bg-card/50 p-3 text-xs text-muted-foreground">
-            <summary className="cursor-pointer font-medium text-foreground">
-              How are pages classified?
-            </summary>
-            <div className="mt-2 space-y-2">
-              <p>
-                Pages are bucketed by URL path, then each bucket is scored
-                against the schema types a local-service business should be
-                carrying. Classification order: <b>homepage</b> → <b>location</b>{" "}
-                → <b>blog</b> → <b>service</b> (first match wins, so a homepage
-                whose path is <code>/</code> never gets miscategorized as a
-                service page).
-              </p>
-              <ul className="ml-4 list-disc space-y-1">
-                <li>
-                  <b>Homepage</b> — path is <code>/</code>, empty, or{" "}
-                  <code>/index.html</code>. Expected:{" "}
-                  <code>Organization</code>, <code>LocalBusiness</code> (any
-                  subtype like <code>Plumber</code> / <code>HVACBusiness</code>{" "}
-                  counts), <code>WebSite</code>.
-                </li>
-                <li>
-                  <b>Location</b> — paths matching{" "}
-                  <code>/locations/</code>, <code>/areas-served/</code>,{" "}
-                  <code>/service-areas/</code>, <code>/cities/</code>,{" "}
-                  <code>/neighborhoods/</code>. Expected:{" "}
-                  <code>LocalBusiness</code>, <code>BreadcrumbList</code>.
-                </li>
-                <li>
-                  <b>Blog</b> — paths matching <code>/blog/</code>,{" "}
-                  <code>/news/</code>, <code>/articles/</code>,{" "}
-                  <code>/posts/</code>, <code>/insights/</code>, or a date
-                  pattern like <code>/2024/05/</code>. Expected:{" "}
-                  <code>Article</code> (or <code>BlogPosting</code> /{" "}
-                  <code>NewsArticle</code>), <code>BreadcrumbList</code>.
-                </li>
-                <li>
-                  <b>Service</b> — paths matching <code>/services/</code> or
-                  common top-level service slugs (<code>/plumbing/</code>,{" "}
-                  <code>/hvac/</code>, <code>/roofing/</code>,{" "}
-                  <code>/repair/</code>, <code>/installation/</code>, etc.).
-                  Expected: <code>Service</code>, <code>BreadcrumbList</code>.
-                </li>
-                <li>
-                  <b>Pages with no matching pattern are excluded.</b> They
-                  don&apos;t contribute to any bucket&apos;s pageCount and aren&apos;t
-                  scored — most often these are utility pages (cart, search,
-                  contact form, account) where schema doesn&apos;t carry SEO weight.
-                </li>
-              </ul>
-              <p>
-                Schema is sample-based: only ~16 representative pages have
-                their JSON-LD extracted per crawl (homepage + up to 4 reps from
-                each bucket). A bucket&apos;s <code>typesFound</code> is the
-                union across the sampled pages in that bucket; an empty
-                <code>typesMissing</code> means at least one sampled page in
-                the bucket carries every expected type.
-              </p>
-            </div>
-          </details>
           <div className="overflow-hidden rounded-md border border-border">
             <Table>
               <TableHeader>
