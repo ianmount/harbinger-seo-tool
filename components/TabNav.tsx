@@ -38,10 +38,10 @@ const CATEGORIES: Category[] = [
   },
 ]
 
-const UTILITY_TAB: Tab = {
-  href: "/keyword-research",
-  label: "Keyword Research",
-}
+const UTILITY_TABS: Tab[] = [
+  { href: "/keyword-research", label: "Keyword Research" },
+  { href: "/tools/dataforseo", label: "DataForSEO APIs" },
+]
 
 function activeCategory(pathname: string): Category["key"] | null {
   if (pathname === "/onboarding") return "onboarding"
@@ -52,7 +52,7 @@ function activeCategory(pathname: string): Category["key"] | null {
 }
 
 function isUtilityActive(pathname: string): boolean {
-  return pathname === UTILITY_TAB.href
+  return UTILITY_TABS.some((t) => t.href === pathname)
 }
 
 export function TabNav() {
@@ -136,18 +136,24 @@ export function TabNav() {
             Tools
           </span>
           <div className="-mb-px flex items-stretch gap-1">
-            <Link
-              href={`${UTILITY_TAB.href}${suffix}`}
-              aria-current={utilityActive ? "page" : undefined}
-              className={cn(
-                "relative whitespace-nowrap border-b-2 px-3 py-2 font-sans text-[11.5px] font-bold uppercase tracking-[0.14em] transition-colors",
-                utilityActive
-                  ? "border-brand-red text-foreground"
-                  : "border-transparent text-ink-3 hover:text-foreground",
-              )}
-            >
-              {UTILITY_TAB.label}
-            </Link>
+            {UTILITY_TABS.map((tab) => {
+              const active = pathname === tab.href
+              return (
+                <Link
+                  key={tab.href}
+                  href={`${tab.href}${suffix}`}
+                  aria-current={active ? "page" : undefined}
+                  className={cn(
+                    "relative whitespace-nowrap border-b-2 px-3 py-2 font-sans text-[11.5px] font-bold uppercase tracking-[0.14em] transition-colors",
+                    active
+                      ? "border-brand-red text-foreground"
+                      : "border-transparent text-ink-3 hover:text-foreground",
+                  )}
+                >
+                  {tab.label}
+                </Link>
+              )
+            })}
           </div>
         </div>
       </div>
