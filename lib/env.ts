@@ -35,6 +35,15 @@ const envSchema = z.object({
   // with a free key from Google Cloud Console you get 25,000/day. When
   // unset, the audit pipeline skips the PageSpeed pass with a warning.
   PAGESPEED_API_KEY: optionalString,
+  // Supabase — persistent storage for the Technical Crawls tab (crawl
+  // history + per-partner schedules). Required only by /technical-crawls;
+  // the rest of the app works without these set.
+  SUPABASE_URL: optionalString,
+  SUPABASE_SERVICE_ROLE_KEY: optionalString,
+  // Bearer token used by the Claude Code desktop Routine to authenticate
+  // against /api/technical-crawls/* without going through /login. Generate
+  // with: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+  ROUTINE_API_TOKEN: optionalString,
 })
 
 export type Env = z.infer<typeof envSchema>

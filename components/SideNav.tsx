@@ -41,6 +41,7 @@ const SECTIONS: Section[] = [
     label: "Tools",
     tabs: [
       { href: "/keyword-research", label: "Keyword Research" },
+      { href: "/technical-crawls", label: "Technical Crawls" },
       { href: "/tools/dataforseo", label: "DataForSEO APIs" },
     ],
   },
