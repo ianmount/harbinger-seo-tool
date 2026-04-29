@@ -431,13 +431,20 @@ export async function runTechnicalCrawl(
 // ── Schedule math ─────────────────────────────────────────────────────────
 
 /**
+ * Hour of UTC day we anchor next_run_at to. Noon UTC = 8am ET (during EDT)
+ * = 7am CT = 4am PT = 2am Hawaii — the *date* renders as "day-X" in every
+ * North American timezone when displayed via toLocaleString(). It also
+ * means a daily routine ticking at 8am-9am ET reliably picks up runs
+ * scheduled for that day (12:00 UTC <= now() once the routine fires).
+ */
+const SCHEDULE_HOUR_UTC = 12
+
+/**
  * Compute the next time a subscription should fire. Day-of-month is clamped
  * to the target month's length (e.g. day=31 in February → last day of Feb).
  * "Past today" always rolls to the next period — the routine catches up on
- * missed runs by firing them on the next tick after the laptop wakes up.
- *
- * Stored UTC. We anchor day-boundary math to the user's timezone so e.g.
- * "monthly on the 1st" fires on midnight ET, not midnight UTC.
+ * missed runs by firing them on the next tick after the user's machine
+ * wakes up.
  */
 export function computeNextRunAt(
   frequency: "weekly" | "monthly",
@@ -457,16 +464,23 @@ export function computeNextRunAt(
 }
 
 function nextWeekly(from: Date, dayOfWeek: number): Date {
-  // Move to 00:00 UTC, then advance to the requested weekday strictly in
-  // the future. We lean on UTC rather than the user's tz because the
-  // routine ticks daily anyway — the time-of-day knob was deliberately
-  // dropped from the UI.
+  // Anchor to noon UTC of "today UTC", then advance to the next requested
+  // weekday strictly in the future.
   const next = new Date(
-    Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()),
+    Date.UTC(
+      from.getUTCFullYear(),
+      from.getUTCMonth(),
+      from.getUTCDate(),
+      SCHEDULE_HOUR_UTC,
+    ),
   )
-  const today = next.getUTCDay()
-  let delta = (dayOfWeek - today + 7) % 7
-  if (delta === 0) delta = 7
+  if (next.getTime() <= from.getTime()) {
+    // It's already past noon UTC today — bump to tomorrow before applying
+    // the weekday offset so we never return a "next run" in the past.
+    next.setUTCDate(next.getUTCDate() + 1)
+  }
+  const baseDow = next.getUTCDay()
+  const delta = (dayOfWeek - baseDow + 7) % 7
   next.setUTCDate(next.getUTCDate() + delta)
   return next
 }
@@ -487,5 +501,5 @@ function clampedMonthly(year: number, monthOffset: number, day: number): Date {
   // Last day of safeMonth = day 0 of safeMonth+1.
   const lastDay = new Date(Date.UTC(safeYear, safeMonth + 1, 0)).getUTCDate()
   const clamped = Math.min(Math.max(1, day), lastDay)
-  return new Date(Date.UTC(safeYear, safeMonth, clamped))
+  return new Date(Date.UTC(safeYear, safeMonth, clamped, SCHEDULE_HOUR_UTC))
 }
