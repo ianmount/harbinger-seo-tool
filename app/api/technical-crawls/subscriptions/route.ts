@@ -27,8 +27,27 @@ const createSchema = z.discriminatedUnion("frequency", [
   }),
 ])
 
+function safeSupabase():
+  | { ok: true; client: ReturnType<typeof getSupabase> }
+  | { ok: false; response: NextResponse } {
+  try {
+    return { ok: true, client: getSupabase() }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Supabase not configured"
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: `Supabase configuration error: ${message}` },
+        { status: 500 },
+      ),
+    }
+  }
+}
+
 export async function GET() {
-  const supabase = getSupabase()
+  const safe = safeSupabase()
+  if (!safe.ok) return safe.response
+  const supabase = safe.client
   const { data, error } = await supabase
     .from("crawl_subscriptions")
     .select("*")
@@ -74,7 +93,9 @@ export async function POST(request: Request) {
     dayOfMonth,
   }).toISOString()
 
-  const supabase = getSupabase()
+  const safe = safeSupabase()
+  if (!safe.ok) return safe.response
+  const supabase = safe.client
   const { data, error } = await supabase
     .from("crawl_subscriptions")
     .upsert(

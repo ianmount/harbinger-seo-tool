@@ -24,7 +24,16 @@ export async function GET(request: Request) {
     200,
   )
 
-  const supabase = getSupabase()
+  let supabase: ReturnType<typeof getSupabase>
+  try {
+    supabase = getSupabase()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Supabase not configured"
+    return NextResponse.json(
+      { error: `Supabase configuration error: ${message}` },
+      { status: 500 },
+    )
+  }
   let query = supabase
     .from("crawl_runs")
     .select(SHALLOW_COLUMNS)
