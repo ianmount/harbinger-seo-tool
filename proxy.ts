@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server"
+import { timingSafeEqual } from "node:crypto"
 import { COOKIE_NAME, PUBLIC_PATHS, verifyToken } from "@/lib/auth"
 
 // Next.js 16 renamed the middleware file convention to `proxy` (middleware.ts
@@ -9,10 +10,35 @@ function isPublicPath(pathname: string): boolean {
   return (PUBLIC_PATHS as readonly string[]).includes(pathname)
 }
 
+/**
+ * Bearer-token auth for the Claude Code desktop Routine that drives
+ * scheduled technical crawls. The Routine runs from the user's machine and
+ * can't carry the cookie set by /login, so we accept `Authorization: Bearer
+ * <ROUTINE_API_TOKEN>` for the /api/technical-crawls/* prefix only. Constant
+ * time compare via timingSafeEqual to avoid a length-leaking shortcut.
+ */
+function isRoutineAuthorized(request: NextRequest, pathname: string): boolean {
+  if (!pathname.startsWith("/api/technical-crawls/")) return false
+  const expected = process.env.ROUTINE_API_TOKEN
+  if (!expected) return false
+  const header = request.headers.get("authorization")
+  if (!header || !header.toLowerCase().startsWith("bearer ")) return false
+  const presented = header.slice(7).trim()
+  if (!presented) return false
+  const a = Buffer.from(expected)
+  const b = Buffer.from(presented)
+  if (a.length !== b.length) return false
+  return timingSafeEqual(a, b)
+}
+
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
 
   if (isPublicPath(pathname)) {
+    return NextResponse.next()
+  }
+
+  if (isRoutineAuthorized(request, pathname)) {
     return NextResponse.next()
   }
 
