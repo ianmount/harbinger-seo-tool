@@ -324,7 +324,7 @@ export function CrawlDetail({ runId }: { runId: string }) {
               active={openIssue === "non_ok"}
             />
             <Stat
-              label="Image alt coverage"
+              label="Image alt coverage (sampled)"
               value={`${summary.imageAltCoveragePercent}%`}
               tone={summary.imageAltCoveragePercent < 80 ? "warn" : undefined}
             />

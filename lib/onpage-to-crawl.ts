@@ -41,6 +41,14 @@ export interface SchemaSample {
   url: string
   types: string[]
   blocks: unknown[]
+  /**
+   * Image-alt stats parsed directly from this sample's raw HTML.
+   * Optional — older callers may not populate this; consumers should
+   * treat absence as "no override" and fall back to the page-level
+   * imagesTotal / imagesWithAlt fields from DataForSEO.
+   */
+  imagesTotal?: number
+  imagesWithAlt?: number
 }
 
 interface BuildOpts {
@@ -91,8 +99,18 @@ function rowToCrawledPage(
     h3s: row.h3s,
     schemaTypes: schema?.types ?? [],
     schemaBlocks: schema?.blocks ?? [],
-    imagesTotal: row.imagesTotal,
-    imagesWithAlt: row.imagesWithAlt,
+    // Only trust cheerio-derived alt stats from the schema sample. The
+    // page-level DFS fields (`meta.images_count` / `images_alt_count`)
+    // misreport with-alt counts as 0 even on sites with thorough alt
+    // coverage, which would (a) drag the sitewide alt-coverage average
+    // down and (b) raise false-positive "images missing alt" flags on
+    // pages with perfectly-tagged images. Setting both to 0 for unsampled
+    // pages keeps the alt-coverage stat honest as a sample-based number
+    // and prevents the per-page issue from firing on unverified data.
+    imagesTotal:
+      typeof schema?.imagesTotal === "number" ? schema.imagesTotal : 0,
+    imagesWithAlt:
+      typeof schema?.imagesWithAlt === "number" ? schema.imagesWithAlt : 0,
     internalLinksOut,
     wordCount: row.wordCount,
     loadTimeMs: row.loadTimeMs,
