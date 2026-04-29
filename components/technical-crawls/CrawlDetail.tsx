@@ -1,7 +1,9 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import { Download } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import {
   Table,
   TableBody,
@@ -26,6 +28,139 @@ function scoreBadgeVariant(score: number | null): "default" | "secondary" | "des
   if (score >= 90) return "default"
   if (score >= 50) return "secondary"
   return "destructive"
+}
+
+// ── CSV export ─────────────────────────────────────────────────────────────
+
+function csvEscape(value: unknown): string {
+  if (value == null) return ""
+  const str = String(value)
+  if (/[",\n\r]/.test(str)) return `"${str.replace(/"/g, '""')}"`
+  return str
+}
+
+function buildCsv(run: CrawlRunFull): string {
+  const lines: string[] = []
+  const push = (cells: unknown[]) => lines.push(cells.map(csvEscape).join(","))
+
+  // Section 1 — run metadata + summary stats. One row per metric so it's
+  // pivot-friendly in Excel.
+  push(["section", "metric", "value"])
+  push(["meta", "domain", run.domain])
+  push(["meta", "partner", run.partner_name ?? ""])
+  push(["meta", "started_at", run.started_at])
+  push(["meta", "finished_at", run.finished_at ?? ""])
+  push(["meta", "duration_seconds", run.duration_seconds ?? ""])
+  push(["meta", "cost_usd", run.cost_usd ?? ""])
+  push(["meta", "source", run.source])
+  push(["meta", "status", run.status])
+
+  if (run.summary) {
+    for (const [k, v] of Object.entries(run.summary)) {
+      if (typeof v === "object" && v !== null) {
+        push(["summary", k, JSON.stringify(v)])
+      } else {
+        push(["summary", k, v ?? ""])
+      }
+    }
+  }
+
+  if (run.lighthouse) {
+    push(["lighthouse_aggregate", "averageMobileScore", run.lighthouse.averageMobileScore ?? ""])
+    push(["lighthouse_aggregate", "homepageMobileScore", run.lighthouse.homepageMobileScore ?? ""])
+    if (run.lighthouse.skippedReason) {
+      push(["lighthouse_aggregate", "skippedReason", run.lighthouse.skippedReason])
+    }
+  }
+
+  // Section 2 — Lighthouse per URL.
+  lines.push("")
+  push(["lighthouse_url", "performanceScore", "lcp_ms", "inp_ms", "cls", "ttfb_ms"])
+  for (const p of run.lighthouse?.pages ?? []) {
+    push([p.url, p.performanceScore ?? "", p.lcpMs ?? "", p.inpMs ?? "", p.cls ?? "", p.ttfbMs ?? ""])
+  }
+
+  // Section 3 — schema coverage matrix.
+  lines.push("")
+  push(["schema_page_type", "page_count", "types_found", "types_missing", "pages_with_no_schema"])
+  for (const b of run.schema_coverage?.buckets ?? []) {
+    push([
+      b.pageType,
+      b.pageCount,
+      b.typesFound.join("|"),
+      b.typesMissing.join("|"),
+      b.pagesWithNoSchema,
+    ])
+  }
+
+  // Section 4 — sample pages flattened to one row per (page, issue). Pages
+  // with no issues still emit one row so they show up in the export.
+  lines.push("")
+  push([
+    "url",
+    "status",
+    "title",
+    "meta_description",
+    "canonical",
+    "word_count",
+    "images_total",
+    "images_with_alt",
+    "load_time_ms",
+    "redirect_hops",
+    "schema_types",
+    "issue_code",
+    "issue_message",
+  ])
+  for (const p of run.sample_pages ?? []) {
+    const base = [
+      p.url,
+      p.status,
+      p.title ?? "",
+      p.metaDescription ?? "",
+      p.canonical ?? "",
+      p.wordCount,
+      p.imagesTotal,
+      p.imagesWithAlt,
+      p.loadTimeMs,
+      Math.max(0, p.redirectChain.length - 1),
+      p.schemaTypes.join("|"),
+    ]
+    if (p.issues.length === 0) {
+      push([...base, "", ""])
+    } else {
+      for (const issue of p.issues) {
+        push([...base, issue.code, issue.message])
+      }
+    }
+  }
+
+  // Section 5 — non-OK pages (indexability tail).
+  if (run.indexability?.nonOkPages?.length) {
+    lines.push("")
+    push(["non_ok_url", "status"])
+    for (const p of run.indexability.nonOkPages) {
+      push([p.url, p.status])
+    }
+  }
+
+  return lines.join("\n")
+}
+
+function downloadCsv(run: CrawlRunFull): void {
+  const csv = buildCsv(run)
+  // Prepend BOM so Excel treats UTF-8 correctly on Windows.
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" })
+  const datePart = run.started_at.slice(0, 10)
+  const slug = (run.partner_name ?? run.domain).toLowerCase().replace(/[^a-z0-9]+/g, "-")
+  const filename = `technical-crawl-${slug}-${datePart}.csv`
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
 }
 
 /**
@@ -84,7 +219,7 @@ export function CrawlDetail({ runId }: { runId: string }) {
   return (
     <div className="space-y-8">
       <header className="space-y-1">
-        <div className="flex items-baseline gap-3">
+        <div className="flex flex-wrap items-baseline gap-3">
           <h2 className="font-sans text-xl font-extrabold tracking-tight">
             {run.partner_name ?? run.domain}
           </h2>
@@ -92,6 +227,17 @@ export function CrawlDetail({ runId }: { runId: string }) {
             {run.status}
           </Badge>
           <Badge variant="outline">{run.source}</Badge>
+          {run.status === "done" ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="ml-auto gap-2"
+              onClick={() => downloadCsv(run)}
+            >
+              <Download className="h-4 w-4" />
+              Download CSV
+            </Button>
+          ) : null}
         </div>
         <p className="text-sm text-muted-foreground">
           {run.domain} · started {formatDate(run.started_at)} · finished{" "}
@@ -252,6 +398,66 @@ export function CrawlDetail({ runId }: { runId: string }) {
           <h3 className="font-sans text-sm font-extrabold uppercase tracking-[0.18em] text-muted-foreground">
             Schema coverage
           </h3>
+          <details className="rounded-md border border-border bg-card/50 p-3 text-xs text-muted-foreground">
+            <summary className="cursor-pointer font-medium text-foreground">
+              How are pages classified?
+            </summary>
+            <div className="mt-2 space-y-2">
+              <p>
+                Pages are bucketed by URL path, then each bucket is scored
+                against the schema types a local-service business should be
+                carrying. Classification order: <b>homepage</b> → <b>location</b>{" "}
+                → <b>blog</b> → <b>service</b> (first match wins, so a homepage
+                whose path is <code>/</code> never gets miscategorized as a
+                service page).
+              </p>
+              <ul className="ml-4 list-disc space-y-1">
+                <li>
+                  <b>Homepage</b> — path is <code>/</code>, empty, or{" "}
+                  <code>/index.html</code>. Expected:{" "}
+                  <code>Organization</code>, <code>LocalBusiness</code> (any
+                  subtype like <code>Plumber</code> / <code>HVACBusiness</code>{" "}
+                  counts), <code>WebSite</code>.
+                </li>
+                <li>
+                  <b>Location</b> — paths matching{" "}
+                  <code>/locations/</code>, <code>/areas-served/</code>,{" "}
+                  <code>/service-areas/</code>, <code>/cities/</code>,{" "}
+                  <code>/neighborhoods/</code>. Expected:{" "}
+                  <code>LocalBusiness</code>, <code>BreadcrumbList</code>.
+                </li>
+                <li>
+                  <b>Blog</b> — paths matching <code>/blog/</code>,{" "}
+                  <code>/news/</code>, <code>/articles/</code>,{" "}
+                  <code>/posts/</code>, <code>/insights/</code>, or a date
+                  pattern like <code>/2024/05/</code>. Expected:{" "}
+                  <code>Article</code> (or <code>BlogPosting</code> /{" "}
+                  <code>NewsArticle</code>), <code>BreadcrumbList</code>.
+                </li>
+                <li>
+                  <b>Service</b> — paths matching <code>/services/</code> or
+                  common top-level service slugs (<code>/plumbing/</code>,{" "}
+                  <code>/hvac/</code>, <code>/roofing/</code>,{" "}
+                  <code>/repair/</code>, <code>/installation/</code>, etc.).
+                  Expected: <code>Service</code>, <code>BreadcrumbList</code>.
+                </li>
+                <li>
+                  <b>Pages with no matching pattern are excluded.</b> They
+                  don&apos;t contribute to any bucket&apos;s pageCount and aren&apos;t
+                  scored — most often these are utility pages (cart, search,
+                  contact form, account) where schema doesn&apos;t carry SEO weight.
+                </li>
+              </ul>
+              <p>
+                Schema is sample-based: only ~16 representative pages have
+                their JSON-LD extracted per crawl (homepage + up to 4 reps from
+                each bucket). A bucket&apos;s <code>typesFound</code> is the
+                union across the sampled pages in that bucket; an empty
+                <code>typesMissing</code> means at least one sampled page in
+                the bucket carries every expected type.
+              </p>
+            </div>
+          </details>
           <div className="overflow-hidden rounded-md border border-border">
             <Table>
               <TableHeader>
