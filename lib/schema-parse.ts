@@ -269,11 +269,23 @@ export function buildSchemaCoverageMatrix(
     const pagesInBucket = grouped[pageType]
     const typesFoundSet = new Set<string>()
     let pagesWithNoSchema = 0
+    const expected = EXPECTED_TYPES_BY_PAGE_TYPE[pageType]
+    // Per-type deployment depth: for each expected type, count how many
+    // sampled pages in the bucket actually carry it (or a satisfying
+    // alias). Counts pages, not @type occurrences — duplicates on a
+    // single page count once.
+    const expectedTypeCoverage: Record<string, number> = {}
+    for (const e of expected) expectedTypeCoverage[e] = 0
     for (const p of pagesInBucket) {
       if (p.schemaTypes.length === 0) pagesWithNoSchema++
       for (const t of p.schemaTypes) typesFoundSet.add(t)
+      const pageTypes = new Set(p.schemaTypes)
+      for (const e of expected) {
+        if (expectationSatisfied(e, pageTypes)) {
+          expectedTypeCoverage[e] += 1
+        }
+      }
     }
-    const expected = EXPECTED_TYPES_BY_PAGE_TYPE[pageType]
     const missing = expected.filter(
       (e) => !expectationSatisfied(e, typesFoundSet),
     )
@@ -285,6 +297,7 @@ export function buildSchemaCoverageMatrix(
       typesExpected: expected,
       typesMissing: missing,
       pagesWithNoSchema,
+      expectedTypeCoverage,
     }
   })
 

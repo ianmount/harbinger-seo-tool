@@ -528,6 +528,14 @@ export interface SchemaPageTypeBucket {
   typesMissing: string[]
   /** Pages in this bucket with zero JSON-LD blocks. */
   pagesWithNoSchema: number
+  /**
+   * Deployment depth for each expected type — `expectedType → number of
+   * sampled pages in this bucket that carry the type (or an accepted
+   * alias, e.g. a LocalBusiness subtype counts toward "LocalBusiness")`.
+   * Lets the dashboard render "Service: 3 / 12 service pages" instead of
+   * the binary "found / missing" view that hid partial deployment.
+   */
+  expectedTypeCoverage: Record<string, number>
 }
 
 /**

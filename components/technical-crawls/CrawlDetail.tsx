@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { Download } from "lucide-react"
+import { Download, ExternalLink } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -12,7 +12,23 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import type { TechnicalIssuePages } from "@/lib/technical-crawl"
 import type { CrawlRunFull } from "./types"
+
+/**
+ * Issue tile keys correspond to fields on TechnicalIssuePages plus a pair
+ * of derived ones ("non_ok") that pull from indexability. Used to decide
+ * which list to render in the reveal panel after a tile click.
+ */
+type IssueKey =
+  | "missing_titles"
+  | "missing_descriptions"
+  | "missing_canonicals"
+  | "duplicate_titles"
+  | "duplicate_descriptions"
+  | "thin_content"
+  | "spa_shell"
+  | "non_ok"
 
 function formatDate(iso: string | null): string {
   if (!iso) return "—"
@@ -143,6 +159,34 @@ function buildCsv(run: CrawlRunFull): string {
     }
   }
 
+  // Section 6 — full per-issue URL lists. One row per (issue_code, url) so
+  // the reader can filter by code in Excel and get every affected URL,
+  // not just the ones that made it into the 16-page sample.
+  const issuePages = run.issue_pages
+  if (issuePages) {
+    lines.push("")
+    push(["issue_code", "url", "extra"])
+    for (const url of issuePages.missingTitles ?? []) push(["missing_title", url, ""])
+    for (const url of issuePages.missingDescriptions ?? [])
+      push(["missing_description", url, ""])
+    for (const url of issuePages.missingCanonicals ?? [])
+      push(["missing_canonical", url, ""])
+    for (const url of issuePages.spaShell ?? []) push(["spa_shell", url, ""])
+    for (const p of issuePages.thinContent ?? [])
+      push(["thin_content", p.url, `wordCount=${p.wordCount}`])
+    for (const p of issuePages.nonOk ?? [])
+      push(["non_ok", p.url, `status=${p.status}`])
+    // Duplicate groups: one row per URL in each group, with the shared title/desc
+    // in the "extra" column so the reader can see what the duplicates share.
+    for (const g of issuePages.duplicateTitles ?? []) {
+      for (const url of g.urls) push(["duplicate_title", url, `title=${g.title}`])
+    }
+    for (const g of issuePages.duplicateDescriptions ?? []) {
+      for (const url of g.urls)
+        push(["duplicate_description", url, `description=${g.description}`])
+    }
+  }
+
   return lines.join("\n")
 }
 
@@ -173,12 +217,14 @@ export function CrawlDetail({ runId }: { runId: string }) {
   const [run, setRun] = useState<CrawlRunFull | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [openIssue, setOpenIssue] = useState<IssueKey | null>(null)
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
     setRun(null)
+    setOpenIssue(null)
     async function load() {
       try {
         const res = await fetch(`/api/technical-crawls/runs/${runId}`)
@@ -270,6 +316,12 @@ export function CrawlDetail({ runId }: { runId: string }) {
               label="Non-OK pages"
               value={summary.nonOkPages}
               tone={summary.nonOkPages > 0 ? "warn" : undefined}
+              onClick={
+                summary.nonOkPages > 0
+                  ? () => setOpenIssue(toggle(openIssue, "non_ok"))
+                  : undefined
+              }
+              active={openIssue === "non_ok"}
             />
             <Stat
               label="Image alt coverage"
@@ -280,39 +332,90 @@ export function CrawlDetail({ runId }: { runId: string }) {
               label="Missing titles"
               value={summary.missingTitles}
               tone={summary.missingTitles > 0 ? "warn" : undefined}
+              onClick={
+                summary.missingTitles > 0
+                  ? () => setOpenIssue(toggle(openIssue, "missing_titles"))
+                  : undefined
+              }
+              active={openIssue === "missing_titles"}
             />
             <Stat
               label="Missing descriptions"
               value={summary.missingDescriptions}
               tone={summary.missingDescriptions > 0 ? "warn" : undefined}
+              onClick={
+                summary.missingDescriptions > 0
+                  ? () => setOpenIssue(toggle(openIssue, "missing_descriptions"))
+                  : undefined
+              }
+              active={openIssue === "missing_descriptions"}
             />
             <Stat
               label="Missing canonicals"
               value={summary.missingCanonicals}
               tone={summary.missingCanonicals > 0 ? "warn" : undefined}
+              onClick={
+                summary.missingCanonicals > 0
+                  ? () => setOpenIssue(toggle(openIssue, "missing_canonicals"))
+                  : undefined
+              }
+              active={openIssue === "missing_canonicals"}
             />
             <Stat
               label="Duplicate title groups"
               value={summary.duplicateTitleGroups}
               tone={summary.duplicateTitleGroups > 0 ? "warn" : undefined}
+              onClick={
+                summary.duplicateTitleGroups > 0
+                  ? () => setOpenIssue(toggle(openIssue, "duplicate_titles"))
+                  : undefined
+              }
+              active={openIssue === "duplicate_titles"}
             />
             <Stat
               label="Duplicate desc. groups"
               value={summary.duplicateDescriptionGroups}
               tone={summary.duplicateDescriptionGroups > 0 ? "warn" : undefined}
+              onClick={
+                summary.duplicateDescriptionGroups > 0
+                  ? () => setOpenIssue(toggle(openIssue, "duplicate_descriptions"))
+                  : undefined
+              }
+              active={openIssue === "duplicate_descriptions"}
             />
             <Stat
               label="Thin content pages"
               value={summary.thinContentPages}
               tone={summary.thinContentPages > 0 ? "warn" : undefined}
+              onClick={
+                summary.thinContentPages > 0
+                  ? () => setOpenIssue(toggle(openIssue, "thin_content"))
+                  : undefined
+              }
+              active={openIssue === "thin_content"}
             />
             <Stat
               label="SPA shell pages"
               value={summary.spaShellPages}
               tone={summary.spaShellPages > 0 ? "warn" : undefined}
+              onClick={
+                summary.spaShellPages > 0
+                  ? () => setOpenIssue(toggle(openIssue, "spa_shell"))
+                  : undefined
+              }
+              active={openIssue === "spa_shell"}
             />
             <Stat label="Sitemap URLs" value={summary.sitemapSize} />
           </div>
+
+          {openIssue ? (
+            <IssueRevealPanel
+              issueKey={openIssue}
+              issuePages={run.issue_pages}
+              indexability={run.indexability}
+              onClose={() => setOpenIssue(null)}
+            />
+          ) : null}
         </section>
       ) : null}
 
@@ -404,36 +507,75 @@ export function CrawlDetail({ runId }: { runId: string }) {
                 <TableRow>
                   <TableHead>Page type</TableHead>
                   <TableHead className="text-right">Pages</TableHead>
-                  <TableHead>Types found</TableHead>
-                  <TableHead>Missing</TableHead>
+                  <TableHead>Deployment depth (sampled / bucket)</TableHead>
+                  <TableHead>Missing entirely</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {schema.buckets.map((b) => (
-                  <TableRow key={b.pageType}>
-                    <TableCell className="font-medium capitalize">
-                      {b.pageType}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {b.pageCount}
-                    </TableCell>
-                    <TableCell className="text-xs">
-                      {b.typesFound.length === 0 ? "—" : b.typesFound.join(", ")}
-                    </TableCell>
-                    <TableCell className="text-xs">
-                      {b.typesMissing.length === 0 ? (
-                        <span className="text-muted-foreground">complete</span>
-                      ) : (
-                        <span className="text-destructive">
-                          {b.typesMissing.join(", ")}
-                        </span>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {schema.buckets.map((b) => {
+                  const cov = b.expectedTypeCoverage ?? {}
+                  return (
+                    <TableRow key={b.pageType}>
+                      <TableCell className="font-medium capitalize">
+                        {b.pageType}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {b.pageCount}
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        {b.typesExpected.length === 0 ? (
+                          "—"
+                        ) : (
+                          <ul className="space-y-0.5">
+                            {b.typesExpected.map((t) => {
+                              const found = cov[t] ?? 0
+                              const total = b.pageCount
+                              const ratio =
+                                total === 0 ? 0 : found / total
+                              const tone =
+                                total === 0
+                                  ? "text-muted-foreground"
+                                  : ratio === 1
+                                    ? "text-foreground"
+                                    : ratio === 0
+                                      ? "text-destructive"
+                                      : "text-amber-600 dark:text-amber-400"
+                              return (
+                                <li key={t} className={tone}>
+                                  <span className="font-medium">{t}</span>:{" "}
+                                  {found} / {total}
+                                  {total > 0
+                                    ? ` (${Math.round(ratio * 100)}%)`
+                                    : ""}
+                                </li>
+                              )
+                            })}
+                          </ul>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        {b.typesMissing.length === 0 ? (
+                          <span className="text-muted-foreground">none</span>
+                        ) : (
+                          <span className="text-destructive">
+                            {b.typesMissing.join(", ")}
+                          </span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
               </TableBody>
             </Table>
           </div>
+          <p className="text-xs text-muted-foreground">
+            Deployment depth = sampled pages in the bucket carrying the type
+            (or an accepted alias, e.g. <code>Plumber</code> counts toward{" "}
+            <code>LocalBusiness</code>). Schema is sample-based — only ~50
+            representative pages have JSON-LD extracted per crawl, so
+            denominators reflect the sample, not every crawled page in the
+            bucket.
+          </p>
         </section>
       ) : null}
 
@@ -533,25 +675,269 @@ export function CrawlDetail({ runId }: { runId: string }) {
   )
 }
 
+function toggle(current: IssueKey | null, next: IssueKey): IssueKey | null {
+  return current === next ? null : next
+}
+
+const ISSUE_LABELS: Record<IssueKey, string> = {
+  missing_titles: "Missing titles",
+  missing_descriptions: "Missing descriptions",
+  missing_canonicals: "Missing canonicals",
+  duplicate_titles: "Duplicate title groups",
+  duplicate_descriptions: "Duplicate description groups",
+  thin_content: "Thin content pages",
+  spa_shell: "SPA shell pages",
+  non_ok: "Non-OK pages",
+}
+
+function IssueRevealPanel({
+  issueKey,
+  issuePages,
+  indexability,
+  onClose,
+}: {
+  issueKey: IssueKey
+  issuePages: TechnicalIssuePages | null
+  indexability: CrawlRunFull["indexability"]
+  onClose: () => void
+}) {
+  const label = ISSUE_LABELS[issueKey]
+  const truncation = issuePages?.truncated as
+    | Partial<Record<string, { actual: number; shown: number }>>
+    | undefined
+
+  // Most issue lists come from issuePages; non_ok also exists in the older
+  // indexability column, so we fall back to that for runs persisted before
+  // issue_pages was added.
+  const truncationMeta =
+    issueKey === "missing_titles"
+      ? truncation?.missingTitles
+      : issueKey === "missing_descriptions"
+        ? truncation?.missingDescriptions
+        : issueKey === "missing_canonicals"
+          ? truncation?.missingCanonicals
+          : issueKey === "duplicate_titles"
+            ? truncation?.duplicateTitles
+            : issueKey === "duplicate_descriptions"
+              ? truncation?.duplicateDescriptions
+              : issueKey === "thin_content"
+                ? truncation?.thinContent
+                : issueKey === "spa_shell"
+                  ? truncation?.spaShell
+                  : issueKey === "non_ok"
+                    ? truncation?.nonOk
+                    : undefined
+
+  let body: React.ReactNode
+
+  switch (issueKey) {
+    case "missing_titles":
+    case "missing_descriptions":
+    case "missing_canonicals":
+    case "spa_shell": {
+      const list =
+        issueKey === "missing_titles"
+          ? issuePages?.missingTitles ?? []
+          : issueKey === "missing_descriptions"
+            ? issuePages?.missingDescriptions ?? []
+            : issueKey === "missing_canonicals"
+              ? issuePages?.missingCanonicals ?? []
+              : issuePages?.spaShell ?? []
+      body = <UrlList urls={list} />
+      break
+    }
+    case "thin_content": {
+      const list = issuePages?.thinContent ?? []
+      body = (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>URL</TableHead>
+              <TableHead className="w-24 text-right">Words</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {list.map((p) => (
+              <TableRow key={p.url}>
+                <TableCell className="break-all text-xs">
+                  <UrlLink url={p.url} />
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {p.wordCount}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )
+      break
+    }
+    case "non_ok": {
+      const list =
+        issuePages?.nonOk && issuePages.nonOk.length > 0
+          ? issuePages.nonOk
+          : indexability?.nonOkPages ?? []
+      body = (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>URL</TableHead>
+              <TableHead className="w-24 text-right">Status</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {list.map((p) => (
+              <TableRow key={p.url}>
+                <TableCell className="break-all text-xs">
+                  <UrlLink url={p.url} />
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {p.status || "—"}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )
+      break
+    }
+    case "duplicate_titles":
+    case "duplicate_descriptions": {
+      const groups =
+        issueKey === "duplicate_titles"
+          ? (issuePages?.duplicateTitles ?? []).map((g) => ({
+              shared: g.title,
+              urls: g.urls,
+            }))
+          : (issuePages?.duplicateDescriptions ?? []).map((g) => ({
+              shared: g.description,
+              urls: g.urls,
+            }))
+      body = (
+        <ul className="space-y-3">
+          {groups.map((g, i) => (
+            <li key={i} className="rounded-md border border-border bg-card/50 p-3">
+              <p className="break-words text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">Shared value:</span>{" "}
+                {g.shared || <em>(empty)</em>}
+              </p>
+              <ul className="mt-2 space-y-0.5 text-xs">
+                {g.urls.map((u) => (
+                  <li key={u} className="break-all">
+                    <UrlLink url={u} />
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ul>
+      )
+      break
+    }
+  }
+
+  return (
+    <div className="rounded-md border border-border bg-card p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <p className="font-sans text-sm font-extrabold uppercase tracking-[0.14em]">
+            {label}
+          </p>
+          {truncationMeta ? (
+            <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+              Showing {truncationMeta.shown} of {truncationMeta.actual} — list was
+              capped at {truncationMeta.shown} URLs.
+            </p>
+          ) : null}
+        </div>
+        <Button size="sm" variant="ghost" onClick={onClose}>
+          Close
+        </Button>
+      </div>
+      {body}
+    </div>
+  )
+}
+
+function UrlList({ urls }: { urls: string[] }) {
+  if (urls.length === 0) {
+    return <p className="text-sm text-muted-foreground">No URLs to show.</p>
+  }
+  return (
+    <ul className="space-y-0.5 text-xs">
+      {urls.map((u) => (
+        <li key={u} className="break-all">
+          <UrlLink url={u} />
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function UrlLink({ url }: { url: string }) {
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer noopener"
+      className="inline-flex items-baseline gap-1 hover:underline"
+    >
+      <span>{url}</span>
+      <ExternalLink className="h-3 w-3 self-center text-muted-foreground" />
+    </a>
+  )
+}
+
 function Stat({
   label,
   value,
   tone,
+  onClick,
+  active,
 }: {
   label: string
   value: number | string
   tone?: "warn"
+  onClick?: () => void
+  active?: boolean
 }) {
-  return (
-    <div
-      className={`rounded-md border p-3 ${
-        tone === "warn"
-          ? "border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/30"
-          : "border-border bg-card"
-      }`}
-    >
-      <p className="text-xs uppercase tracking-wider text-muted-foreground">{label}</p>
+  const interactive = typeof onClick === "function"
+  const base =
+    "block w-full rounded-md border p-3 text-left transition-colors"
+  const toneClass =
+    tone === "warn"
+      ? "border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/30"
+      : "border-border bg-card"
+  const activeClass = active
+    ? " ring-2 ring-foreground/40"
+    : interactive
+      ? " hover:border-foreground/40 hover:bg-accent/50 cursor-pointer"
+      : ""
+
+  const content = (
+    <>
+      <p className="text-xs uppercase tracking-wider text-muted-foreground">
+        {label}
+        {interactive ? (
+          <span className="ml-1 text-[10px] normal-case text-muted-foreground/60">
+            (click to view)
+          </span>
+        ) : null}
+      </p>
       <p className="mt-1 font-sans text-2xl font-extrabold tabular-nums">{value}</p>
-    </div>
+    </>
   )
+
+  if (interactive) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className={`${base} ${toneClass}${activeClass}`}
+      >
+        {content}
+      </button>
+    )
+  }
+  return <div className={`${base} ${toneClass}`}>{content}</div>
 }

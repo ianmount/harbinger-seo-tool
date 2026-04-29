@@ -36,6 +36,11 @@ create table if not exists public.crawl_runs (
   indexability      jsonb,
   -- Sample pages with their issues (capped — we only persist the sample slice).
   sample_pages      jsonb,
+  -- Per-issue URL lists (each capped at 200): missingTitles, missingDescriptions,
+  -- missingCanonicals, duplicateTitles, duplicateDescriptions, thinContent,
+  -- spaShell, nonOk, plus a `truncated` map flagging which lists hit the cap.
+  -- Drives the dashboard's clickable summary tiles.
+  issue_pages       jsonb,
   -- Non-fatal errors collected during the run (e.g. a single PSI URL failed).
   errors            jsonb
 );
@@ -76,3 +81,13 @@ create table if not exists public.crawl_subscriptions (
 
 create index if not exists crawl_subscriptions_due_idx
   on public.crawl_subscriptions (enabled, next_run_at);
+
+-- ── Migrations (idempotent — safe to re-run on existing projects) ──────────
+--
+-- 2026-04-29: add issue_pages column to crawl_runs. Previous rows carried
+-- only summary counts, not the underlying URL lists; this column persists
+-- the full per-issue URL lists (capped at 200 per category) so the
+-- dashboard's clickable summary tiles can reveal what's behind each count.
+
+alter table public.crawl_runs
+  add column if not exists issue_pages jsonb;

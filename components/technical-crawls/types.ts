@@ -11,6 +11,7 @@ import type {
   TechnicalCrawlIndexability,
   TechnicalCrawlLighthouse,
   TechnicalCrawlSummary,
+  TechnicalIssuePages,
   TechnicalSamplePage,
 } from "@/lib/technical-crawl"
 import type { SchemaCoverageMatrix } from "@/lib/types"
@@ -40,6 +41,7 @@ export interface CrawlRunFull extends CrawlRunListItem {
   schema_coverage: SchemaCoverageMatrix | null
   indexability: TechnicalCrawlIndexability | null
   sample_pages: TechnicalSamplePage[] | null
+  issue_pages: TechnicalIssuePages | null
   errors: string[] | null
 }
 

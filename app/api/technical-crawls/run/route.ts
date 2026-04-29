@@ -143,6 +143,7 @@ export async function POST(request: Request) {
         schema_coverage: result.schemaCoverage,
         indexability: result.indexability,
         sample_pages: result.samplePages,
+        issue_pages: result.issuePages,
         errors: result.errors,
       })
       .eq("id", crawlId)

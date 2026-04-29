@@ -79,6 +79,7 @@ export interface CrawlRunRow {
   schema_coverage: unknown | null
   indexability: unknown | null
   sample_pages: unknown | null
+  issue_pages: unknown | null
   errors: unknown | null
 }
 
