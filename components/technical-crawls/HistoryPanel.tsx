@@ -145,9 +145,23 @@ export function HistoryPanel({
           </Button>
         </div>
         {error ? (
-          <p className="text-sm text-destructive" role="alert">
-            {error}
-          </p>
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm"
+          >
+            <p className="font-medium text-destructive">Failed to load history</p>
+            <p className="mt-1 break-words text-muted-foreground">{error}</p>
+            {/Invalid path|fetch failed|service_role|JWT/i.test(error) ? (
+              <p className="mt-2 text-xs text-muted-foreground">
+                Looks like a Supabase config issue. Verify{" "}
+                <code>SUPABASE_URL</code> (the &quot;Project URL&quot; — should
+                end in <code>.supabase.co</code> with no path) and{" "}
+                <code>SUPABASE_SERVICE_ROLE_KEY</code> in Vercel, then redeploy.
+                Also confirm <code>supabase/schema.sql</code> ran in the SQL
+                editor.
+              </p>
+            ) : null}
+          </div>
         ) : runs.length === 0 && !loading ? (
           <p className="text-sm text-muted-foreground">No crawls yet.</p>
         ) : (

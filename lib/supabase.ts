@@ -15,9 +15,41 @@ import { requireEnv } from "@/lib/env"
 
 let cached: SupabaseClient | null = null
 
+/**
+ * Normalize the SUPABASE_URL we got from env. People paste with trailing
+ * slashes, leftover `/rest/v1` paths, or even a full dashboard URL — any
+ * of which makes supabase-js build malformed REST paths and surface the
+ * cryptic "Invalid path specified in request URL" error. Trim those
+ * variants down to the canonical `https://<project>.supabase.co` origin.
+ */
+function normalizeUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "")
+  if (!/^https?:\/\//i.test(trimmed)) {
+    throw new Error(
+      `SUPABASE_URL must start with https:// — got "${raw}". Copy the "Project URL" from Supabase → Settings → API.`,
+    )
+  }
+  // Strip anything after the host. The dashboard URL looks like
+  // https://supabase.com/dashboard/project/<id> — that's the wrong value
+  // and we'd rather fail loudly than silently send REST calls into the
+  // dashboard's HTML routes.
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw new Error(`SUPABASE_URL is not a valid URL: "${raw}".`)
+  }
+  if (parsed.hostname.includes("supabase.com") && parsed.pathname.length > 1) {
+    throw new Error(
+      `SUPABASE_URL looks like the Supabase dashboard URL ("${raw}"). Use the "Project URL" instead — it ends in supabase.co with no path.`,
+    )
+  }
+  return `${parsed.protocol}//${parsed.host}`
+}
+
 export function getSupabase(): SupabaseClient {
   if (cached) return cached
-  const url = requireEnv("SUPABASE_URL")
+  const url = normalizeUrl(requireEnv("SUPABASE_URL"))
   const key = requireEnv("SUPABASE_SERVICE_ROLE_KEY")
   cached = createClient(url, key, {
     auth: {
