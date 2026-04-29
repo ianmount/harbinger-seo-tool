@@ -5,7 +5,7 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { ChatBaseContextSync, ChatWidget } from "@/components/ChatWidget"
 import { PartnerSelector } from "@/components/PartnerSelector"
-import { TabNav } from "@/components/TabNav"
+import { SideNav } from "@/components/SideNav"
 import { AssessmentProvider } from "@/lib/assessment-context"
 import { ChatProvider } from "@/lib/chat-context"
 
@@ -38,11 +38,11 @@ function HMark({ className }: { className?: string }) {
 }
 
 /**
- * Wraps page children with the app chrome (header, partner selector, tab
- * nav). Renders children only on `/login` so the unauthenticated login
- * page isn't cluttered with nav that can't be used.
+ * Wraps page children with the app chrome (sidebar nav, top bar, main).
+ * Renders children only on `/login` so the unauthenticated login page
+ * isn't cluttered with nav that can't be used.
  *
- * Suspense wrappers around PartnerSelector / TabNav are required by
+ * Suspense wrappers around PartnerSelector / SideNav are required by
  * Next.js for any client component that calls useSearchParams.
  */
 export function AppShell({ children }: { children: ReactNode }) {
@@ -58,33 +58,42 @@ export function AppShell({ children }: { children: ReactNode }) {
         <Suspense fallback={null}>
           <ChatBaseContextSync />
         </Suspense>
-        <div className="flex min-h-screen flex-col">
-          <header className="sticky top-0 z-30 border-b border-border bg-background/85 backdrop-blur">
-            <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3">
-              <Link href="/" className="flex items-center gap-3">
-                <span className="block h-8 w-8 shrink-0 overflow-hidden rounded-[6px] shadow-[0_4px_12px_-6px_rgba(3,41,58,0.4)]">
-                  <HMark className="block h-full w-full" />
+        <div className="flex min-h-screen">
+          <aside className="sticky top-0 z-30 flex h-screen w-60 shrink-0 flex-col bg-[color:var(--sidebar)] text-[color:var(--sidebar-foreground)]">
+            <Link
+              href="/"
+              className="flex items-center gap-3 border-b border-[color:var(--sidebar-border)] px-5 py-5"
+            >
+              <span className="block h-9 w-9 shrink-0 overflow-hidden rounded-[6px] shadow-[0_4px_12px_-6px_rgba(0,0,0,0.6)]">
+                <HMark className="block h-full w-full" />
+              </span>
+              <span className="flex flex-col leading-none">
+                <span className="font-sans text-[9.5px] font-extrabold uppercase tracking-[0.22em] text-[color:var(--sidebar-foreground)]/70">
+                  Harbinger
                 </span>
-                <span className="flex flex-col leading-none">
-                  <span className="font-sans text-[9.5px] font-extrabold uppercase tracking-[0.22em] text-ink-3">
-                    Harbinger
-                  </span>
-                  <span className="mt-1 font-sans text-[15px] font-extrabold tracking-[-0.005em] text-foreground">
-                    SEO Tool
-                  </span>
+                <span className="mt-1 font-sans text-[15px] font-extrabold tracking-[-0.005em] text-brand-cream">
+                  SEO Tool
                 </span>
-              </Link>
-              <Suspense fallback={null}>
-                <PartnerSelector />
-              </Suspense>
-            </div>
-          </header>
-          <Suspense fallback={<div className="h-12 border-b border-border" aria-hidden />}>
-            <TabNav />
-          </Suspense>
-          <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-10 sm:px-6">
-            <Suspense fallback={null}>{children}</Suspense>
-          </main>
+              </span>
+            </Link>
+            <Suspense
+              fallback={<div className="flex-1" aria-hidden />}
+            >
+              <SideNav />
+            </Suspense>
+          </aside>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <header className="sticky top-0 z-20 border-b border-border bg-background/85 backdrop-blur">
+              <div className="mx-auto flex max-w-6xl items-center justify-end gap-4 px-4 py-3 sm:px-6">
+                <Suspense fallback={null}>
+                  <PartnerSelector />
+                </Suspense>
+              </div>
+            </header>
+            <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-10 sm:px-6">
+              <Suspense fallback={null}>{children}</Suspense>
+            </main>
+          </div>
         </div>
         <ChatWidget />
       </ChatProvider>
