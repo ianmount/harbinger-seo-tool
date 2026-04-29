@@ -12,7 +12,11 @@ import {
   buildCrawlReportFromOnPage,
   type SchemaSample,
 } from "@/lib/onpage-to-crawl"
-import { classifyPageType, extractSchemaFromHtml } from "@/lib/schema-parse"
+import {
+  classifyPageType,
+  extractImageAltStats,
+  extractSchemaFromHtml,
+} from "@/lib/schema-parse"
 
 /**
  * Public surface for the Audit tab's crawl. Replaces the legacy
@@ -152,10 +156,13 @@ async function fetchSchemaSamples(
           const html = await fetchRawHtml(taskId, url)
           if (!html) return null
           const extracted = extractSchemaFromHtml(html)
+          const altStats = extractImageAltStats(html)
           return {
             url,
             types: extracted.types,
             blocks: extracted.blocks,
+            imagesTotal: altStats.imagesTotal,
+            imagesWithAlt: altStats.imagesWithAlt,
           }
         } catch (err) {
           // Schema extraction is best-effort. A single failure should not

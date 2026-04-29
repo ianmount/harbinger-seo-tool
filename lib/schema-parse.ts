@@ -182,6 +182,41 @@ export interface SchemaExtraction {
 }
 
 /**
+ * Image-alt stats parsed directly from raw HTML.
+ *
+ * DataForSEO's `/v3/on_page/pages` doesn't reliably expose a count of
+ * `<img>` elements that DO carry an `alt` attribute — `meta.images_count`
+ * works for the total but the matching alt-bearing count is often
+ * missing or zero even when alts exist. We fall back to cheerio on the
+ * raw HTML samples we already pull for schema, which gives accurate
+ * counts for the sampled subset.
+ *
+ * "Has alt" means the attribute is present AND not empty after trim.
+ * `<img alt="">` is a deliberate signal that an image is decorative
+ * (per WAI-ARIA / WCAG); empty alt is correct for spacers/dividers but
+ * we still count it as missing for SEO-coverage purposes since
+ * search-engine ranking signals reward descriptive alt text.
+ */
+export interface ImageAltStats {
+  imagesTotal: number
+  imagesWithAlt: number
+}
+
+export function extractImageAltStats(html: string): ImageAltStats {
+  const $ = cheerio.load(html)
+  let imagesTotal = 0
+  let imagesWithAlt = 0
+  $("img").each((_, el) => {
+    imagesTotal += 1
+    const alt = $(el).attr("alt")
+    if (typeof alt === "string" && alt.trim().length > 0) {
+      imagesWithAlt += 1
+    }
+  })
+  return { imagesTotal, imagesWithAlt }
+}
+
+/**
  * Walk a JSON-LD value tree and pull every distinct @type. Handles arrays,
  * @graph, and nested objects.
  */
