@@ -189,12 +189,28 @@ export function RunNowPanel({
         >
           <p className="font-medium text-destructive">Crawl failed.</p>
           <p className="mt-1 break-words text-muted-foreground">{lastError}</p>
-          <p className="mt-2 text-xs text-muted-foreground">
-            If you see <code>Invalid path specified in request URL</code> or
-            other Supabase errors, double-check <code>SUPABASE_URL</code> and{" "}
-            <code>SUPABASE_SERVICE_ROLE_KEY</code> in Vercel — and that you ran{" "}
-            <code>supabase/schema.sql</code> in the Supabase SQL editor.
-          </p>
+          {/Failed to fetch|NetworkError|aborted/i.test(lastError) ? (
+            <p className="mt-2 text-xs text-muted-foreground">
+              <b className="font-sans font-extrabold">&quot;Failed to fetch&quot;</b>{" "}
+              usually means the Vercel function was killed before responding.
+              The technical crawl pipeline needs up to ~8 minutes; on the
+              Hobby plan functions die after 10s, on Pro they cap at 60-300s
+              unless Fluid Compute is enabled. Check Vercel Dashboard →
+              Settings → Functions → make sure the project is on Pro with{" "}
+              <b className="font-sans font-extrabold">Fluid Compute</b>{" "}
+              enabled. Also check the Vercel function logs for the actual
+              underlying error.
+            </p>
+          ) : /Invalid path|service_role|JWT|supabase/i.test(lastError) ? (
+            <p className="mt-2 text-xs text-muted-foreground">
+              Looks like a Supabase config issue. Double-check{" "}
+              <code>SUPABASE_URL</code> (Project URL — ends in{" "}
+              <code>.supabase.co</code> with no path) and{" "}
+              <code>SUPABASE_SERVICE_ROLE_KEY</code> in Vercel, and that{" "}
+              <code>supabase/schema.sql</code> was run in the SQL editor.
+              Then redeploy.
+            </p>
+          ) : null}
         </div>
       ) : null}
     </div>

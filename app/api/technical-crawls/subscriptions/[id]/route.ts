@@ -42,7 +42,16 @@ export async function PATCH(
     )
   }
   const body = parsed.data
-  const supabase = getSupabase()
+  let supabase: ReturnType<typeof getSupabase>
+  try {
+    supabase = getSupabase()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Supabase not configured"
+    return NextResponse.json(
+      { error: `Supabase configuration error: ${message}` },
+      { status: 500 },
+    )
+  }
 
   // Read existing row so we can compute next_run_at when the schedule
   // changes and validate frequency/day-of-* consistency before writing.
@@ -126,7 +135,16 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params
-  const supabase = getSupabase()
+  let supabase: ReturnType<typeof getSupabase>
+  try {
+    supabase = getSupabase()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Supabase not configured"
+    return NextResponse.json(
+      { error: `Supabase configuration error: ${message}` },
+      { status: 500 },
+    )
+  }
   const { error } = await supabase
     .from("crawl_subscriptions")
     .delete()

@@ -87,7 +87,20 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Empty domain" }, { status: 400 })
   }
 
-  const supabase = getSupabase()
+  // getSupabase() throws if SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are
+  // unset or malformed. Catch it explicitly so the browser sees a clean
+  // 500 with a typed error message instead of a connection abort.
+  let supabase: ReturnType<typeof getSupabase>
+  try {
+    supabase = getSupabase()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Supabase not configured"
+    console.error("[api/technical-crawls/run] supabase init failed:", message)
+    return NextResponse.json(
+      { error: `Supabase configuration error: ${message}` },
+      { status: 500 },
+    )
+  }
 
   // Insert a "running" placeholder so the dashboard can show in-progress
   // crawls and operators can correlate logs. We update it to "done" /

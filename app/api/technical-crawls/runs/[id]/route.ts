@@ -15,7 +15,16 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params
-  const supabase = getSupabase()
+  let supabase: ReturnType<typeof getSupabase>
+  try {
+    supabase = getSupabase()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Supabase not configured"
+    return NextResponse.json(
+      { error: `Supabase configuration error: ${message}` },
+      { status: 500 },
+    )
+  }
   const { data, error } = await supabase
     .from("crawl_runs")
     .select("*")

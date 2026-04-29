@@ -15,7 +15,16 @@ export const dynamic = "force-dynamic"
  * sends `Authorization: Bearer <ROUTINE_API_TOKEN>`.
  */
 export async function GET() {
-  const supabase = getSupabase()
+  let supabase: ReturnType<typeof getSupabase>
+  try {
+    supabase = getSupabase()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Supabase not configured"
+    return NextResponse.json(
+      { error: `Supabase configuration error: ${message}` },
+      { status: 500 },
+    )
+  }
   const nowIso = new Date().toISOString()
   const { data, error } = await supabase
     .from("crawl_subscriptions")
