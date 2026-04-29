@@ -49,6 +49,19 @@ function formatDate(iso: string | null): string {
   })
 }
 
+function partnerPlaceholder(
+  loading: boolean,
+  error: string | null,
+  partnersLen: number,
+  availableLen: number,
+): string {
+  if (loading) return "Loading partners…"
+  if (error) return "Failed to load partners"
+  if (partnersLen === 0) return "No partners found in Airtable"
+  if (availableLen === 0) return "All partners already scheduled"
+  return "Pick a partner…"
+}
+
 /**
  * Per-partner subscription manager. New subscriptions are created via a
  * small inline form; the table below shows everything currently scheduled
@@ -189,13 +202,7 @@ export function SchedulesPanel() {
               disabled={submitting || availablePartners.length === 0}
             >
               <SelectTrigger id="sched-partner">
-                <SelectValue
-                  placeholder={
-                    availablePartners.length === 0
-                      ? "All partners scheduled"
-                      : "Pick a partner…"
-                  }
-                />
+                <SelectValue placeholder={partnerPlaceholder(loading, error, partners.length, availablePartners.length)} />
               </SelectTrigger>
               <SelectContent>
                 {availablePartners.map((p) => (
@@ -205,6 +212,12 @@ export function SchedulesPanel() {
                 ))}
               </SelectContent>
             </Select>
+            {!loading && !error ? (
+              <p className="text-xs text-muted-foreground">
+                {partners.length} partner{partners.length === 1 ? "" : "s"} loaded ·{" "}
+                {subs.length} scheduled · {availablePartners.length} available
+              </p>
+            ) : null}
           </div>
           <div className="space-y-2">
             <Label htmlFor="sched-freq">Frequency</Label>

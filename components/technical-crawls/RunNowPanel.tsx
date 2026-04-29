@@ -40,6 +40,7 @@ export function RunNowPanel({
   const [url, setUrl] = useState<string>("")
   const [running, setRunning] = useState(false)
   const [lastResult, setLastResult] = useState<CrawlRunFull | null>(null)
+  const [lastError, setLastError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -67,6 +68,7 @@ export function RunNowPanel({
   async function handleRun() {
     setRunning(true)
     setLastResult(null)
+    setLastError(null)
     try {
       const body =
         mode === "partner"
@@ -102,7 +104,9 @@ export function RunNowPanel({
       onCompleted?.(json.run)
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Crawl failed"
-      toast.error(msg)
+      // Sticky inline error so the user can read it after the toast fades.
+      setLastError(msg)
+      toast.error(msg, { duration: 12_000 })
     } finally {
       setRunning(false)
     }
@@ -174,6 +178,22 @@ export function RunNowPanel({
           <p className="font-medium text-foreground">Crawl complete.</p>
           <p className="mt-1 text-muted-foreground">
             View it in the <b>History</b> tab — id <code>{lastResult.id}</code>.
+          </p>
+        </div>
+      ) : null}
+
+      {lastError ? (
+        <div
+          role="alert"
+          className="rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm"
+        >
+          <p className="font-medium text-destructive">Crawl failed.</p>
+          <p className="mt-1 break-words text-muted-foreground">{lastError}</p>
+          <p className="mt-2 text-xs text-muted-foreground">
+            If you see <code>Invalid path specified in request URL</code> or
+            other Supabase errors, double-check <code>SUPABASE_URL</code> and{" "}
+            <code>SUPABASE_SERVICE_ROLE_KEY</code> in Vercel — and that you ran{" "}
+            <code>supabase/schema.sql</code> in the Supabase SQL editor.
           </p>
         </div>
       ) : null}
