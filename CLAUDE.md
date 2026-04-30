@@ -91,7 +91,6 @@ Note: `Prospect` (Audit tab, in-memory only) is distinct from `Partner` (Airtabl
 - No technical SEO auditing (site crawling, canonical checks, etc.)
 - No Google Business Profile integration
 - No multi-user authentication — single engineer, single machine
-- No background jobs or queues — all actions are synchronous
 - No outreach email sending — drafts only
 
 ## GA4 conventions
@@ -105,6 +104,25 @@ Note: `Prospect` (Audit tab, in-memory only) is distinct from `Partner` (Airtabl
   2. Partner Goals / Target Audience / Industry Knowledge populated (the record-template boilerplate starts with `**Template**` and is flagged in `Partner.unfilledContext`).
   3. Confirm the SEO Ops Google account has been granted Viewer on the GA4 property (usually already true, but check for new partners).
   4. After the first report generation, check the "GA4 property" dropdown on the Reporting tab: if it shows "auto-detected" with the right property, you're done. If it shows "GA4 not configured" or picks the wrong property, paste the property ID into Airtable's `GA4 Property ID` field as an explicit override.
+
+## Background Jobs
+- **What it is.** Long-running tasks (Audit, Comp Analysis, Initial Strategy, Technical Crawl, Alt Tags) run as durable background jobs via **Inngest** instead of synchronously inside the HTTP handler. The user can navigate away from the tab, get an email when the job finishes, and come back to view results. Status surfaces in a "Jobs" bell tray in the header (`components/JobsTray.tsx`) and on a generic `/jobs/[id]` landing page.
+- **Why Inngest.** Vercel function `maxDuration` caps at 800s (Pro Fluid Compute). Inngest functions can chain `step.run` blocks indefinitely and survive instance recycles, so audits that drift past the ceiling don't lose work. Free tier covers our volume (~50k executions/month). Auto-wired via the **Inngest Vercel Marketplace integration** — `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` are set automatically on every deploy.
+- **Storage.** Job state lives in Supabase table `background_jobs` (see `supabase/schema.sql`). One row per task. Status: `queued` → `running` → `completed | failed`. Progress updates write to a `progress` JSONB column.
+- **Session scoping.** Every row carries `session_id` = the auth cookie's `iat`. Re-logging-in produces a new iat → old jobs disappear from the user's tray (rows aren't deleted; just hidden). Matches the "session-only listing, ephemeral once viewed" requirement.
+- **The flow:**
+  1. Client `POST /api/jobs/start` `{ kind, title, input?, resultPath? }` → server inserts a `queued` row, fires `inngest.send({ name: "jobs/run", data: { jobId } })`, returns `{ jobId }` immediately.
+  2. The single dispatcher Inngest function in `lib/inngest/functions.ts` receives the event, marks the row `running`, looks up the per-kind task implementation in `TASKS`, runs it, and finalizes the row.
+  3. Client polls `GET /api/jobs/[id]` every 3s while the row is non-terminal. (Polling, not Realtime — switching to Supabase Realtime would require an anon key + RLS, which we've avoided.)
+  4. On completion, the dispatcher calls `sendJobCompletionEmail()` via Resend (env vars: `RESEND_API_KEY`, `EMAIL_FROM`, `NOTIFY_EMAIL`). Best-effort — job stays `completed` even if email fails.
+- **Adding a new task kind:**
+  1. Add it to the `kind` check constraint in `supabase/schema.sql` and the `JobKind` union in `lib/jobs.ts`.
+  2. Create `lib/tasks/<kind>.ts` exporting a `TaskRunner` (signature in `lib/inngest/functions.ts`).
+  3. Register it in the `TASKS` map in `lib/inngest/functions.ts`.
+  4. Update the kind page UI: replace synchronous fetch with `POST /api/jobs/start`, render the in-progress state, link to `result_path` on completion.
+- **Public path.** `/api/inngest` is whitelisted in `proxy.ts` because Inngest Cloud invokes it without our auth cookie. Authentication is handled inside the SDK via `INNGEST_SIGNING_KEY`.
+- **Retries are off (`retries: 0`)** because every task makes paid API calls (Claude, DataForSEO). A retry on partial failure would double-bill. If a specific task wants opt-in retry, use `step.run` with custom retry config.
+- **No "no background jobs" rule anymore.** Earlier versions of this file said all actions were synchronous; that's lifted for the 5 long task kinds. Short routes (Strategy, Reporting, Keyword Research, etc.) stay synchronous.
 
 ## Instructions for Claude Code
 - Always read this file before starting a task. If a prompt asks you to do something that conflicts with this file, stop and ask.

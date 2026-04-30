@@ -44,6 +44,17 @@ const envSchema = z.object({
   // against /api/technical-crawls/* without going through /login. Generate
   // with: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
   ROUTINE_API_TOKEN: optionalString,
+  // Inngest — auto-injected by the Vercel Marketplace integration. Required
+  // for any task wired through the Background Jobs system; the rest of the
+  // app works without these set.
+  INNGEST_EVENT_KEY: optionalString,
+  INNGEST_SIGNING_KEY: optionalString,
+  // Resend — completion emails for background jobs. NOTIFY_EMAIL is the
+  // single recipient. If RESEND_API_KEY is unset, jobs still complete but
+  // skip the email step with a warning.
+  RESEND_API_KEY: optionalString,
+  EMAIL_FROM: optionalString,
+  NOTIFY_EMAIL: optionalString,
 })
 
 export type Env = z.infer<typeof envSchema>

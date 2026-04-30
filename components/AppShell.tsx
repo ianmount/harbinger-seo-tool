@@ -5,8 +5,10 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { Menu, X } from "lucide-react"
 import { ChatBaseContextSync, ChatWidget } from "@/components/ChatWidget"
+import { JobsTray } from "@/components/JobsTray"
 import { PartnerSelector } from "@/components/PartnerSelector"
 import { SideNav } from "@/components/SideNav"
+import { Toaster } from "@/components/ui/sonner"
 import { AssessmentProvider } from "@/lib/assessment-context"
 import { ChatProvider } from "@/lib/chat-context"
 import { cn } from "@/lib/utils"
@@ -124,7 +126,8 @@ export function AppShell({ children }: { children: ReactNode }) {
                 >
                   <Menu className="h-5 w-5" />
                 </button>
-                <div className="ml-auto">
+                <div className="ml-auto flex items-center gap-2">
+                  <JobsTray />
                   <Suspense fallback={null}>
                     <PartnerSelector />
                   </Suspense>
@@ -137,6 +140,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
         <ChatWidget />
+        <Toaster />
       </ChatProvider>
     </AssessmentProvider>
   )

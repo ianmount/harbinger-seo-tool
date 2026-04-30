@@ -1,0 +1,202 @@
+import "server-only"
+import { cookies } from "next/headers"
+import { COOKIE_NAME, verifyToken } from "@/lib/auth"
+import { env } from "@/lib/env"
+import { getSupabase } from "@/lib/supabase"
+
+/**
+ * Background Jobs system.
+ *
+ * One row in `background_jobs` per long-running task (Audit, Comp Analysis,
+ * Initial Strategy, Technical Crawl, Alt Tags). The HTTP route that starts a
+ * job inserts a row, fires an Inngest event, and returns the row id. The
+ * Inngest function reads the row, runs the matching task with the helpers
+ * below, and finalizes the row to `completed` or `failed`.
+ *
+ * Session scoping: every row carries a `session_id` derived from the auth
+ * cookie's `iat` (issued-at). Re-logging-in produces a new iat → old jobs
+ * disappear from the user's tray without being deleted. Matches the
+ * "session-only" requirement.
+ */
+
+export type JobKind =
+  | "audit"
+  | "comp_analysis"
+  | "initial_strategy"
+  | "technical_crawl"
+  | "alt_tags"
+
+export type JobStatus = "queued" | "running" | "completed" | "failed"
+
+export interface JobProgress {
+  stage?: string
+  detail?: string
+  percent?: number | null
+}
+
+export interface JobRow {
+  id: string
+  kind: JobKind
+  status: JobStatus
+  title: string
+  input: unknown
+  result: unknown | null
+  error: string | null
+  progress: JobProgress
+  session_id: string
+  result_path: string | null
+  created_at: string
+  updated_at: string
+  completed_at: string | null
+}
+
+const TABLE = "background_jobs"
+
+// Human-readable labels used in the JobsTray and email subjects.
+export const KIND_LABELS: Record<JobKind, string> = {
+  audit: "Audit",
+  comp_analysis: "Competitive Analysis",
+  initial_strategy: "Initial Strategy",
+  technical_crawl: "Technical Crawl",
+  alt_tags: "Alt Tags",
+}
+
+// ── Session id ─────────────────────────────────────────────────────────────
+
+/**
+ * Derive a stable session id from the auth cookie. Returns the cookie's
+ * `iat` as a string. Throws if the cookie is missing or invalid — but the
+ * proxy in `proxy.ts` already gates the routes that call this, so a missing
+ * cookie here means the proxy was bypassed and we should fail loudly.
+ */
+export async function deriveSessionId(): Promise<string> {
+  const secret = env.APP_AUTH_SECRET
+  if (!secret) {
+    throw new Error("APP_AUTH_SECRET is not set; cannot derive session id")
+  }
+  const jar = await cookies()
+  const token = jar.get(COOKIE_NAME)?.value
+  const payload = verifyToken(secret, token)
+  if (!payload) {
+    throw new Error("No valid auth cookie; cannot derive session id")
+  }
+  return String(payload.iat)
+}
+
+// ── CRUD ────────────────────────────────────────────────────────────────────
+
+interface CreateJobInput {
+  kind: JobKind
+  title: string
+  input: unknown
+  sessionId: string
+  resultPath?: string
+}
+
+export async function createJob(args: CreateJobInput): Promise<JobRow> {
+  const supabase = getSupabase()
+  const { data, error } = await supabase
+    .from(TABLE)
+    .insert({
+      kind: args.kind,
+      status: "queued",
+      title: args.title,
+      input: args.input ?? {},
+      progress: {},
+      session_id: args.sessionId,
+      result_path: args.resultPath ?? null,
+    })
+    .select()
+    .single()
+  if (error || !data) {
+    throw new Error(`createJob failed: ${error?.message ?? "no data returned"}`)
+  }
+  return data as JobRow
+}
+
+export async function getJob(id: string): Promise<JobRow | null> {
+  const supabase = getSupabase()
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select("*")
+    .eq("id", id)
+    .maybeSingle()
+  if (error) {
+    throw new Error(`getJob failed: ${error.message}`)
+  }
+  return (data as JobRow | null) ?? null
+}
+
+export async function listJobsForSession(
+  sessionId: string,
+  limit = 25,
+): Promise<JobRow[]> {
+  const supabase = getSupabase()
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select("*")
+    .eq("session_id", sessionId)
+    .order("created_at", { ascending: false })
+    .limit(limit)
+  if (error) {
+    throw new Error(`listJobsForSession failed: ${error.message}`)
+  }
+  return (data as JobRow[] | null) ?? []
+}
+
+export async function markRunning(id: string): Promise<void> {
+  const supabase = getSupabase()
+  const { error } = await supabase
+    .from(TABLE)
+    .update({ status: "running" })
+    .eq("id", id)
+  if (error) throw new Error(`markRunning failed: ${error.message}`)
+}
+
+/**
+ * Merge progress fields. Existing fields not in the patch are preserved, so
+ * a task can update `detail` repeatedly without clobbering `stage`.
+ */
+export async function updateProgress(
+  id: string,
+  patch: JobProgress,
+): Promise<void> {
+  const current = await getJob(id)
+  if (!current) return
+  const next: JobProgress = { ...current.progress, ...patch }
+  const supabase = getSupabase()
+  const { error } = await supabase
+    .from(TABLE)
+    .update({ progress: next })
+    .eq("id", id)
+  if (error) throw new Error(`updateProgress failed: ${error.message}`)
+}
+
+export async function completeJob(
+  id: string,
+  result: unknown,
+  resultPath?: string,
+): Promise<void> {
+  const supabase = getSupabase()
+  const update: Record<string, unknown> = {
+    status: "completed",
+    result,
+    completed_at: new Date().toISOString(),
+  }
+  if (resultPath) update.result_path = resultPath
+  const { error } = await supabase.from(TABLE).update(update).eq("id", id)
+  if (error) throw new Error(`completeJob failed: ${error.message}`)
+}
+
+export async function failJob(id: string, message: string): Promise<void> {
+  const supabase = getSupabase()
+  const { error } = await supabase
+    .from(TABLE)
+    .update({
+      status: "failed",
+      error: message,
+      completed_at: new Date().toISOString(),
+    })
+    .eq("id", id)
+  if (error) throw new Error(`failJob failed: ${error.message}`)
+}

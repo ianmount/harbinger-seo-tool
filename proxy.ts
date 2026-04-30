@@ -7,7 +7,14 @@ import { COOKIE_NAME, PUBLIC_PATHS, verifyToken } from "@/lib/auth"
 // works natively inside verifyToken() via the shared lib/auth module.
 
 function isPublicPath(pathname: string): boolean {
-  return (PUBLIC_PATHS as readonly string[]).includes(pathname)
+  if ((PUBLIC_PATHS as readonly string[]).includes(pathname)) return true
+  // Inngest serve handler — Inngest Cloud invokes this without our auth
+  // cookie. Authentication is handled inside the SDK via INNGEST_SIGNING_KEY,
+  // which verifies that requests are signed by Inngest's infrastructure.
+  if (pathname === "/api/inngest" || pathname.startsWith("/api/inngest/")) {
+    return true
+  }
+  return false
 }
 
 /**

@@ -82,6 +82,81 @@ create table if not exists public.crawl_subscriptions (
 create index if not exists crawl_subscriptions_due_idx
   on public.crawl_subscriptions (enabled, next_run_at);
 
+-- ── background_jobs ────────────────────────────────────────────────────────
+--
+-- One row per long-running task started from the UI (Audit, Comp Analysis,
+-- Initial Strategy, Technical Crawl, Alt Tags). The HTTP route that starts a
+-- job inserts a row, fires an Inngest event, and returns the row id. The
+-- Inngest function flips status -> running, writes progress updates as it
+-- works, and finally writes result + completed (or error + failed).
+--
+-- Realtime is enabled on this table so the client can subscribe to its row
+-- and render live progress without polling. session_id scopes the user's
+-- "Jobs" tray: it's the iat (issued-at) timestamp of the auth cookie, so a
+-- new login produces a new session_id and old jobs drop off the list.
+
+create table if not exists public.background_jobs (
+  id                uuid primary key default gen_random_uuid(),
+  kind              text not null check (kind in (
+    'audit',
+    'comp_analysis',
+    'initial_strategy',
+    'technical_crawl',
+    'alt_tags'
+  )),
+  status            text not null check (status in ('queued', 'running', 'completed', 'failed')),
+  title             text not null,
+  -- Free-form params blob; shape is task-specific. Validated by the task
+  -- implementation, not by the DB.
+  input             jsonb not null default '{}'::jsonb,
+  -- Final output. Small results inline; large results store {blobUrl: ...}
+  -- and the actual payload lives in Vercel Blob.
+  result            jsonb,
+  error             text,
+  -- { stage: text, detail: text, percent: number | null }
+  progress          jsonb not null default '{}'::jsonb,
+  -- Auth cookie iat as a string. See lib/jobs.ts deriveSessionId().
+  session_id        text not null,
+  -- Where to render results. Used by the Jobs tray's "View" link.
+  result_path       text,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now(),
+  completed_at      timestamptz
+);
+
+create index if not exists background_jobs_session_idx
+  on public.background_jobs (session_id, created_at desc);
+
+create index if not exists background_jobs_status_idx
+  on public.background_jobs (status, updated_at desc);
+
+-- Bump updated_at on every UPDATE. The job runner relies on this for the
+-- stale-job heuristic in the jobs list endpoint.
+create or replace function public.background_jobs_set_updated_at()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at := now();
+  return new;
+end;
+$$;
+
+drop trigger if exists background_jobs_updated_at on public.background_jobs;
+create trigger background_jobs_updated_at
+  before update on public.background_jobs
+  for each row execute function public.background_jobs_set_updated_at();
+
+-- Realtime publication. Idempotent-ish: ALTER PUBLICATION fails if the table
+-- is already a member, so we wrap it in a DO block that swallows the
+-- duplicate_object error.
+do $$
+begin
+  alter publication supabase_realtime add table public.background_jobs;
+exception
+  when duplicate_object then null;
+  when undefined_object then null;  -- publication doesn't exist on self-hosted
+end;
+$$;
+
 -- ── Migrations (idempotent — safe to re-run on existing projects) ──────────
 --
 -- 2026-04-29: add issue_pages column to crawl_runs. Previous rows carried
