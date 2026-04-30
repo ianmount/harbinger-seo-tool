@@ -530,13 +530,18 @@ export async function runTechnicalCrawl(
 // ── Schedule math ─────────────────────────────────────────────────────────
 
 /**
- * Hour of UTC day we anchor next_run_at to. Noon UTC = 8am ET (during EDT)
- * = 7am CT = 4am PT = 2am Hawaii — the *date* renders as "day-X" in every
- * North American timezone when displayed via toLocaleString(). It also
- * means a daily routine ticking at 8am-9am ET reliably picks up runs
- * scheduled for that day (12:00 UTC <= now() once the routine fires).
+ * Hour of UTC day we anchor next_run_at to. 09:00 UTC = 5am EDT / 4am EST
+ * = 1am PDT / 12am PST — past midnight in every continental US timezone,
+ * so the *date* renders as the requested day in toLocaleString. Also
+ * before any reasonable Claude Code Routine schedule (5am-9am ET → 9:00
+ * UTC EDT through 14:00 UTC EST), so the daily tick reliably catches
+ * runs scheduled for that day instead of missing them by 1-3 hours.
+ *
+ * Hawaii (HST = UTC-10, no DST) sees 09:00 UTC as 11pm previous day —
+ * i.e. the date renders as day-1. Harbinger users are continental, so
+ * this is acceptable.
  */
-const SCHEDULE_HOUR_UTC = 12
+const SCHEDULE_HOUR_UTC = 9
 
 /**
  * Compute the next time a subscription should fire. Day-of-month is clamped
