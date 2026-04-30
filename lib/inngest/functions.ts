@@ -2,6 +2,7 @@ import "server-only"
 import { sendJobCompletionEmail } from "@/lib/email"
 import {
   cancelJob,
+  completeJob,
   failJob,
   getJob,
   JobCancelledError,
@@ -132,18 +133,31 @@ export const runJobFunction = inngest.createFunction(
       return { ok: false, reason: "no-runner" }
     }
 
+    // The actual task runs INSIDE step.run so Inngest caches its result.
+    // Without this wrapper, the runner re-executed every time Inngest
+    // re-invoked the function for a subsequent step.run — meaning a
+    // multi-step dispatcher ran the crawl multiple times and frequently
+    // failed with "Could not find step to run; timed out" because the
+    // re-execution was hitting the Vercel function timeout.
+    //
+    // step.run also serializes the return value, so anything the task
+    // returns must be JSON-friendly (no functions, Dates ok, no Maps/
+    // Sets). All current task results meet this.
+    let runResult: { result: unknown; resultPath?: string } | null = null
     try {
-      const { result, resultPath } = await runner({ jobId, job })
-      await step.run("complete-job", async () => {
-        const { completeJob } = await import("@/lib/jobs")
-        await completeJob(jobId, result, resultPath)
-      })
+      runResult = await step.run("run-task", () => runner({ jobId, job }))
     } catch (err) {
-      if (err instanceof JobCancelledError) {
+      // step.run rethrows as the original error class is collapsed into a
+      // generic StepError. Identify cancellation by the `name` so we still
+      // route to the cancelled branch.
+      const isCancelled =
+        err instanceof JobCancelledError ||
+        (err as { name?: string })?.name === "JobCancelledError" ||
+        (err instanceof Error &&
+          err.message.includes("JobCancelledError"))
+
+      if (isCancelled) {
         logger.info(`Job ${jobId} cancelled`)
-        // The cancel route already flipped status; this is a no-op if so.
-        // If the task threw on its own (race with a slow status read), this
-        // ensures the row ends up in cancelled state.
         await step.run("finalize-cancelled", () =>
           cancelJob(jobId, "Cancelled by user"),
         )
@@ -152,6 +166,13 @@ export const runJobFunction = inngest.createFunction(
         logger.error(`Job ${jobId} failed:`, err)
         await step.run("fail-job", () => failJob(jobId, message))
       }
+    }
+
+    if (runResult) {
+      const captured = runResult
+      await step.run("complete-job", () =>
+        completeJob(jobId, captured.result, captured.resultPath),
+      )
     }
 
     const final = (await getJob(jobId)) ?? job
