@@ -589,9 +589,18 @@ function escapeAttr(s: string): string {
  * standalone export. Handles ATX headings, paragraph breaks, bold, italic,
  * inline code, and bulleted/numbered lists. Anything fancier is rendered
  * verbatim as escaped text — keeps the export bundle dependency-free.
+ *
+ * Inline `<svg>...</svg>` blocks (the injected YoY chart + sparkline) are
+ * preserved verbatim via placeholder substitution so they don't get escaped
+ * to literal text by `escapeHtml`.
  */
 function markdownToBasicHtml(md: string): string {
-  const lines = md.split("\n")
+  const svgBlocks: string[] = []
+  const placeheld = md.replace(/<svg\b[\s\S]*?<\/svg>/gi, (svg) => {
+    const idx = svgBlocks.push(svg) - 1
+    return ` SVG_BLOCK_${idx} `
+  })
+  const lines = placeheld.split("\n")
   const out: string[] = []
   let inUl = false
   let inOl = false
@@ -616,6 +625,16 @@ function markdownToBasicHtml(md: string): string {
     if (!line.trim()) {
       flushPara()
       closeLists()
+      continue
+    }
+    // A line that contains only an SVG placeholder is emitted as a block
+    // (not wrapped in <p>), since <svg> isn't valid phrasing content inside
+    // <p> and some browsers close the <p> early when they hit it.
+    const onlySvg = /^SVG_BLOCK_(\d+)$/.exec(line.trim())
+    if (onlySvg) {
+      flushPara()
+      closeLists()
+      out.push(`<div class="chart-block">${line.trim()}</div>`)
       continue
     }
     const h = /^(#{1,6})\s+(.*)$/.exec(line)
@@ -659,7 +678,11 @@ function markdownToBasicHtml(md: string): string {
   }
   flushPara()
   closeLists()
-  return out.join("\n")
+  let html = out.join("\n")
+  if (svgBlocks.length > 0) {
+    html = html.replace(/SVG_BLOCK_(\d+)/g, (_, idx) => svgBlocks[Number(idx)] ?? "")
+  }
+  return html
 }
 
 function inlineMd(s: string): string {
