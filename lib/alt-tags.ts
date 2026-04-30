@@ -1,5 +1,6 @@
 import "server-only"
 import * as cheerio from "cheerio"
+import type { AnyNode } from "domhandler"
 import { callClaude } from "@/lib/claude"
 import {
   fetchRawHtml,
@@ -32,9 +33,12 @@ const ALT_GEN_CONCURRENCY = 4
 const PAGE_TEXT_EXCERPT_CHARS = 2000
 /** Hard ceiling on context text per individual image. */
 const IMAGE_NEARBY_TEXT_CHARS = 240
-/** Don't bother sending tracking pixels / spacers to Claude. */
+/**
+ * Discard inline data URIs, javascript: hrefs, and obvious tracking
+ * pixels / spacers. SVGs are kept — logos and content SVGs need alt
+ * text just like raster images.
+ */
 const IMG_SRC_BLOCK_PATTERNS: RegExp[] = [
-  /\.svg(?:\?|$)/i,
   /^data:/i,
   /^javascript:/i,
   /\/spacer\.(gif|png)/i,
@@ -42,6 +46,30 @@ const IMG_SRC_BLOCK_PATTERNS: RegExp[] = [
   /1x1\.(gif|png)/i,
   /pixel\.(gif|png)/i,
 ]
+
+/**
+ * `<img>` attributes that may hold a single URL. Tried in order — many
+ * lazy-loading plugins put a placeholder in `src` and the real URL in
+ * one of the `data-*` variants below.
+ */
+const SRC_ATTR_CANDIDATES = [
+  "src",
+  "data-src",
+  "data-lazy-src",
+  "data-original",
+  "data-orig-src",
+  "data-original-src",
+  "data-actualsrc",
+  "data-image-src",
+  "data-hi-res-src",
+] as const
+
+/** `<img>` attributes that hold srcset-formatted lists. */
+const SRCSET_ATTR_CANDIDATES = [
+  "srcset",
+  "data-srcset",
+  "data-lazy-srcset",
+] as const
 
 const ALT_TEXT_MAX_CHARS = 125
 
@@ -133,10 +161,47 @@ function trimWhitespace(s: string): string {
 }
 
 /**
+ * Cheap diagnostic: count `<img` substrings in raw HTML without parsing.
+ * Used to distinguish "page had no images at all" from "page had <img>
+ * elements but our src extraction rejected all of them" in server logs.
+ */
+function countImgTags(html: string): number {
+  const matches = html.match(/<img\b/gi)
+  return matches ? matches.length : 0
+}
+
+/**
+ * Walk the candidate src attributes and return the first one that
+ * resolves to a usable URL. Lazy-loading plugins commonly stash a
+ * placeholder data URI in `src` and the real URL in `data-src` /
+ * `data-lazy-src` / `srcset`, so we cannot use `??` short-circuiting on
+ * the raw attribute values — `src=""` is falsy but `src="data:..."` is
+ * truthy and would mask the real URL further down the chain.
+ */
+function pickImageSrc($img: cheerio.Cheerio<AnyNode>): string | null {
+  for (const attr of SRC_ATTR_CANDIDATES) {
+    const v = $img.attr(attr)
+    if (v && isUsableImageSrc(v)) return v
+  }
+  for (const attr of SRCSET_ATTR_CANDIDATES) {
+    const v = $img.attr(attr)
+    if (!v) continue
+    const fromSet = firstSrcsetUrl(v)
+    if (fromSet && isUsableImageSrc(fromSet)) return fromSet
+  }
+  return null
+}
+
+/**
  * Pull every <img> on the page along with light context for alt-text
  * generation. Resolves relative srcs to absolute against `pageUrl` and
  * de-duplicates by absolute src (an image referenced multiple times on
  * one page only needs one alt suggestion).
+ *
+ * Order of operations matters: image extraction runs FIRST against the
+ * untouched DOM, so header logos and footer images aren't stripped out
+ * before we count them. The body-text excerpt is built afterward from a
+ * second pass that does remove nav/header/footer/svg/script chrome.
  */
 export function extractPageContext(
   pageUrl: string,
@@ -147,31 +212,15 @@ export function extractPageContext(
   const title = trimWhitespace($("head > title").first().text() ?? "")
   const h1 = trimWhitespace($("h1").first().text() ?? "")
 
-  // Strip non-content sections so the excerpt represents body copy, not
-  // nav/footer chrome.
-  $("script, style, noscript, nav, header, footer, svg").remove()
-  const bodyText = trimWhitespace($("body").text() ?? "").slice(
-    0,
-    PAGE_TEXT_EXCERPT_CHARS,
-  )
-
   const seen = new Set<string>()
   const images: PageImageRow[] = []
+  // Pre-extract figcaption text per <figure> so each image inside a
+  // figure inherits its caption regardless of where the <img> sits in
+  // the figure subtree.
   $("img").each((_, el) => {
     const $img = $(el)
-    const rawSrc =
-      $img.attr("src") ??
-      $img.attr("data-src") ??
-      $img.attr("data-lazy-src") ??
-      $img.attr("data-original") ??
-      ""
-    let candidate = rawSrc
-    if (!isUsableImageSrc(candidate)) {
-      const srcset = $img.attr("srcset") ?? $img.attr("data-srcset") ?? ""
-      const fromSet = firstSrcsetUrl(srcset)
-      if (fromSet) candidate = fromSet
-    }
-    if (!isUsableImageSrc(candidate)) return
+    const candidate = pickImageSrc($img)
+    if (!candidate) return
 
     const absolute = resolveUrl(pageUrl, candidate)
     if (!absolute) return
@@ -183,7 +232,7 @@ export function extractPageContext(
     // Nearby text helps Claude write descriptive alt text. Prefer
     // figcaption when present (often the editor wrote a literal caption
     // that we can use as a starting point), then parent paragraph or
-    // section heading.
+    // section heading. Fall back to image's own title attribute.
     const $figure = $img.closest("figure")
     let nearbyText = ""
     if ($figure.length > 0) {
@@ -193,6 +242,9 @@ export function extractPageContext(
       const $parent = $img.parent()
       nearbyText = trimWhitespace($parent.text())
     }
+    if (!nearbyText) {
+      nearbyText = trimWhitespace($img.attr("title") ?? "")
+    }
     nearbyText = nearbyText.slice(0, IMAGE_NEARBY_TEXT_CHARS)
 
     images.push({
@@ -201,6 +253,15 @@ export function extractPageContext(
       nearbyText,
     })
   })
+
+  // Strip non-content sections so the excerpt represents body copy, not
+  // nav/footer chrome. Done after image extraction so header/footer
+  // imagery is preserved above.
+  $("script, style, noscript, nav, header, footer, svg").remove()
+  const bodyText = trimWhitespace($("body").text() ?? "").slice(
+    0,
+    PAGE_TEXT_EXCERPT_CHARS,
+  )
 
   return {
     pageUrl,
@@ -357,30 +418,57 @@ export async function generateAltTags(
   const okPages = crawl.pages.filter(
     (p) => p.statusCode >= 200 && p.statusCode < 300,
   )
+  console.log(
+    `[alt-tags] crawl ok pages=${okPages.length} task=${crawl.taskId} js=${crawl.enabledJavaScript}`,
+  )
 
   // Fetch raw HTML for every OK page in parallel (capped concurrency).
   const htmlByUrl = new Map<string, string>()
+  let rawHtmlMissing = 0
   await withConcurrency(okPages, FETCH_HTML_CONCURRENCY, async (page) => {
     const url = page.finalUrl || page.url
     try {
       const html = await fetchRawHtml(crawl.taskId, url)
-      if (html) htmlByUrl.set(url, html)
+      if (html) {
+        htmlByUrl.set(url, html)
+      } else {
+        rawHtmlMissing += 1
+      }
     } catch (err) {
+      rawHtmlMissing += 1
       console.warn(
         `[alt-tags] raw_html failed for ${url}: ${err instanceof Error ? err.message : "unknown"}`,
       )
     }
   })
+  console.log(
+    `[alt-tags] raw_html fetched=${htmlByUrl.size} missing=${rawHtmlMissing}`,
+  )
 
   // Build per-page context. Pages with zero usable images don't need a
   // Claude call; we still count them toward `pagesCrawled`.
+  // Per-page <img>-element counts vs. usable-src counts are logged so
+  // we can tell from Vercel logs whether "zero images" means "no <img>
+  // in the HTML" vs. "all <img> elements were filtered out (typically
+  // missing src/data-src)".
   const contexts: PageContext[] = []
   let imagesFound = 0
+  let pagesWithRawImgTags = 0
   for (const [url, html] of htmlByUrl) {
+    const rawImgCount = countImgTags(html)
     const ctx = extractPageContext(url, html)
     imagesFound += ctx.images.length
+    if (rawImgCount > 0) pagesWithRawImgTags += 1
+    if (rawImgCount > 0 && ctx.images.length === 0) {
+      console.warn(
+        `[alt-tags] page=${url} had ${rawImgCount} <img> elements but 0 usable srcs (lazy-load placeholder or unknown src attribute?)`,
+      )
+    }
     if (ctx.images.length > 0) contexts.push(ctx)
   }
+  console.log(
+    `[alt-tags] extraction pages_with_<img>=${pagesWithRawImgTags}/${htmlByUrl.size} usable_images=${imagesFound}`,
+  )
 
   // For each page, decide which images we actually want Claude to label.
   // When `skipImagesWithAlt` is true, images whose current alt is non-empty
