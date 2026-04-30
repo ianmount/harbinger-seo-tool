@@ -33,6 +33,18 @@ const ALT_GEN_CONCURRENCY = 4
 const PAGE_TEXT_EXCERPT_CHARS = 2000
 /** Hard ceiling on context text per individual image. */
 const IMAGE_NEARBY_TEXT_CHARS = 240
+/** Per-request timeout for the native-fetch fallback. */
+const NATIVE_FETCH_TIMEOUT_MS = 15_000
+/**
+ * Bytes-floor for a "real" HTML page. Cloudflare-class WAFs and other
+ * anti-bot pages return ≤1KB challenge bodies on 200 OK; treat anything
+ * under this as a soft failure and skip the page rather than feeding
+ * gibberish into the extractor.
+ */
+const NATIVE_FETCH_MIN_BODY_BYTES = 1024
+/** Identifying User-Agent for the native-fetch fallback. */
+const NATIVE_FETCH_UA =
+  "Mozilla/5.0 (compatible; HarbingerSEOTool/1.0; +https://harbinger-seo-tool.vercel.app)"
 /**
  * Discard inline data URIs, javascript: hrefs, and obvious tracking
  * pixels / spacers. SVGs are kept — logos and content SVGs need alt
@@ -365,6 +377,76 @@ async function generateAltsForPage(
   return map
 }
 
+interface FetchedHtml {
+  html: string
+  source: "dfs" | "native"
+}
+
+/**
+ * Fetch a page's HTML, preferring DataForSEO's stored raw_html (free
+ * for an already-paid crawl) and falling back to native fetch when
+ * DFS has nothing stored.
+ *
+ * Why the fallback exists: on small crawls DFS occasionally fails to
+ * persist raw HTML even with store_raw_html=true. The first observed
+ * case was peachyfacility.com — a 6-page crawl that finished cleanly
+ * and reported 200 OK on every page, but every raw_html lookup came
+ * back with html=null and cost=$0.0000 (DFS billing convention for
+ * "nothing to return"). The site itself isn't WAF-protected, so a
+ * direct fetch from Vercel succeeds where DFS storage didn't.
+ */
+async function fetchPageHtml(
+  taskId: string,
+  url: string,
+): Promise<FetchedHtml | null> {
+  // 1. DFS raw_html — free, fast, works for most crawls.
+  let dfsHtml: string | null = null
+  try {
+    dfsHtml = await fetchRawHtml(taskId, url)
+  } catch (err) {
+    console.warn(
+      `[alt-tags] dfs raw_html error for ${url}: ${err instanceof Error ? err.message : "unknown"}`,
+    )
+  }
+  if (dfsHtml) return { html: dfsHtml, source: "dfs" }
+
+  // 2. Native fetch fallback — pulls the page directly from the origin.
+  // Vercel has unrestricted egress so this works for any non-WAF site.
+  // Sites behind aggressive Cloudflare-class WAFs return short challenge
+  // bodies on 200 OK; the byte-floor below filters those out.
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": NATIVE_FETCH_UA,
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      signal: AbortSignal.timeout(NATIVE_FETCH_TIMEOUT_MS),
+      redirect: "follow",
+    })
+    if (!response.ok) {
+      console.warn(
+        `[alt-tags] native fetch ${url} returned ${response.status}`,
+      )
+      return null
+    }
+    const html = await response.text()
+    if (!html || html.length < NATIVE_FETCH_MIN_BODY_BYTES) {
+      console.warn(
+        `[alt-tags] native fetch ${url} body too short (${html?.length ?? 0} bytes) — likely a WAF challenge`,
+      )
+      return null
+    }
+    return { html, source: "native" }
+  } catch (err) {
+    console.warn(
+      `[alt-tags] native fetch failed for ${url}: ${err instanceof Error ? err.message : "unknown"}`,
+    )
+    return null
+  }
+}
+
 async function withConcurrency<T, R>(
   items: T[],
   limit: number,
@@ -422,27 +504,28 @@ export async function generateAltTags(
     `[alt-tags] crawl ok pages=${okPages.length} task=${crawl.taskId} js=${crawl.enabledJavaScript}`,
   )
 
-  // Fetch raw HTML for every OK page in parallel (capped concurrency).
+  // Fetch HTML for every OK page in parallel (capped concurrency).
+  // We try DataForSEO's stored raw_html first because it's free for an
+  // already-paid crawl; when DFS hasn't stored anything (a known quirk
+  // on small crawls even with store_raw_html=true) we fall back to
+  // native fetch, which Vercel allows unrestricted.
   const htmlByUrl = new Map<string, string>()
-  let rawHtmlMissing = 0
+  let dfsHits = 0
+  let nativeHits = 0
+  let bothFailed = 0
   await withConcurrency(okPages, FETCH_HTML_CONCURRENCY, async (page) => {
     const url = page.finalUrl || page.url
-    try {
-      const html = await fetchRawHtml(crawl.taskId, url)
-      if (html) {
-        htmlByUrl.set(url, html)
-      } else {
-        rawHtmlMissing += 1
-      }
-    } catch (err) {
-      rawHtmlMissing += 1
-      console.warn(
-        `[alt-tags] raw_html failed for ${url}: ${err instanceof Error ? err.message : "unknown"}`,
-      )
+    const result = await fetchPageHtml(crawl.taskId, url)
+    if (!result) {
+      bothFailed += 1
+      return
     }
+    htmlByUrl.set(url, result.html)
+    if (result.source === "dfs") dfsHits += 1
+    else nativeHits += 1
   })
   console.log(
-    `[alt-tags] raw_html fetched=${htmlByUrl.size} missing=${rawHtmlMissing}`,
+    `[alt-tags] html fetched=${htmlByUrl.size} (dfs=${dfsHits} native=${nativeHits}) failed=${bothFailed}`,
   )
 
   // Build per-page context. Pages with zero usable images don't need a
