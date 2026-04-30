@@ -140,12 +140,21 @@ export const runJobFunction = inngest.createFunction(
     // failed with "Could not find step to run; timed out" because the
     // re-execution was hitting the Vercel function timeout.
     //
-    // step.run also serializes the return value, so anything the task
-    // returns must be JSON-friendly (no functions, Dates ok, no Maps/
-    // Sets). All current task results meet this.
-    let runResult: { result: unknown; resultPath?: string } | null = null
+    // We also write the heavy task result (audit bundles, full crawl rows,
+    // alt-tag arrays) directly to background_jobs.result inside this step
+    // rather than returning it through Inngest's serialization layer.
+    // step.run output is capped at 4MiB and serialization at that scale was
+    // flaky — Inngest reported "your server reset the connection while we
+    // were reading the reply" on responses approaching the cap. The step
+    // still returns a small ack ({ ok, resultPath }) so the run trace is
+    // legible in the Inngest dashboard.
+    let runResult: { ok: boolean; resultPath?: string } | null = null
     try {
-      runResult = await step.run("run-task", () => runner({ jobId, job }))
+      runResult = await step.run("run-task", async () => {
+        const { result, resultPath } = await runner({ jobId, job })
+        await completeJob(jobId, result, resultPath)
+        return { ok: true, resultPath }
+      })
     } catch (err) {
       // step.run rethrows as the original error class is collapsed into a
       // generic StepError. Identify cancellation by the `name` so we still
@@ -167,13 +176,9 @@ export const runJobFunction = inngest.createFunction(
         await step.run("fail-job", () => failJob(jobId, message))
       }
     }
-
-    if (runResult) {
-      const captured = runResult
-      await step.run("complete-job", () =>
-        completeJob(jobId, captured.result, captured.resultPath),
-      )
-    }
+    // Note: no separate "complete-job" step. completeJob() was called inside
+    // run-task above — that's where the row flips to status=completed.
+    void runResult
 
     const final = (await getJob(jobId)) ?? job
     // Skip email on cancellation — the user just clicked Stop, they don't
