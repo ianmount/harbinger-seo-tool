@@ -111,22 +111,26 @@ export function SortableTable<T>({
                       <button
                         type="button"
                         onClick={() => toggleSort(col.key)}
-                        data-print-hide
                         className={cn(
                           "inline-flex items-center gap-1.5 transition-colors hover:text-foreground",
                           active && "text-foreground",
                         )}
                       >
                         <span>{col.header}</span>
-                        {active ? (
-                          sortDir === "asc" ? (
-                            <ArrowUp className="h-3 w-3" aria-hidden />
+                        <span data-print-hide className="inline-flex">
+                          {active ? (
+                            sortDir === "asc" ? (
+                              <ArrowUp className="h-3 w-3" aria-hidden />
+                            ) : (
+                              <ArrowDown className="h-3 w-3" aria-hidden />
+                            )
                           ) : (
-                            <ArrowDown className="h-3 w-3" aria-hidden />
-                          )
-                        ) : (
-                          <ArrowUpDown className="h-3 w-3 opacity-60" aria-hidden />
-                        )}
+                            <ArrowUpDown
+                              className="h-3 w-3 opacity-60"
+                              aria-hidden
+                            />
+                          )}
+                        </span>
                       </button>
                     ) : (
                       col.header

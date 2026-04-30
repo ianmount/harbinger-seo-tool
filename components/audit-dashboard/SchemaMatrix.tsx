@@ -38,10 +38,10 @@ export function SchemaMatrix({ data }: { data: SchemaSection }) {
                         onClick={() =>
                           setOpenType(isOpen ? null : row.type)
                         }
-                        data-print-hide
                         className="inline-flex items-center gap-2 font-sans text-[13px] font-semibold text-foreground"
                       >
                         <ChevronDown
+                          data-print-hide
                           className={cn(
                             "h-4 w-4 text-ink-3 transition-transform",
                             isOpen ? "rotate-0" : "-rotate-90",
