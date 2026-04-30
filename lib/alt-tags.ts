@@ -27,12 +27,35 @@ import {
  * is auto-detected via the same `instant_pages` probe.
  */
 
-const FETCH_HTML_CONCURRENCY = 6
-const ALT_GEN_CONCURRENCY = 4
+const FETCH_HTML_CONCURRENCY = 8
+/**
+ * Concurrency for the Claude alt-text phase. Tuned for Anthropic Tier 4
+ * rate limits (400K ITPM): each call sends ~3K input tokens, so 10
+ * concurrent ≈ 200K ITPM peak — comfortable headroom. Bumped from the
+ * original 4 to keep large-site runs (~200 pages) inside the 800s
+ * Vercel function ceiling. Drop this if we start seeing 429s.
+ */
+const ALT_GEN_CONCURRENCY = 10
+/**
+ * Per-page image cap sent to Claude. Pages with hundreds of images
+ * (galleries, portfolio grids) blow up output tokens and stall the
+ * pipeline. The CSV still includes every image found — overflow images
+ * are emitted with empty `generatedAlt`.
+ */
+const MAX_IMAGES_PER_PAGE_TO_CLAUDE = 40
+/**
+ * Alt-text generation is well within Haiku's capabilities — short,
+ * structured JSON output that doesn't require Sonnet's reasoning. Haiku
+ * 4.5 is roughly 2-3× faster end-to-end and ~5× cheaper, which is the
+ * single biggest lever for getting large-site runs under the 800s
+ * Vercel ceiling. If output quality regresses, swap back to
+ * `claude-sonnet-4-6`.
+ */
+const ALT_GEN_MODEL = "claude-haiku-4-5-20251001"
 /** Hard ceiling on text excerpt sent to Claude per page. */
-const PAGE_TEXT_EXCERPT_CHARS = 2000
+const PAGE_TEXT_EXCERPT_CHARS = 800
 /** Hard ceiling on context text per individual image. */
-const IMAGE_NEARBY_TEXT_CHARS = 240
+const IMAGE_NEARBY_TEXT_CHARS = 150
 /** Per-request timeout for the native-fetch fallback. */
 const NATIVE_FETCH_TIMEOUT_MS = 15_000
 /**
@@ -368,7 +391,7 @@ async function generateAltsForPage(
   if (imagesToSend.length === 0) return new Map()
   const prompt = buildPrompt(ctx, imagesToSend)
   const text = await callClaude(prompt, {
-    model: "claude-sonnet-4-6",
+    model: ALT_GEN_MODEL,
     maxTokens: Math.min(8192, 256 + imagesToSend.length * 80),
   })
   const suggestions = parseClaudeSuggestions(text)
@@ -483,6 +506,7 @@ export async function generateAltTags(
     (!probe.hasTitle || !probe.hasDescription)
   )
 
+  const crawlStartedAt = Date.now()
   let crawl: Awaited<ReturnType<typeof runOnPageCrawl>>
   try {
     crawl = await runOnPageCrawl({
@@ -501,7 +525,7 @@ export async function generateAltTags(
     (p) => p.statusCode >= 200 && p.statusCode < 300,
   )
   console.log(
-    `[alt-tags] crawl ok pages=${okPages.length} task=${crawl.taskId} js=${crawl.enabledJavaScript}`,
+    `[alt-tags] phase=crawl pages=${okPages.length} task=${crawl.taskId} js=${crawl.enabledJavaScript} took=${Date.now() - crawlStartedAt}ms`,
   )
 
   // Fetch HTML for every OK page in parallel (capped concurrency).
@@ -509,6 +533,7 @@ export async function generateAltTags(
   // already-paid crawl; when DFS hasn't stored anything (a known quirk
   // on small crawls even with store_raw_html=true) we fall back to
   // native fetch, which Vercel allows unrestricted.
+  const fetchStartedAt = Date.now()
   const htmlByUrl = new Map<string, string>()
   let dfsHits = 0
   let nativeHits = 0
@@ -525,7 +550,7 @@ export async function generateAltTags(
     else nativeHits += 1
   })
   console.log(
-    `[alt-tags] html fetched=${htmlByUrl.size} (dfs=${dfsHits} native=${nativeHits}) failed=${bothFailed}`,
+    `[alt-tags] phase=fetch fetched=${htmlByUrl.size} (dfs=${dfsHits} native=${nativeHits}) failed=${bothFailed} took=${Date.now() - fetchStartedAt}ms`,
   )
 
   // Build per-page context. Pages with zero usable images don't need a
@@ -557,19 +582,31 @@ export async function generateAltTags(
   // When `skipImagesWithAlt` is true, images whose current alt is non-empty
   // pass through to the CSV with `skipped: true` and an empty
   // `generatedAlt` — caller can still surface them so the user sees the
-  // existing alt.
+  // existing alt. When a page has more than MAX_IMAGES_PER_PAGE_TO_CLAUDE
+  // candidates after filtering, the overflow tail still appears in the CSV
+  // but with empty `generatedAlt` — protects pipeline runtime against
+  // gallery / portfolio pages that would otherwise blow up output tokens.
+  const generateStartedAt = Date.now()
   const rows: AltTagRow[] = []
   let pagesWithImages = 0
   let imagesProcessed = 0
+  let imagesOverflowed = 0
 
   await withConcurrency(contexts, ALT_GEN_CONCURRENCY, async (ctx) => {
     pagesWithImages += 1
     const needAlt = ctx.images.filter(
       (img) => !skipImagesWithAlt || img.currentAlt.length === 0,
     )
+    const sentToClaude = needAlt.slice(0, MAX_IMAGES_PER_PAGE_TO_CLAUDE)
+    if (needAlt.length > sentToClaude.length) {
+      imagesOverflowed += needAlt.length - sentToClaude.length
+      console.warn(
+        `[alt-tags] page=${ctx.pageUrl} has ${needAlt.length} images needing alt — capping to ${MAX_IMAGES_PER_PAGE_TO_CLAUDE} for Claude; overflow appears in CSV with empty suggestion`,
+      )
+    }
     let suggestions: Map<string, string>
     try {
-      suggestions = await generateAltsForPage(ctx, needAlt)
+      suggestions = await generateAltsForPage(ctx, sentToClaude)
     } catch (err) {
       console.warn(
         `[alt-tags] alt-gen failed for ${ctx.pageUrl}: ${err instanceof Error ? err.message : "unknown"}`,
@@ -590,6 +627,9 @@ export async function generateAltTags(
       })
     }
   })
+  console.log(
+    `[alt-tags] phase=generate pages=${pagesWithImages} processed=${imagesProcessed} overflowed=${imagesOverflowed} model=${ALT_GEN_MODEL} took=${Date.now() - generateStartedAt}ms`,
+  )
 
   // Stable sort: by page URL, then image URL.
   rows.sort((a, b) => {
