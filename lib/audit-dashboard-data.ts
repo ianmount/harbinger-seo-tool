@@ -1,3 +1,4 @@
+import GithubSlugger from "github-slugger"
 import type {
   AssessmentAuditResult,
   AssessmentGa4Data,
@@ -469,20 +470,18 @@ function buildExecutiveSummary(
 
 function buildOutline(markdown: string): NarrativeSection["outline"] {
   const out: NarrativeSection["outline"] = []
-  const seen = new Map<string, number>()
+  // Match the slug algorithm used by rehype-slug (in-app dashboard) and
+  // markdownToBasicHtml (HTML export). github-slugger handles dedupe with
+  // a counter suffix internally — same instance must be used per call so
+  // duplicate counters reset between audits.
+  const slugger = new GithubSlugger()
   for (const line of markdown.split("\n")) {
     const m = /^(#{2,3})\s+(.*)$/.exec(line.trim())
     if (!m) continue
     const level = m[1].length === 2 ? 2 : 3
     const title = m[2].replace(/[*_`]/g, "").trim()
     if (!title) continue
-    const baseSlug = title
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "")
-    const count = (seen.get(baseSlug) ?? 0) + 1
-    seen.set(baseSlug, count)
-    const id = count === 1 ? baseSlug : `${baseSlug}-${count}`
+    const id = slugger.slug(title)
     out.push({ id, title, level })
   }
   return out

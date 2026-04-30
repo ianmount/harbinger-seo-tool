@@ -359,7 +359,11 @@ function buildHeadingStructureSection(h: HeadingIssues): string[] {
   const missingH1 = h.pagesWithoutH1.length
   const multipleH1 = h.pagesWithMultipleH1.length
   const missingH2 = h.pagesWithoutH2.length
-  const tier2 = missingH1 >= 5 || multipleH1 >= 5
+  // Tier-2 fires at scale; the SECTION itself is always emitted because the
+  // user's audit deliverable promises an H1/H2 narrative, even if the verdict
+  // is "headings look healthy."
+  const tier2 = missingH1 >= 5 || multipleH1 >= 5 || missingH2 >= 10
+  const anyIssue = missingH1 > 0 || multipleH1 > 0 || missingH2 > 0
   lines.push(`# Heading structure (H1/H2)`)
   lines.push(`OK pages analyzed: ${h.okPagesAnalyzed}`)
   lines.push(
@@ -372,7 +376,7 @@ function buildHeadingStructureSection(h: HeadingIssues): string[] {
     `Pages missing every H2 (no document outline): ${missingH2} (${((1 - h.h2CoverageRate) * 100).toFixed(1)}% of OK pages)`,
   )
   lines.push(
-    `Heading Structure section required: ${tier2 || missingH2 >= 10 ? "YES — emit a Heading Structure subsection within Technical Findings" : "no — H1/H2 hygiene is acceptable; OMIT the section"}`,
+    `Heading Structure section required: YES — always emit as a top-level "## Heading Structure (H1/H2)" section. ${tier2 ? "Tier 2 — issues present at scale; lead with the headline counts." : anyIssue ? "Tier 3 — minor hygiene issues; cover them but don't lead with them." : "Verdict is healthy; state that affirmatively in 1-2 sentences and skip the per-issue lists."}`,
   )
   if (missingH1 > 0) {
     lines.push("")
@@ -452,23 +456,29 @@ function buildAltTagDetailSection(crawl: CrawlReport): string[] {
         p.imagesTotal > 0 ? (p.imagesWithAlt / p.imagesTotal) * 100 : 100,
     }))
     .sort((a, b) => b.imagesMissingAlt - a.imagesMissingAlt)
-  if (offenders.length === 0) return lines
   const totalMissing = offenders.reduce((s, o) => s + o.imagesMissingAlt, 0)
+  // Crawl with no images at all — extremely rare but possible (text-only
+  // marketing site). We still emit the section header so the audit doesn't
+  // silently drop the alt-tag narrative; Claude will state the no-images
+  // verdict in one line.
+  const tier2 = crawl.imageAltCoveragePercent < 80 || offenders.length >= 5
+  const anyIssue = offenders.length > 0
   lines.push(`# Image alt-text coverage`)
   lines.push(`Sitewide alt coverage: ${crawl.imageAltCoveragePercent}%`)
   lines.push(
     `Pages with at least one image missing alt: ${offenders.length} (combined ${totalMissing.toLocaleString()} images missing alt)`,
   )
-  const tier2 = crawl.imageAltCoveragePercent < 80 || offenders.length >= 5
   lines.push(
-    `Alt-Text Coverage section required: ${tier2 ? "YES — emit as a Tier 2 finding inside Technical Findings" : "no — coverage is acceptable; OMIT the section"}`,
+    `Alt-Text Coverage section required: YES — always emit as a top-level "## Image Alt-Text Coverage" section. ${tier2 ? "Tier 2 — issues at scale; lead with sitewide coverage and worst offenders." : anyIssue ? "Tier 3 — minor coverage gap; cover concisely." : "No remediation needed — state that the site has full alt-text coverage in 1-2 sentences and skip the offender list."}`,
   )
-  lines.push("")
-  lines.push(`## Top pages missing alt text (cite VERBATIM, top 10)`)
-  for (const o of offenders.slice(0, 10)) {
-    lines.push(
-      `  - ${truncate(o.url, 110)} — ${o.imagesMissingAlt}/${o.imagesTotal} images missing alt (${o.coveragePct.toFixed(0)}% coverage)`,
-    )
+  if (anyIssue) {
+    lines.push("")
+    lines.push(`## Top pages missing alt text (cite VERBATIM, top 10)`)
+    for (const o of offenders.slice(0, 10)) {
+      lines.push(
+        `  - ${truncate(o.url, 110)} — ${o.imagesMissingAlt}/${o.imagesTotal} images missing alt (${o.coveragePct.toFixed(0)}% coverage)`,
+      )
+    }
   }
   lines.push("")
   return lines
@@ -1039,13 +1049,21 @@ ALWAYS include this section when the "Backlink profile" block is present (it is 
 4. **Disavow recommendation** — REQUIRED final paragraph. Explicitly state whether to file a Google disavow file. When low-quality share > 30% OR new-link low-quality share > 40%, recommend filing and name 3-5 specific candidate domains from sampleLowQualityLinks. Otherwise recommend monitoring quarterly without filing. Never omit this paragraph; an empty backlink profile gets the affirmative "no disavow needed at this time" version.
 
 ## Technical Findings
-Specific crawl-level issues ordered by impact. Cite exact pages.
+Specific crawl-level issues ordered by impact. Cite exact pages. (H1/H2 hygiene and alt-text coverage have their own top-level sections below — DO NOT duplicate them here.)
 
-Within Technical Findings, emit these subsections (heading level ###) when their data block flags the section as required:
+## Heading Structure (H1/H2)
+ALWAYS emit this section when the "Heading structure (H1/H2)" block is present (it is required regardless of severity — the audit deliverable promises an H1/H2 narrative, even if the verdict is "headings look healthy"). Use heading level ## (top-level) so it appears in the table of contents.
 
-- **Heading Structure (H1/H2)** — required when the "Heading structure (H1/H2)" block reports "section required: YES". Lead with the headline counts (pages missing H1; pages with multiple H1s; pages missing every H2). Cite 2-3 offending URLs verbatim per issue type. Recommend the fix: "Add a single, keyword-aligned H1 to <URL>"; "Consolidate the multiple H1s on <URL> to a single H1; demote the rest to H2"; "Add a section H2 to <URL> to give the page a scannable outline."
+- Open with the three counts verbatim: pages missing an H1, pages with multiple H1s, pages missing every H2 — plus the OK-pages-analyzed denominator.
+- When issues exist, cite 2-3 offending URLs verbatim per issue type (use the sample lists in the data block). Recommend the fix per type: "Add a single, keyword-aligned H1 to <URL>"; "Consolidate the multiple H1s on <URL> to a single H1; demote the rest to H2"; "Add a section H2 to <URL> to give the page a scannable outline."
+- When the data block reports "Verdict is healthy", emit a 1-2 sentence affirmative read ("All <N> crawled pages carry a single H1; H2 coverage is <X>%") and skip the per-issue lists.
 
-- **Image Alt-Text Coverage** — required when the "Image alt-text coverage" block reports "section required: YES". Lead with the sitewide coverage percentage verbatim. Cite 2-3 of the worst offenders by URL with their exact "X/Y images missing alt" counts. Recommend a single concrete remediation: "Add descriptive alt text to the <image-count> images on <URL>; prioritize hero/feature images."
+## Image Alt-Text Coverage
+ALWAYS emit this section when the "Image alt-text coverage" block is present (required regardless of severity). Use heading level ## (top-level).
+
+- Open with the sitewide alt coverage percentage verbatim AND the count of pages with any missing alt.
+- When issues exist, cite 2-3 of the worst offenders by URL with their exact "X/Y images missing alt" counts. Recommend a single concrete remediation: "Add descriptive alt text to the <image-count> images on <URL>; prioritize hero/feature images."
+- When coverage is 100% with no offenders, emit a 1-2 sentence affirmative read ("Image alt-text coverage is 100% across <N> pages — no remediation needed.") and skip the offender list.
 
 ## URL Structure Issues
 Include ONLY when the "URL structure issues" block is present. Group by issue type (mixed protocol, mixed www/apex, mixed trailing slash, deep nesting). For each, state the canonical form and cite 2-3 offending URLs verbatim. Recommend a single canonical and the redirect rule that resolves the conflict.

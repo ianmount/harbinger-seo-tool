@@ -1,3 +1,4 @@
+import GithubSlugger from "github-slugger"
 import type {
   CannibalizationSection,
   CompetitorsSection,
@@ -77,6 +78,17 @@ function renderToc(data: DashboardData): string {
     items.push({ id: "opportunities", label: "Top Opportunities" })
   if (data.topPages) items.push({ id: "top-pages", label: "Top Pages" })
   if (data.performance) items.push({ id: "performance", label: "Site Health" })
+  // In-narrative sections — anchor IDs are emitted by markdownToBasicHtml
+  // using the same slug algorithm as rehype-slug (github-slugger). Gated on
+  // narrative.outline so dead links don't show up when a section is omitted.
+  const outlineHas = (id: string) =>
+    data.narrative.outline.some((o) => o.id === id)
+  if (outlineHas("backlink-profile"))
+    items.push({ id: "backlink-profile", label: "Backlinks" })
+  if (outlineHas("heading-structure-h1h2"))
+    items.push({ id: "heading-structure-h1h2", label: "H1/H2 Headings" })
+  if (outlineHas("image-alt-text-coverage"))
+    items.push({ id: "image-alt-text-coverage", label: "Alt Tags" })
   items.push({ id: "narrative", label: "Full Narrative" })
   return `<aside class="toc">
     <p class="eyebrow red">Table of Contents</p>
@@ -511,7 +523,7 @@ function renderNarrative(data: DashboardData): string {
     "Full Audit Narrative",
     "Claude's full synthesis — supports the structured sections above.",
     `<div class="narrative">${html}</div>`,
-    /* collapsed */ true,
+    /* collapsed */ false,
   )
 }
 
@@ -595,6 +607,11 @@ function escapeAttr(s: string): string {
  * to literal text by `escapeHtml`.
  */
 function markdownToBasicHtml(md: string): string {
+  // GitHub-flavored slugger — same algorithm rehype-slug uses in the
+  // in-app dashboard. Keeping both renderers aligned means TOC anchors
+  // resolve to the same headings whether the user is viewing the live
+  // dashboard or the standalone HTML export.
+  const slugger = new GithubSlugger()
   const svgBlocks: string[] = []
   const placeheld = md.replace(/<svg\b[\s\S]*?<\/svg>/gi, (svg) => {
     const idx = svgBlocks.push(svg) - 1
@@ -642,7 +659,14 @@ function markdownToBasicHtml(md: string): string {
       flushPara()
       closeLists()
       const level = Math.min(6, h[1].length)
-      out.push(`<h${level}>${inlineMd(h[2])}</h${level}>`)
+      const headingText = h[2]
+      // Strip markdown emphasis from the slug input so emphasis doesn't
+      // pollute the ID. The visible heading text keeps the original markup.
+      const slugSource = headingText.replace(/[*_`]/g, "").trim()
+      const id = slugger.slug(slugSource)
+      out.push(
+        `<h${level} id="${escapeAttr(id)}">${inlineMd(headingText)}</h${level}>`,
+      )
       continue
     }
     const ul = /^[-*]\s+(.*)$/.exec(line)
