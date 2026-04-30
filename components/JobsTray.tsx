@@ -55,12 +55,35 @@ const KIND_LABELS: Record<JobKind, string> = {
 
 const ACTIVE_POLL_MS = 3000
 const IDLE_POLL_MS = 30000
+// Shared with components/JobsForKindCard. Dismissing a job from a per-tab
+// card hides it here too; in-progress jobs cannot be dismissed.
+const DISMISSED_KEY = "harbinger:dismissed_jobs"
+
+function readDismissed(): Set<string> {
+  if (typeof window === "undefined") return new Set()
+  try {
+    const raw = window.localStorage.getItem(DISMISSED_KEY)
+    if (!raw) return new Set()
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((s): s is string => typeof s === "string"))
+  } catch {
+    return new Set()
+  }
+}
 
 export function JobsTray() {
   const [jobs, setJobs] = useState<Job[] | null>(null)
   const [open, setOpen] = useState(false)
   const announcedRef = useRef<Set<string>>(new Set())
   const initializedRef = useRef(false)
+  // Re-read the dismissed set whenever the tray opens — otherwise dismissals
+  // made on a per-tab card while the tray was closed wouldn't show up here
+  // until the next poll tick that re-rendered the parent.
+  const [dismissed, setDismissed] = useState<Set<string>>(() => readDismissed())
+  useEffect(() => {
+    if (open) setDismissed(readDismissed())
+  }, [open])
 
   const fetchJobs = useCallback(async () => {
     try {
@@ -127,12 +150,17 @@ export function JobsTray() {
     }
   }, [jobs])
 
+  const visibleJobs = useMemo(
+    () => (jobs ?? []).filter((j) => !dismissed.has(j.id)),
+    [jobs, dismissed],
+  )
+
   const activeCount = useMemo(
     () =>
-      (jobs ?? []).filter(
+      visibleJobs.filter(
         (j) => j.status === "queued" || j.status === "running",
       ).length,
-    [jobs],
+    [visibleJobs],
   )
 
   return (
@@ -162,13 +190,13 @@ export function JobsTray() {
             <div className="px-4 py-6 text-center text-sm text-muted-foreground">
               Loading…
             </div>
-          ) : jobs.length === 0 ? (
+          ) : visibleJobs.length === 0 ? (
             <div className="px-4 py-6 text-center text-sm text-muted-foreground">
               No jobs in this session yet.
             </div>
           ) : (
             <ul className="divide-y">
-              {jobs.map((job) => (
+              {visibleJobs.map((job) => (
                 <li key={job.id} className="px-4 py-3">
                   <JobRow job={job} onNavigate={() => setOpen(false)} />
                 </li>

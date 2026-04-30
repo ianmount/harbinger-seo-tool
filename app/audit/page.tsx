@@ -4,6 +4,7 @@ import { useCallback, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
+import { JobsForKindCard } from "@/components/JobsForKindCard"
 import { ensureNotificationPermission } from "@/components/JobsTray"
 import { PageHeader } from "@/components/PageHeader"
 import { Button } from "@/components/ui/button"
@@ -288,6 +289,8 @@ export default function AuditPage() {
           {errorMessage}
         </div>
       )}
+
+      <JobsForKindCard kind="audit" title="Recent audits" />
     </div>
   )
 }
