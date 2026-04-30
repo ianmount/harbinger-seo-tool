@@ -46,16 +46,51 @@ export async function POST(request: Request): Promise<Response> {
     )
   }
 
-  const sessionId = await deriveSessionId()
-  const job = await createJob({
-    kind: parsed.data.kind as JobKind,
-    title: parsed.data.title,
-    input: parsed.data.input ?? {},
-    sessionId,
-    resultPath: parsed.data.resultPath,
-  })
+  // Catch each step individually so the failure surfaces a useful message
+  // instead of an opaque 500. The toast on /audit reads `body.error` —
+  // returning a clear string here is the fastest path to debugging deploy-
+  // time misconfiguration (missing env var, table missing, etc.).
+  let sessionId: string
+  try {
+    sessionId = await deriveSessionId()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error("[jobs/start] deriveSessionId failed:", msg)
+    return NextResponse.json(
+      { error: `Auth session error: ${msg}` },
+      { status: 500 },
+    )
+  }
 
-  await inngest.send({ name: "jobs/run", data: { jobId: job.id } })
+  let job
+  try {
+    job = await createJob({
+      kind: parsed.data.kind as JobKind,
+      title: parsed.data.title,
+      input: parsed.data.input ?? {},
+      sessionId,
+      resultPath: parsed.data.resultPath,
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error("[jobs/start] createJob failed:", msg)
+    return NextResponse.json(
+      { error: `Supabase error: ${msg}` },
+      { status: 500 },
+    )
+  }
+
+  try {
+    await inngest.send({ name: "jobs/run", data: { jobId: job.id } })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error("[jobs/start] inngest.send failed:", msg)
+    // Roll back the row so the user can retry without a stuck "queued" job.
+    return NextResponse.json(
+      { error: `Inngest error: ${msg}` },
+      { status: 500 },
+    )
+  }
 
   return NextResponse.json({ jobId: job.id, kind: job.kind, status: job.status })
 }
