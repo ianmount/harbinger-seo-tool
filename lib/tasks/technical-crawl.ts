@@ -95,10 +95,37 @@ export const runTechnicalCrawlTask: TaskRunner = async ({ jobId, job }) => {
 
   await stage("Crawling site", domain)
 
+  // Heartbeat + cancel-watch — same pattern as alt-tags. runTechnicalCrawl
+  // is one big call (DFS crawl + Lighthouse + JSON-LD + indexability) that
+  // can take 5-13 min on bigger sites. Without this we go silent for the
+  // whole run, the user can't tell live from stuck, and a cancel click
+  // doesn't reach the worker until the job's natural checkpoints (which
+  // there aren't any of inside runTechnicalCrawl).
+  const startedAt = Date.now()
+  const elapsedS = () => Math.round((Date.now() - startedAt) / 1000)
+  const heartbeat = setInterval(() => {
+    void updateProgress(jobId, {
+      stage: "Crawling site",
+      detail: `${domain} — ${elapsedS()}s elapsed`,
+    }).catch(() => {})
+  }, 15_000)
+  const cancelWatcher = (async () => {
+    while (true) {
+      await new Promise((r) => setTimeout(r, 5000))
+      if (await isCancelRequested(jobId)) {
+        throw new JobCancelledError(jobId)
+      }
+    }
+  })()
+
   let result
   try {
-    result = await runTechnicalCrawl({ domain })
+    result = await Promise.race([
+      runTechnicalCrawl({ domain }),
+      cancelWatcher,
+    ])
   } catch (err) {
+    clearInterval(heartbeat)
     const message = err instanceof Error ? err.message : "Unknown error"
     await supabase
       .from("crawl_runs")
@@ -108,11 +135,15 @@ export const runTechnicalCrawlTask: TaskRunner = async ({ jobId, job }) => {
         errors: [message],
       })
       .eq("id", crawlId)
+    if (err instanceof JobCancelledError) {
+      throw err
+    }
     if (err instanceof TechnicalCrawlError) {
       throw new Error(`Crawl failed: ${message}`)
     }
     throw err
   }
+  clearInterval(heartbeat)
 
   await stage("Saving results")
   const update = await supabase
