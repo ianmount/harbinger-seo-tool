@@ -461,7 +461,11 @@ export async function instantPageProbe(
     {
       url,
       enable_javascript: enableJavaScript,
-      load_resources: false,
+      // DataForSEO rejects task_post with code 40501 when
+      // enable_browser_rendering=true unless load_resources=true. Tie the
+      // two flags together so the JS-render path is always API-valid;
+      // accept the extra per-page cost when JS is on (CSS/image fetches).
+      load_resources: enableJavaScript,
       enable_browser_rendering: enableJavaScript,
     },
   ])
@@ -522,7 +526,10 @@ export async function runOnPageCrawl(opts: {
     max_crawl_pages: opts.maxPages,
     enable_javascript: opts.enableJavaScript,
     enable_browser_rendering: opts.enableJavaScript,
-    load_resources: false,
+    // load_resources MUST be true when enable_browser_rendering is true
+    // (DFS rejects with 40501 otherwise). Mirror the JS flag so the
+    // static-crawl path keeps the cheap "no resource loading" behavior.
+    load_resources: opts.enableJavaScript,
     store_raw_html: true,
     respect_sitemap: true,
   }
