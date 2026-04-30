@@ -55,6 +55,12 @@ const TASKS: Partial<Record<JobKind, TaskRunner>> = {
  * worth real money (Claude, DataForSEO). A retry on a partial failure could
  * double-charge. Tasks that *want* retries can opt in by re-throwing inside
  * step.run blocks once we get there.
+ *
+ * `onFailure` runs in a separate Inngest invocation when the main function
+ * fails for any reason — including Vercel's hard 800s function-timeout
+ * kill, instance recycles, and out-of-memory crashes. Without this, a
+ * function that hits the timeout leaves its background_jobs row stuck in
+ * `running` forever (the runtime is dead before the catch block fires).
  */
 export const runJobFunction = inngest.createFunction(
   {
@@ -62,6 +68,41 @@ export const runJobFunction = inngest.createFunction(
     name: "Run background job",
     retries: 0,
     triggers: [{ event: "jobs/run" }],
+    onFailure: async ({ event, error }) => {
+      // The original event is wrapped under event.data.event when invoked
+      // via the Inngest failure pipeline.
+      const original = (event.data as { event?: { data?: { jobId?: string } } })
+        .event
+      const jobId = original?.data?.jobId
+      if (!jobId) return
+      const message =
+        error instanceof Error ? error.message : String(error ?? "Unknown error")
+      try {
+        const row = await getJob(jobId)
+        if (!row) return
+        if (
+          row.status === "completed" ||
+          row.status === "failed" ||
+          row.status === "cancelled"
+        ) {
+          return
+        }
+        await failJob(
+          jobId,
+          message.includes("function") ||
+            message.toLowerCase().includes("timeout")
+            ? `Function timed out or was killed before finishing: ${message}`
+            : message,
+        )
+        const finalized = (await getJob(jobId)) ?? row
+        await sendJobCompletionEmail(finalized)
+      } catch (cleanupErr) {
+        console.error(
+          `[onFailure] cleanup for job ${jobId} threw:`,
+          cleanupErr,
+        )
+      }
+    },
   },
   async ({ event, step, logger }) => {
     const jobId = event.data.jobId as string | undefined

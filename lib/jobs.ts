@@ -262,3 +262,45 @@ export async function isCancelRequested(id: string): Promise<boolean> {
     return false
   }
 }
+
+/**
+ * Belt-and-suspenders for orphaned `running` rows.
+ *
+ * Vercel functions are killed at the 800s ceiling. The Inngest dispatcher's
+ * onFailure handler is supposed to mark the row as failed when that
+ * happens, but if onFailure also fails (rate limit, network blip), the row
+ * stays "running" forever and the user has no path to recover except a
+ * manual Cancel.
+ *
+ * This sweeper marks any `running`/`queued` job whose `updated_at` is
+ * older than `staleAfterMs` as failed with a clear "stale" reason. It's
+ * called opportunistically from the GET /api/jobs endpoint — the
+ * worst-case latency is "user opens the Jobs tray, stale rows flip to
+ * failed within one poll cycle."
+ *
+ * Threshold defaults to 18 minutes — comfortably beyond the 13.3-min
+ * Vercel hard cap so legitimate-but-slow runs don't get falsely killed,
+ * but tight enough that a stuck row doesn't sit around for days.
+ */
+export async function sweepStaleJobs(
+  staleAfterMs = 18 * 60 * 1000,
+): Promise<number> {
+  const cutoff = new Date(Date.now() - staleAfterMs).toISOString()
+  const supabase = getSupabase()
+  const { data, error } = await supabase
+    .from(TABLE)
+    .update({
+      status: "failed",
+      error:
+        "Job did not finish within the function-runtime ceiling and was marked stale.",
+      completed_at: new Date().toISOString(),
+    })
+    .in("status", ["queued", "running"])
+    .lt("updated_at", cutoff)
+    .select("id")
+  if (error) {
+    console.error("[sweepStaleJobs] failed:", error.message)
+    return 0
+  }
+  return Array.isArray(data) ? data.length : 0
+}
