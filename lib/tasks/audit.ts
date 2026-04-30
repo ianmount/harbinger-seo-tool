@@ -3,6 +3,7 @@ import { z } from "zod"
 import { createCostAccumulator, withAuditCost } from "@/lib/audit-cost"
 import { detectBrokenInternalLinks } from "@/lib/audit-broken-links"
 import { crawlSite } from "@/lib/audit-crawl"
+import { detectHeadingIssues } from "@/lib/audit-h-tags"
 import {
   buildSynthesisPrompt,
   detectMetaUnreliable,
@@ -10,9 +11,10 @@ import {
   SYNTHESIS_SYSTEM_PROMPT,
 } from "@/lib/audit-synthesis"
 import { detectUrlStructureIssues } from "@/lib/audit-url-structure"
+import { deriveBrandTokens, splitBrandedQueries } from "@/lib/branded-keywords"
 import { detectCannibalization } from "@/lib/cannibalization"
 import { callClaude } from "@/lib/claude"
-import { backlinkProfile } from "@/lib/dataforseo"
+import { backlinkProfile, backlinksTimeseriesSummary } from "@/lib/dataforseo"
 import { GA4Error, getMonthlyOrganic, getSeoReport, listProperties } from "@/lib/ga4"
 import { findGa4PropertyCandidates } from "@/lib/ga4-site-match"
 import { emailFor, type GoogleAccount } from "@/lib/google-auth"
@@ -411,6 +413,19 @@ async function gatherAuditData(
     )
     return null
   })
+  // Backlink growth pattern. Independent of the profile pull so a slow/failed
+  // timeseries call doesn't hold up the rest of the gather phase. Failures
+  // are silent — the synthesis prompt skips the growth section when the
+  // series is empty.
+  const backlinkTimeseriesPromise = backlinksTimeseriesSummary(websiteUrl).catch(
+    (err) => {
+      const msg = err instanceof Error ? err.message : "Unknown error"
+      warnings.push(
+        `Backlink growth-pattern fetch failed; the audit will continue without the growth chart. (${msg})`,
+      )
+      return [] as Awaited<ReturnType<typeof backlinksTimeseriesSummary>>
+    },
+  )
   const pageSpeedPromise = (async () => {
     const gscRes = await gscPromise
     await writeProgress("gsc_ready")
@@ -436,20 +451,33 @@ async function gatherAuditData(
       /* surfaced by Promise.all below */
     })
 
-  const [gscRes, ga4Res, crawlRes, backlinkProfileRes, pageSpeedRes] =
-    await Promise.all([
-      gscPromise,
-      ga4Promise,
-      crawlPromise,
-      backlinkPromise,
-      pageSpeedPromise,
-    ])
+  const [
+    gscRes,
+    ga4Res,
+    crawlRes,
+    backlinkProfileRes,
+    backlinkTimeseriesRes,
+    pageSpeedRes,
+  ] = await Promise.all([
+    gscPromise,
+    ga4Promise,
+    crawlPromise,
+    backlinkPromise,
+    backlinkTimeseriesPromise,
+    pageSpeedPromise,
+  ])
 
   const gsc = gscRes?.data ?? null
   const gscQueryPages = gscRes?.queryPages ?? []
   const ga4 = ga4Res
   const crawl: CrawlReport = crawlRes
-  const backlinkProfileData: BacklinkProfile | null = backlinkProfileRes
+  // Merge the timeseries onto the profile so downstream consumers see one
+  // shape. Profile fields stay null when the profile pull failed; we only
+  // attach the timeseries when both succeeded.
+  const backlinkProfileData: BacklinkProfile | null =
+    backlinkProfileRes && backlinkTimeseriesRes.length > 0
+      ? { ...backlinkProfileRes, monthlyTimeseries: backlinkTimeseriesRes }
+      : backlinkProfileRes
   const pageSpeed: PageSpeedReport = pageSpeedRes
   await stage(
     "parallel_done",
@@ -470,6 +498,16 @@ async function gatherAuditData(
   })
   const urlStructureIssues = detectUrlStructureIssues(crawl)
   const brokenInternalLinks = detectBrokenInternalLinks(crawl)
+  const headingIssues = detectHeadingIssues(crawl)
+  // Brand-token derivation runs even when GSC is absent (no-op in that case)
+  // so the synthesis prompt can still mention which tokens were considered.
+  const brandTokens = deriveBrandTokens({
+    partnerName: body.partnerName,
+    websiteUrl,
+  })
+  if (gsc) {
+    gsc.brandedSplit = splitBrandedQueries(gsc.topQueries, brandTokens)
+  }
   const metaCheck = detectMetaUnreliable(crawl)
   if (metaCheck.unreliable) {
     const titlePct = Math.round(metaCheck.missingTitleRate * 100)
@@ -502,6 +540,7 @@ async function gatherAuditData(
     backlinkProfile: backlinkProfileData,
     urlStructureIssues,
     brokenInternalLinks,
+    headingIssues,
     metaUnreliable: metaCheck.unreliable,
     crawlSummary: summarizeCrawl(crawl),
   }
@@ -536,6 +575,7 @@ async function synthesizeAudit(
     backlinkProfile: bundle.backlinkProfile,
     urlStructureIssues: bundle.urlStructureIssues,
     brokenInternalLinks: bundle.brokenInternalLinks,
+    headingIssues: bundle.headingIssues,
     metaUnreliable: bundle.metaUnreliable,
   })
   let markdown = await callClaude(prompt, {

@@ -5,11 +5,13 @@ import {
   renderOrganicSessionsSparklineSvg,
 } from "@/lib/audit-chart"
 import type { BrokenInternalLinks } from "@/lib/audit-broken-links"
+import type { HeadingIssues } from "@/lib/audit-h-tags"
 import type { UrlStructureIssues } from "@/lib/audit-url-structure"
 import type {
   AssessmentGa4Data,
   AssessmentGscData,
   BacklinkProfile,
+  BrandedQuerySplit,
   CannibalizationCluster,
   CrawlReport,
   PageSpeedReport,
@@ -173,9 +175,102 @@ function backlinkProfileShares(p: BacklinkProfile): {
   return { lowQualityShare, newLinkLowQualityShare, sectionRequired, tier1 }
 }
 
+/**
+ * Summarize the monthly time-series into a one-line growth pattern. Returns
+ * absolute deltas (start vs end), peak month, and a qualitative shape
+ * label so Claude doesn't have to do the trend math itself.
+ */
+function summarizeBacklinkGrowth(p: BacklinkProfile): {
+  available: boolean
+  monthCount: number
+  startBacklinks: number
+  endBacklinks: number
+  netDelta: number
+  pctDelta: number | null
+  startReferringDomains: number
+  endReferringDomains: number
+  refDomainsNetDelta: number
+  refDomainsPctDelta: number | null
+  peakMonth: string | null
+  peakBacklinks: number
+  shapeLabel: string
+} {
+  const ts = p.monthlyTimeseries ?? []
+  if (ts.length < 2) {
+    return {
+      available: false,
+      monthCount: ts.length,
+      startBacklinks: 0,
+      endBacklinks: 0,
+      netDelta: 0,
+      pctDelta: null,
+      startReferringDomains: 0,
+      endReferringDomains: 0,
+      refDomainsNetDelta: 0,
+      refDomainsPctDelta: null,
+      peakMonth: null,
+      peakBacklinks: 0,
+      shapeLabel: "insufficient data",
+    }
+  }
+  const start = ts[0]
+  const end = ts[ts.length - 1]
+  const netDelta = end.backlinks - start.backlinks
+  const pctDelta =
+    start.backlinks > 0 ? (netDelta / start.backlinks) * 100 : null
+  const refDelta = end.referringDomains - start.referringDomains
+  const refPctDelta =
+    start.referringDomains > 0
+      ? (refDelta / start.referringDomains) * 100
+      : null
+
+  let peak = ts[0]
+  for (const pt of ts) if (pt.backlinks > peak.backlinks) peak = pt
+
+  // Detect "spike" months: any month where backlinks jumped >25% vs the
+  // prior month AND added >50 absolute. Spikes pattern = link-buying or a
+  // viral moment; either way Claude should call it out.
+  let spikeMonths = 0
+  for (let i = 1; i < ts.length; i++) {
+    const prev = ts[i - 1].backlinks
+    const cur = ts[i].backlinks
+    if (prev > 0) {
+      const delta = cur - prev
+      const pctChange = delta / prev
+      if (pctChange > 0.25 && delta > 50) spikeMonths++
+    }
+  }
+
+  let shapeLabel: string
+  if (pctDelta === null) shapeLabel = "no prior baseline"
+  else if (spikeMonths > 0) shapeLabel = `${spikeMonths} spike month(s) detected`
+  else if (pctDelta > 25) shapeLabel = "steady growth (>25%)"
+  else if (pctDelta > 5) shapeLabel = "modest growth"
+  else if (pctDelta > -5) shapeLabel = "flat / stable"
+  else if (pctDelta > -25) shapeLabel = "modest decline"
+  else shapeLabel = "significant decline (>25% loss)"
+
+  return {
+    available: true,
+    monthCount: ts.length,
+    startBacklinks: start.backlinks,
+    endBacklinks: end.backlinks,
+    netDelta,
+    pctDelta,
+    startReferringDomains: start.referringDomains,
+    endReferringDomains: end.referringDomains,
+    refDomainsNetDelta: refDelta,
+    refDomainsPctDelta: refPctDelta,
+    peakMonth: peak.date,
+    peakBacklinks: peak.backlinks,
+    shapeLabel,
+  }
+}
+
 function buildBacklinkProfileSection(p: BacklinkProfile): string[] {
   const lines: string[] = []
   const shares = backlinkProfileShares(p)
+  const growth = summarizeBacklinkGrowth(p)
   lines.push(`# Backlink profile`)
   lines.push(`Domain: ${p.domain}`)
   lines.push(`Total backlinks: ${p.totalBacklinks.toLocaleString()}`)
@@ -192,11 +287,50 @@ function buildBacklinkProfileSection(p: BacklinkProfile): string[] {
     `New links in last 12 months: ${p.newLinksLast12Months}; of those, low-quality: ${p.newLinksLast12MonthsLowQuality} (${(shares.newLinkLowQualityShare * 100).toFixed(1)}%)`,
   )
   lines.push(
-    `Backlink Profile section required: ${shares.sectionRequired ? "YES — emit a Backlink Profile section in the Markdown output" : "no — omit the section entirely"}`,
-  )
-  lines.push(
     `Tier 1 backlink-profile finding required: ${shares.tier1 ? "YES — new-link low-quality share > 40%; surface in Executive Summary AND Key Findings" : "no"}`,
   )
+  lines.push(
+    `Backlink Profile section required: YES — always emit. Cover totals, growth pattern, spam analysis, and disavow guidance.`,
+  )
+
+  // Growth pattern — only emitted when we have at least 2 months of data.
+  if (growth.available) {
+    lines.push("")
+    lines.push(`## Growth pattern (${growth.monthCount}-month series)`)
+    const pctStr =
+      growth.pctDelta !== null
+        ? `${growth.pctDelta >= 0 ? "+" : ""}${growth.pctDelta.toFixed(1)}%`
+        : "n/a"
+    lines.push(
+      `Backlinks: ${growth.startBacklinks.toLocaleString()} → ${growth.endBacklinks.toLocaleString()} (net ${growth.netDelta >= 0 ? "+" : ""}${growth.netDelta.toLocaleString()}, ${pctStr})`,
+    )
+    const refPctStr =
+      growth.refDomainsPctDelta !== null
+        ? `${growth.refDomainsPctDelta >= 0 ? "+" : ""}${growth.refDomainsPctDelta.toFixed(1)}%`
+        : "n/a"
+    lines.push(
+      `Referring domains: ${growth.startReferringDomains.toLocaleString()} → ${growth.endReferringDomains.toLocaleString()} (net ${growth.refDomainsNetDelta >= 0 ? "+" : ""}${growth.refDomainsNetDelta.toLocaleString()}, ${refPctStr})`,
+    )
+    lines.push(
+      `Peak month: ${growth.peakMonth} (${growth.peakBacklinks.toLocaleString()} backlinks)`,
+    )
+    lines.push(`Shape label: ${growth.shapeLabel}`)
+    if (p.monthlyTimeseries && p.monthlyTimeseries.length > 0) {
+      lines.push("")
+      lines.push(`### Monthly time-series (date, backlinks, referring_domains)`)
+      for (const pt of p.monthlyTimeseries) {
+        lines.push(
+          `  - ${pt.date}: ${pt.backlinks.toLocaleString()} backlinks, ${pt.referringDomains.toLocaleString()} ref. domains`,
+        )
+      }
+    }
+  } else {
+    lines.push("")
+    lines.push(
+      `Growth pattern: time-series unavailable (DataForSEO returned 0 monthly buckets). Skip the growth-trend sentence.`,
+    )
+  }
+
   if (p.sampleLowQualityLinks.length > 0) {
     lines.push("")
     lines.push(`## Sample low-quality referring domains (cite VERBATIM in the report)`)
@@ -205,6 +339,136 @@ function buildBacklinkProfileSection(p: BacklinkProfile): string[] {
         `  - ${d.domain} — spam ${d.spamScore}, rank ${d.domainRank}, ${d.backlinks} backlinks${d.firstSeen ? `, first seen ${d.firstSeen}` : ""}`,
       )
     }
+    lines.push("")
+    lines.push(
+      `Disavow recommendation REQUIRED: name the 3-5 worst-spam-score domains above as the disavow candidate set. State explicitly whether a Google disavow file should be filed (recommend filing when low-quality share > 30% OR new-link low-quality share > 40%). When the share is below both thresholds, recommend monitoring and re-checking quarterly instead of filing.`,
+    )
+  } else {
+    lines.push("")
+    lines.push(
+      `Disavow recommendation: NO disavow needed — zero referring domains scored above the spam threshold. State this affirmatively ("backlink profile is clean; no disavow file needed at this time").`,
+    )
+  }
+  lines.push("")
+  return lines
+}
+
+function buildHeadingStructureSection(h: HeadingIssues): string[] {
+  const lines: string[] = []
+  if (h.okPagesAnalyzed === 0) return lines
+  const missingH1 = h.pagesWithoutH1.length
+  const multipleH1 = h.pagesWithMultipleH1.length
+  const missingH2 = h.pagesWithoutH2.length
+  const tier2 = missingH1 >= 5 || multipleH1 >= 5
+  lines.push(`# Heading structure (H1/H2)`)
+  lines.push(`OK pages analyzed: ${h.okPagesAnalyzed}`)
+  lines.push(
+    `Pages missing an H1: ${missingH1} (${((1 - h.h1CoverageRate) * 100).toFixed(1)}% of OK pages)`,
+  )
+  lines.push(
+    `Pages with multiple H1s (ambiguates primary topic): ${multipleH1}`,
+  )
+  lines.push(
+    `Pages missing every H2 (no document outline): ${missingH2} (${((1 - h.h2CoverageRate) * 100).toFixed(1)}% of OK pages)`,
+  )
+  lines.push(
+    `Heading Structure section required: ${tier2 || missingH2 >= 10 ? "YES — emit a Heading Structure subsection within Technical Findings" : "no — H1/H2 hygiene is acceptable; OMIT the section"}`,
+  )
+  if (missingH1 > 0) {
+    lines.push("")
+    lines.push(`## Pages missing an H1 (cite VERBATIM, sample of up to 8)`)
+    for (const s of h.pagesWithoutH1.slice(0, 8)) {
+      lines.push(`  - ${truncate(s.url, 130)}`)
+    }
+  }
+  if (multipleH1 > 0) {
+    lines.push("")
+    lines.push(`## Pages with multiple H1s (cite VERBATIM, sample of up to 8)`)
+    for (const s of h.pagesWithMultipleH1.slice(0, 8)) {
+      const sample = s.h1s.map((t) => `"${truncate(t, 50)}"`).join(", ")
+      lines.push(
+        `  - ${truncate(s.url, 110)} — ${s.h1Count} H1s: ${sample}`,
+      )
+    }
+  }
+  if (missingH2 > 0) {
+    lines.push("")
+    lines.push(`## Pages missing every H2 (cite VERBATIM, sample of up to 8)`)
+    for (const s of h.pagesWithoutH2.slice(0, 8)) {
+      lines.push(`  - ${truncate(s.url, 130)}`)
+    }
+  }
+  lines.push("")
+  return lines
+}
+
+function buildBrandedSplitSection(split: BrandedQuerySplit): string[] {
+  const lines: string[] = []
+  lines.push(`# Branded vs non-branded GSC search`)
+  lines.push(
+    `Brand tokens used to classify (substring-match, case-insensitive): ${split.brandTokens.length > 0 ? split.brandTokens.join(", ") : "(none — partner name not provided and apex domain produced no usable tokens; treat the split as unreliable and acknowledge that gap)"}`,
+  )
+  lines.push(`Total queries in the GSC top set: ${split.totalQueries}`)
+  lines.push(
+    `Branded: ${split.brandedQueries} queries · ${split.brandedClicks.toLocaleString()} clicks (${split.brandedSharePctClicks.toFixed(1)}% of clicks) · ${split.brandedImpressions.toLocaleString()} impressions (${split.brandedSharePctImpressions.toFixed(1)}% of impressions)`,
+  )
+  lines.push(
+    `Non-branded: ${split.nonBrandedQueries} queries · ${split.nonBrandedClicks.toLocaleString()} clicks (${(100 - split.brandedSharePctClicks).toFixed(1)}% of clicks) · ${split.nonBrandedImpressions.toLocaleString()} impressions (${(100 - split.brandedSharePctImpressions).toFixed(1)}% of impressions)`,
+  )
+  if (split.topBrandedQueries.length > 0) {
+    lines.push("")
+    lines.push(`## Top branded queries (top 10 by clicks)`)
+    for (const q of split.topBrandedQueries.slice(0, 10)) {
+      lines.push(
+        `  - ${truncate(q.query, 70)} — ${q.clicks} clicks, ${q.impressions.toLocaleString()} impr, pos ${q.position.toFixed(1)}`,
+      )
+    }
+  }
+  if (split.topNonBrandedQueries.length > 0) {
+    lines.push("")
+    lines.push(`## Top non-branded queries (top 10 by clicks)`)
+    for (const q of split.topNonBrandedQueries.slice(0, 10)) {
+      lines.push(
+        `  - ${truncate(q.query, 70)} — ${q.clicks} clicks, ${q.impressions.toLocaleString()} impr, pos ${q.position.toFixed(1)}`,
+      )
+    }
+  }
+  lines.push("")
+  return lines
+}
+
+function buildAltTagDetailSection(crawl: CrawlReport): string[] {
+  const lines: string[] = []
+  // Per-page alt-coverage data: filter to pages that actually have images,
+  // sort by absolute count of images missing alt (high-impact first), and
+  // surface the top 10 offenders.
+  const offenders = crawl.pages
+    .filter((p) => p.imagesTotal > 0 && p.imagesWithAlt < p.imagesTotal)
+    .map((p) => ({
+      url: p.url,
+      imagesTotal: p.imagesTotal,
+      imagesMissingAlt: p.imagesTotal - p.imagesWithAlt,
+      coveragePct:
+        p.imagesTotal > 0 ? (p.imagesWithAlt / p.imagesTotal) * 100 : 100,
+    }))
+    .sort((a, b) => b.imagesMissingAlt - a.imagesMissingAlt)
+  if (offenders.length === 0) return lines
+  const totalMissing = offenders.reduce((s, o) => s + o.imagesMissingAlt, 0)
+  lines.push(`# Image alt-text coverage`)
+  lines.push(`Sitewide alt coverage: ${crawl.imageAltCoveragePercent}%`)
+  lines.push(
+    `Pages with at least one image missing alt: ${offenders.length} (combined ${totalMissing.toLocaleString()} images missing alt)`,
+  )
+  const tier2 = crawl.imageAltCoveragePercent < 80 || offenders.length >= 5
+  lines.push(
+    `Alt-Text Coverage section required: ${tier2 ? "YES — emit as a Tier 2 finding inside Technical Findings" : "no — coverage is acceptable; OMIT the section"}`,
+  )
+  lines.push("")
+  lines.push(`## Top pages missing alt text (cite VERBATIM, top 10)`)
+  for (const o of offenders.slice(0, 10)) {
+    lines.push(
+      `  - ${truncate(o.url, 110)} — ${o.imagesMissingAlt}/${o.imagesTotal} images missing alt (${o.coveragePct.toFixed(0)}% coverage)`,
+    )
   }
   lines.push("")
   return lines
@@ -360,6 +624,7 @@ export function buildSynthesisPrompt(params: {
   backlinkProfile?: BacklinkProfile | null
   urlStructureIssues?: UrlStructureIssues | null
   brokenInternalLinks?: BrokenInternalLinks | null
+  headingIssues?: HeadingIssues | null
   locationCompetitorSnippets?: LocationCompetitorSnippet[] | null
   metaUnreliable?: boolean
 }): string {
@@ -373,6 +638,7 @@ export function buildSynthesisPrompt(params: {
     backlinkProfile,
     urlStructureIssues,
     brokenInternalLinks,
+    headingIssues,
     locationCompetitorSnippets,
     metaUnreliable,
   } = params
@@ -642,11 +908,34 @@ export function buildSynthesisPrompt(params: {
     lines.push("")
   }
 
-  // Backlink profile — Tier 1 trigger fires when new-link low-quality share
-  // crosses 40%. Section is omitted entirely when the data does not warrant
-  // concern (sectionRequired=false).
+  // Backlink profile — always emit when we have data so Claude covers the
+  // totals + growth pattern + spam analysis + disavow guidance the audit
+  // promises. Tier 1 trigger fires when new-link low-quality share > 40%.
   if (backlinkProfile) {
     for (const line of buildBacklinkProfileSection(backlinkProfile)) {
+      lines.push(line)
+    }
+  }
+
+  // Heading structure (H1/H2). Section is gated inside the builder — only
+  // emitted when at least one OK page has a heading hygiene issue.
+  if (headingIssues) {
+    for (const line of buildHeadingStructureSection(headingIssues)) {
+      lines.push(line)
+    }
+  }
+
+  // Image alt-text coverage detail. Builder emits nothing when there are
+  // no offenders, so the prompt stays clean for fully-tagged sites.
+  for (const line of buildAltTagDetailSection(crawl)) {
+    lines.push(line)
+  }
+
+  // Branded vs non-branded GSC split. Only emitted when GSC is connected
+  // and the split was computed (gsc.brandedSplit is populated by the
+  // audit task before synthesis runs).
+  if (gsc?.brandedSplit) {
+    for (const line of buildBrandedSplitSection(gsc.brandedSplit)) {
       lines.push(line)
     }
   }
@@ -694,6 +983,8 @@ Tier 2 — important but not headline-grade:
   - missing titles or meta descriptions at scale (>= 5 pages)
   - URL structure conflicts (mixed protocol, mixed www/apex, mixed trailing slash, deep nesting) when the "URL structure issues" block is present
   - broken internal links when the "Broken internal links" block reports any
+  - heading-structure issues at scale when the "Heading structure (H1/H2)" block fires its "section required: YES" flag (>= 5 pages missing an H1 OR >= 5 pages with multiple H1s OR >= 10 pages missing every H2)
+  - image alt-text coverage below 80% sitewide OR >= 5 pages missing alt on multiple images, when the "Image alt-text coverage" block is present
 
 Tier 3 — optimization opportunities:
   - quick-win CTR uplift (positions 4-10) calibrated to the prospect's own data
@@ -725,6 +1016,8 @@ Include this section ONLY when GA4 is connected. Output one short sentence readi
 ## Traffic & Visibility
 Read of GSC + GA4 data. Highlight priority-service queries already ranking (lead with these), and target locations with no visibility (flag these). If GA4 conversions are configured, translate traffic gaps to leads/revenue in plain language. Skip this section when both GSC and GA4 are absent.
 
+When the "Branded vs non-branded GSC search" block is present, include a "**Branded vs Non-Branded Search**" subsection (heading level: ###). Cite the branded share of clicks AND the branded share of impressions verbatim, name 2-3 top branded queries and 2-3 top non-branded queries, and read the strategic implication. The reading rule of thumb: branded share > 70% of clicks usually indicates the site is winning brand traffic but failing to capture demand from people who don't already know the partner — flag that as a non-branded growth opportunity. Branded share < 20% suggests weak brand authority — flag that as a brand-building opportunity. When the block reports "(none — partner name not provided ...)" for brand tokens, acknowledge the gap honestly: "Branded vs non-branded split could not be computed reliably because no brand tokens were derivable." Do NOT fabricate a split.
+
 ## Indexation Status
 Include ONLY when the "Indexation coverage" block is present. When the block reports "Tier 1 indexation-gap finding required: YES", lead with the bolded metric "**X of Y sitemap URLs (Z%) have not received a single impression in 90 days**". Quote 2-3 representative not-indexed URLs verbatim. Reference URL Inspection results when present (e.g. "Search Console confirms coverage state 'Crawled - currently not indexed'").
 
@@ -739,10 +1032,20 @@ Include ONLY when the "Keyword cannibalization clusters" block is present. One s
 Include ONLY when the PageSpeed Insights block reports "Performance section required: YES". Lead with the average mobile score, then the homepage score on its own line. Cite specific failing pages with exact LCP (s) / CLS / INP (ms) values verbatim. Recommend 1-2 of the named opportunities verbatim (e.g. "Eliminate render-blocking resources"). No generic Core Web Vitals advice.
 
 ## Backlink Profile
-Include ONLY when the "Backlink profile" block reports "Backlink Profile section required: YES". Cite the low-quality share, the new-link low-quality share when relevant, and 2-3 of the sampleLowQualityLinks domains by name verbatim. When Tier 1 fires (new-link low-quality share > 40%), lead with that.
+ALWAYS include this section when the "Backlink profile" block is present (it is required regardless of spam levels — the audit promises a backlink narrative). Cover, in this order:
+1. **Totals** — open with total backlinks and total referring domains verbatim. Note dofollow ratio when notable (very low dofollow ratio = mostly nofollow links from forums/comments).
+2. **Growth pattern** — read the time-series. Reference the start-month → end-month deltas, name the peak month if it stands out, and label the shape (steady growth, flat, decline, or spike-driven). When the block reports "spike month(s) detected", call those out by name and flag link-quality as the next thing to verify (spikes often correlate with link-buying).
+3. **Spam analysis** — cite the low-quality share, the new-link low-quality share when relevant, and 2-3 of the sampleLowQualityLinks domains by name verbatim. When Tier 1 fires (new-link low-quality share > 40%), lead the entire section with that.
+4. **Disavow recommendation** — REQUIRED final paragraph. Explicitly state whether to file a Google disavow file. When low-quality share > 30% OR new-link low-quality share > 40%, recommend filing and name 3-5 specific candidate domains from sampleLowQualityLinks. Otherwise recommend monitoring quarterly without filing. Never omit this paragraph; an empty backlink profile gets the affirmative "no disavow needed at this time" version.
 
 ## Technical Findings
 Specific crawl-level issues ordered by impact. Cite exact pages.
+
+Within Technical Findings, emit these subsections (heading level ###) when their data block flags the section as required:
+
+- **Heading Structure (H1/H2)** — required when the "Heading structure (H1/H2)" block reports "section required: YES". Lead with the headline counts (pages missing H1; pages with multiple H1s; pages missing every H2). Cite 2-3 offending URLs verbatim per issue type. Recommend the fix: "Add a single, keyword-aligned H1 to <URL>"; "Consolidate the multiple H1s on <URL> to a single H1; demote the rest to H2"; "Add a section H2 to <URL> to give the page a scannable outline."
+
+- **Image Alt-Text Coverage** — required when the "Image alt-text coverage" block reports "section required: YES". Lead with the sitewide coverage percentage verbatim. Cite 2-3 of the worst offenders by URL with their exact "X/Y images missing alt" counts. Recommend a single concrete remediation: "Add descriptive alt text to the <image-count> images on <URL>; prioritize hero/feature images."
 
 ## URL Structure Issues
 Include ONLY when the "URL structure issues" block is present. Group by issue type (mixed protocol, mixed www/apex, mixed trailing slash, deep nesting). For each, state the canonical form and cite 2-3 offending URLs verbatim. Recommend a single canonical and the redirect rule that resolves the conflict.
