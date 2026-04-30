@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import "server-only"
 import { z } from "zod"
 import { getPartner } from "@/lib/airtable"
 import { crawlSite, CrawlError } from "@/lib/audit-crawl"
@@ -7,11 +7,17 @@ import {
   getTopPagesPaginated,
   partnerWebsiteToGscSiteUrl,
 } from "@/lib/gsc"
+import type { TaskRunner } from "@/lib/inngest/functions"
 import {
   runInitialStrategy,
   type CarryoverInputPage,
   type RunInitialStrategyResult,
 } from "@/lib/initial-strategy"
+import {
+  isCancelRequested,
+  JobCancelledError,
+  updateProgress,
+} from "@/lib/jobs"
 import {
   parseSitemapText,
   SitemapParseError,
@@ -24,59 +30,20 @@ import type {
 } from "@/lib/types"
 
 /**
- * GSC traffic floor for the content-carryover analysis. A crawled URL is
- * sent to Claude only when its 180-day GSC stats clear EITHER threshold.
- * Permissive on impressions (≥50) is intentional — pages ranking on page 2
- * or 3 are usually the best refresh candidates, and they tend to show
- * impressions without clicks. Homepage is always included regardless of
- * GSC data because GSC URL canonicalization is unreliable for the bare
- * domain.
+ * Initial Strategy task. Lifted from the legacy
+ * /api/onboarding/initial-strategy route. Same pipeline, exposed as a
+ * TaskRunner so it can run as a background job: load partner → crawl site
+ * → fetch 180-day GSC → build carryover-eligible page set → call Claude.
+ *
+ * Cooperative cancellation checkpoints sit between each phase. If the
+ * user clicks Stop, the next phase boundary throws JobCancelledError.
  */
+
 const GSC_LOOKBACK_DAYS = 180
 const GSC_MIN_CLICKS = 1
 const GSC_MIN_IMPRESSIONS = 50
 
-/** Drop trailing slash, lowercase host. Used to join crawl URLs to GSC URLs. */
-function normalizeUrlForJoin(raw: string): string | null {
-  try {
-    const u = new URL(raw)
-    const path = u.pathname.replace(/\/+$/, "") || "/"
-    return `${u.protocol}//${u.hostname.toLowerCase()}${path}${u.search}`
-  } catch {
-    return null
-  }
-}
-
-/** YYYY-MM-DD, UTC, N days before today. */
-function isoDateNDaysAgo(n: number): string {
-  const d = new Date(Date.now() - n * 24 * 60 * 60 * 1000)
-  return d.toISOString().slice(0, 10)
-}
-
-/** YYYY-MM-DD for "today" in UTC. */
-function isoToday(): string {
-  return new Date().toISOString().slice(0, 10)
-}
-
-/**
- * Onboarding → Initial Strategy.
- *
- * Pipeline:
- *  1. Load Partner from Airtable.
- *  2. Crawl Partner.website with `unlimited: true` so the URL mapping covers
- *     every page on the current site (capped at the crawler's safety ceiling).
- *  3. Parse the indented sitemap text into a tree.
- *  4. Parse the keyword list (CSV header row supported, or one keyword per line).
- *  5. Call runInitialStrategy → returns keyword/url/internal-link tables.
- *  6. Respond with the structured InitialStrategyOutput. The UI renders preview
- *     tables and downloads the XLSX from the same JSON.
- */
-
-export const runtime = "nodejs"
-export const dynamic = "force-dynamic"
-export const maxDuration = 300
-
-const bodySchema = z.object({
+export const InitialStrategyInputSchema = z.object({
   partnerId: z.string().min(1, "partnerId is required"),
   sitemapText: z
     .string()
@@ -88,15 +55,26 @@ const bodySchema = z.object({
     .max(50_000, "keywordsText is too long (50k char max)"),
 })
 
-/**
- * Parse the keyword input. Accepts:
- *   - CSV with a header row containing a "Keyword" column (case-insensitive).
- *     Other columns are ignored — we only need the keyword text.
- *   - One keyword per line (no header).
- *
- * Returns deduplicated keywords in input order. Empty rows are skipped. Falls
- * back to one-per-line parsing if a CSV header isn't found.
- */
+export type InitialStrategyInput = z.infer<typeof InitialStrategyInputSchema>
+
+function normalizeUrlForJoin(raw: string): string | null {
+  try {
+    const u = new URL(raw)
+    const path = u.pathname.replace(/\/+$/, "") || "/"
+    return `${u.protocol}//${u.hostname.toLowerCase()}${path}${u.search}`
+  } catch {
+    return null
+  }
+}
+
+function isoDateNDaysAgo(n: number): string {
+  const d = new Date(Date.now() - n * 24 * 60 * 60 * 1000)
+  return d.toISOString().slice(0, 10)
+}
+function isoToday(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
 function parseKeywordsText(input: string): string[] {
   const lines = input
     .split(/\r?\n/)
@@ -111,9 +89,10 @@ function parseKeywordsText(input: string): string[] {
   const seen = new Set<string>()
   const out: string[] = []
   if (headerKeywordIdx !== -1 && lines.length > 1) {
-    // CSV mode — use the column the header points to.
     for (let i = 1; i < lines.length; i++) {
-      const cells = lines[i].split(",").map((c) => c.trim().replace(/^"|"$/g, ""))
+      const cells = lines[i]
+        .split(",")
+        .map((c) => c.trim().replace(/^"|"$/g, ""))
       const kw = cells[headerKeywordIdx]
       if (!kw) continue
       const key = kw.toLowerCase()
@@ -123,8 +102,6 @@ function parseKeywordsText(input: string): string[] {
     }
     return out
   }
-
-  // One-per-line mode. Strip optional leading "- " or "* " bullets.
   for (const line of lines) {
     const kw = line.replace(/^[-*]\s+/, "").replace(/^"|"$/g, "")
     if (!kw) continue
@@ -136,41 +113,25 @@ function parseKeywordsText(input: string): string[] {
   return out
 }
 
-export async function POST(request: Request) {
-  let raw: unknown
-  try {
-    raw = await request.json()
-  } catch {
-    return NextResponse.json(
-      { error: "Request body must be valid JSON" },
-      { status: 400 },
-    )
-  }
-  const parsed = bodySchema.safeParse(raw)
+export const runInitialStrategyTask: TaskRunner = async ({ jobId, job }) => {
+  const parsed = InitialStrategyInputSchema.safeParse(job.input)
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Invalid request body", issues: parsed.error.flatten() },
-      { status: 400 },
+    throw new Error(
+      `Invalid initial-strategy input: ${JSON.stringify(parsed.error.flatten())}`,
     )
   }
   const { partnerId, sitemapText, keywordsText } = parsed.data
 
-  // 1. Load partner.
-  let partner: Awaited<ReturnType<typeof getPartner>>
-  try {
-    partner = await getPartner(partnerId)
-  } catch (err: unknown) {
-    console.error("[api/onboarding/initial-strategy] partner lookup failed:", err)
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to load partner" },
-      { status: 500 },
-    )
+  const stage = async (label: string, detail?: string) => {
+    if (await isCancelRequested(jobId)) throw new JobCancelledError(jobId)
+    await updateProgress(jobId, { stage: label, detail }).catch(() => {})
   }
+
+  // 1. Load partner.
+  await stage("Loading partner")
+  const partner = await getPartner(partnerId)
   if (!partner) {
-    return NextResponse.json(
-      { error: `Partner ${partnerId} not found` },
-      { status: 404 },
-    )
+    throw new Error(`Partner ${partnerId} not found`)
   }
 
   // 2. Parse sitemap text.
@@ -179,35 +140,21 @@ export async function POST(request: Request) {
     sitemapRoot = parseSitemapText(sitemapText)
   } catch (err: unknown) {
     if (err instanceof SitemapParseError) {
-      return NextResponse.json(
-        {
-          error: `Sitemap parse error: ${err.message}`,
-          line: err.line,
-        },
-        { status: 400 },
-      )
+      throw new Error(`Sitemap parse error (line ${err.line}): ${err.message}`)
     }
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Sitemap parse failed" },
-      { status: 400 },
-    )
+    throw err
   }
 
   // 3. Parse keyword list.
   const keywords = parseKeywordsText(keywordsText)
   if (keywords.length === 0) {
-    return NextResponse.json(
-      {
-        error:
-          "No keywords found. Paste a CSV with a 'Keyword' column or one keyword per line.",
-      },
-      { status: 400 },
+    throw new Error(
+      "No keywords found. Paste a CSV with a 'Keyword' column or one keyword per line.",
     )
   }
 
-  // 4. Crawl current site (uncapped within the 2000-page safety ceiling).
-  // Keep the per-page metadata for the carryover analysis — earlier
-  // versions threw it away and only kept the URL list.
+  // 4. Crawl current site.
+  await stage("Crawling current site", partner.website)
   let crawledUrls: string[]
   let crawledPagesByUrl: Map<string, CrawledPage>
   try {
@@ -221,8 +168,6 @@ export async function POST(request: Request) {
       const url = page.finalUrl || page.url
       if (!url) continue
       urlSet.add(url)
-      // Keep the OK pages — non-OK URLs (404, 5xx) shouldn't be carryover
-      // candidates regardless of GSC traffic.
       if (page.status >= 200 && page.status < 300) {
         crawledPagesByUrl.set(url, page)
       }
@@ -230,29 +175,18 @@ export async function POST(request: Request) {
     crawledUrls = [...urlSet]
   } catch (err: unknown) {
     if (err instanceof CrawlError) {
-      return NextResponse.json(
-        { error: `Crawl failed: ${err.message}` },
-        { status: 502 },
-      )
+      throw new Error(`Crawl failed: ${err.message}`)
     }
-    console.error("[api/onboarding/initial-strategy] crawl failed:", err)
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Crawl failed" },
-      { status: 500 },
-    )
+    throw err
   }
   if (crawledUrls.length === 0) {
-    return NextResponse.json(
-      {
-        error: `No URLs were crawled from ${partner.website}. Check that the site is reachable and exposes a sitemap.`,
-      },
-      { status: 502 },
+    throw new Error(
+      `No URLs were crawled from ${partner.website}. Check that the site is reachable and exposes a sitemap.`,
     )
   }
 
-  // 5. Pull GSC search analytics by page over the lookback window. Optional —
-  // a GSC failure (no refresh token, site not verified, partner not in GSC)
-  // degrades to metadata-only carryover analysis without aborting the job.
+  // 5. Pull GSC.
+  await stage("Pulling 180-day GSC traffic")
   const gscStartDate = isoDateNDaysAgo(GSC_LOOKBACK_DAYS)
   const gscEndDate = isoToday()
   let gscRows: GSCTopPageRow[] = []
@@ -279,17 +213,9 @@ export async function POST(request: Request) {
     } else {
       gscNotice = `GSC fetch failed (${err instanceof Error ? err.message : "unknown"}) — carryover recommendations are based on crawl metadata only.`
     }
-    console.warn("[api/onboarding/initial-strategy] GSC fetch failed:", err)
   }
 
-  // 6. Build the carryover-eligible page set.
-  //
-  // - When GSC is available: filter to crawled pages whose normalized URL
-  //   matches a GSC row meeting the click/impression threshold. Always
-  //   include the homepage (GSC's URL canonicalization for bare domains
-  //   is flaky enough that homepage joins miss often).
-  // - When GSC is unavailable: every crawled page becomes eligible; Claude
-  //   judges purely on crawl metadata.
+  // 6. Build carryover-eligible page set.
   const gscByNormalizedUrl = new Map<string, GSCTopPageRow>()
   for (const row of gscRows) {
     const norm = normalizeUrlForJoin(row.page)
@@ -304,8 +230,6 @@ export async function POST(request: Request) {
   for (const url of crawledUrls) {
     const crawled = crawledPagesByUrl.get(url)
     if (!crawled) {
-      // Non-OK page (404/5xx) or otherwise filtered. Auto-retire — Claude
-      // shouldn't waste tokens on broken URLs.
       autoRetirePages.push({
         oldUrl: url,
         recommendation: "retire",
@@ -329,7 +253,6 @@ export async function POST(request: Request) {
     let qualifies: boolean
     let gscStats: CarryoverInputPage["gsc"]
     if (!gscEnabled) {
-      // Metadata-only mode: every crawled page is eligible.
       qualifies = true
       gscStats = null
     } else if (gscRow) {
@@ -383,11 +306,8 @@ export async function POST(request: Request) {
     })
   }
 
-  console.log(
-    `[api/onboarding/initial-strategy] carryover gsc=${gscEnabled} eligible=${carryoverPages.length} auto-retire=${autoRetirePages.length} crawled=${crawledUrls.length}`,
-  )
-
-  // 7. Run the Claude strategy step.
+  // 7. Claude strategy step.
+  await stage("Generating strategy with Claude", `${carryoverPages.length} carryover pages, ${keywords.length} keywords`)
   let result: RunInitialStrategyResult
   try {
     result = await runInitialStrategy({
@@ -399,10 +319,10 @@ export async function POST(request: Request) {
       carryoverPages,
       autoRetirePages,
     })
-  } catch (err: unknown) {
-    console.error("[api/onboarding/initial-strategy] strategy failed:", err)
-    const message = err instanceof Error ? err.message : "Strategy generation failed"
-    return NextResponse.json({ error: message }, { status: 502 })
+  } catch (err) {
+    throw new Error(
+      err instanceof Error ? err.message : "Strategy generation failed",
+    )
   }
 
   const fullOutput: InitialStrategyOutput = {
@@ -412,5 +332,8 @@ export async function POST(request: Request) {
     gscLookbackDays: GSC_LOOKBACK_DAYS,
   }
 
-  return NextResponse.json({ result: fullOutput })
+  return {
+    result: { strategy: fullOutput },
+    resultPath: `/onboarding/initial-strategy?job=${jobId}`,
+  }
 }

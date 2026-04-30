@@ -1,8 +1,10 @@
 "use client"
 
-import { useCallback, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Download, Loader2, Sparkles, Upload, X } from "lucide-react"
 import { toast } from "sonner"
+import { JobsForKindCard } from "@/components/JobsForKindCard"
+import { ensureNotificationPermission } from "@/components/JobsTray"
 import { LocationAutocomplete } from "@/components/LocationAutocomplete"
 import { PageHeader } from "@/components/PageHeader"
 import { Button } from "@/components/ui/button"
@@ -329,10 +331,92 @@ export default function CompAnalysisPage() {
     [partnerUrl, seedKeywords, competitorsByCode],
   )
 
+  // Active job id while a comp analysis is in flight. Polled below; on
+  // completion, hydrates back into AssessmentContext so the existing
+  // result tables render unchanged.
+  const [activeJobId, setActiveJobId] = useState<string | null>(null)
+  const [jobProgress, setJobProgress] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!activeJobId) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/jobs/${activeJobId}`, {
+          cache: "no-store",
+        })
+        if (cancelled) return
+        if (!res.ok) {
+          if (res.status === 404) {
+            setRunning(false)
+            setActiveJobId(null)
+          }
+          return
+        }
+        const body = (await res.json()) as {
+          job: {
+            status: string
+            progress: { stage?: string; detail?: string }
+            result: RunResponse | null
+            error: string | null
+          }
+        }
+        const j = body.job
+        const detail = j.progress?.detail
+          ? `${j.progress.stage} — ${j.progress.detail}`
+          : j.progress?.stage ?? null
+        setJobProgress(detail)
+        if (j.status === "completed" && j.result) {
+          setMany({
+            compAnalysisRows: j.result.rows,
+            compAnalysisCsv: j.result.csv,
+            compAnalysisRunAt: new Date().toISOString(),
+            compAnalysisWarnings: j.result.warnings,
+          })
+          if (j.result.warnings.length > 0) {
+            toast.warning("Comp analysis complete with warnings", {
+              description: j.result.warnings[0],
+            })
+          } else {
+            toast.success("Comp analysis ready")
+          }
+          setRunning(false)
+          setActiveJobId(null)
+          setJobProgress(null)
+        } else if (j.status === "failed") {
+          setErrorMessage(j.error ?? "Comp analysis failed")
+          toast.error("Comp analysis failed", {
+            description: j.error ?? undefined,
+          })
+          setRunning(false)
+          setActiveJobId(null)
+          setJobProgress(null)
+        } else if (j.status === "cancelled") {
+          toast.message("Comp analysis cancelled")
+          setRunning(false)
+          setActiveJobId(null)
+          setJobProgress(null)
+        } else {
+          timer = setTimeout(tick, 3000)
+        }
+      } catch {
+        if (cancelled) return
+        timer = setTimeout(tick, 5000)
+      }
+    }
+    void tick()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [activeJobId, setMany])
+
   const runAnalysis = useCallback(async () => {
     if (!canRun) return
     setRunning(true)
     setErrorMessage(null)
+    void ensureNotificationPermission()
 
     const locationCompetitors = state.compDfsLocations.map((loc) => ({
       location: loc.location_name,
@@ -345,38 +429,32 @@ export default function CompAnalysisPage() {
       locationCompetitors,
     })
     try {
-      const res = await fetch("/api/comp-analysis/run", {
+      const res = await fetch("/api/jobs/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          partnerUrl: partnerUrl.trim(),
-          locationCompetitors,
-          seedKeywords,
+          kind: "comp_analysis",
+          title: `Comp Analysis — ${partnerUrl.trim()}`,
+          input: {
+            partnerUrl: partnerUrl.trim(),
+            locationCompetitors,
+            seedKeywords,
+          },
         }),
       })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
         throw new Error(body.error ?? `HTTP ${res.status}`)
       }
-      const data = (await res.json()) as RunResponse
-      setMany({
-        compAnalysisRows: data.rows,
-        compAnalysisCsv: data.csv,
-        compAnalysisRunAt: new Date().toISOString(),
-        compAnalysisWarnings: data.warnings,
+      const { jobId } = (await res.json()) as { jobId: string }
+      setActiveJobId(jobId)
+      toast.message("Comp analysis started", {
+        description: "Running in the background — feel free to leave the tab.",
       })
-      if (data.warnings.length > 0) {
-        toast.warning("Comp analysis complete with warnings", {
-          description: data.warnings[0],
-        })
-      } else {
-        toast.success("Comp analysis ready")
-      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error"
       setErrorMessage(message)
-      toast.error("Comp analysis failed", { description: message })
-    } finally {
+      toast.error("Could not start comp analysis", { description: message })
       setRunning(false)
     }
   }, [
@@ -590,6 +668,12 @@ export default function CompAnalysisPage() {
             )}
           </Button>
         </div>
+
+        {running && jobProgress && (
+          <p className="text-xs text-ink-3" aria-live="polite">
+            {jobProgress}
+          </p>
+        )}
       </section>
 
       {state.compAnalysisRows && state.compAnalysisRows.length > 0 && (
@@ -600,6 +684,8 @@ export default function CompAnalysisPage() {
           onDownload={downloadCsv}
         />
       )}
+
+      <JobsForKindCard kind="comp_analysis" title="Recent comp analysis runs" />
     </div>
   )
 }

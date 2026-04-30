@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
-import { CheckCircle2, Loader2, X, XCircle } from "lucide-react"
+import { Ban, CheckCircle2, Loader2, X, XCircle } from "lucide-react"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -24,7 +25,12 @@ import { cn } from "@/lib/utils"
  * stay hidden across navigations within the same session.
  */
 
-type JobStatus = "queued" | "running" | "completed" | "failed"
+type JobStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
 export type JobKind =
   | "audit"
   | "comp_analysis"
@@ -134,7 +140,10 @@ export function JobsForKindCard({
   const clearableCount = useMemo(
     () =>
       visible.filter(
-        (j) => j.status === "completed" || j.status === "failed",
+        (j) =>
+          j.status === "completed" ||
+          j.status === "failed" ||
+          j.status === "cancelled",
       ).length,
     [visible],
   )
@@ -150,7 +159,12 @@ export function JobsForKindCard({
 
   const clearAllCompleted = useCallback(() => {
     const idsToHide = visible
-      .filter((j) => j.status === "completed" || j.status === "failed")
+      .filter(
+        (j) =>
+          j.status === "completed" ||
+          j.status === "failed" ||
+          j.status === "cancelled",
+      )
       .map((j) => j.id)
     if (idsToHide.length === 0) return
     setDismissed((prev) => {
@@ -213,13 +227,17 @@ function JobRow({
   onDismiss: () => void
 }) {
   const href = job.result_path ?? `/jobs/${job.id}`
-  const terminal = job.status === "completed" || job.status === "failed"
+  const active = job.status === "queued" || job.status === "running"
+  const terminal =
+    job.status === "completed" ||
+    job.status === "failed" ||
+    job.status === "cancelled"
   return (
     <div className="flex items-start gap-3">
       <StatusIcon status={job.status} />
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium">{job.title}</div>
-        {job.status === "queued" || job.status === "running" ? (
+        {active ? (
           <div className="mt-0.5 truncate text-xs text-muted-foreground">
             {job.progress?.stage
               ? `${job.progress.stage}${job.progress.detail ? ` — ${job.progress.detail}` : ""}`
@@ -231,19 +249,26 @@ function JobRow({
           <div className="mt-0.5 truncate text-xs text-destructive">
             {job.error ?? "Failed"}
           </div>
+        ) : job.status === "cancelled" ? (
+          <div className="mt-0.5 text-xs text-muted-foreground">
+            Cancelled {formatRelative(job.created_at)}
+          </div>
         ) : (
           <div className="mt-0.5 text-xs text-muted-foreground">
             Completed {formatRelative(job.created_at)}
           </div>
         )}
-        {terminal && (
-          <Link
-            href={href}
-            className="mt-1 inline-block text-xs font-bold uppercase tracking-[0.12em] text-primary hover:underline"
-          >
-            View
-          </Link>
-        )}
+        <div className="mt-1 flex items-center gap-3">
+          {(job.status === "completed" || job.status === "failed") && (
+            <Link
+              href={href}
+              className="text-xs font-bold uppercase tracking-[0.12em] text-primary hover:underline"
+            >
+              View
+            </Link>
+          )}
+          {active && <CancelButton jobId={job.id} />}
+        </div>
       </div>
       {terminal && (
         <button
@@ -259,6 +284,41 @@ function JobRow({
   )
 }
 
+function CancelButton({ jobId }: { jobId: string }) {
+  const [busy, setBusy] = useState(false)
+  const onClick = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        toast.error("Could not cancel", {
+          description: body.error ?? `HTTP ${res.status}`,
+        })
+      } else {
+        toast.message("Cancelling…")
+      }
+    } catch (err) {
+      toast.error("Could not cancel", {
+        description: err instanceof Error ? err.message : "Network error",
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      className="text-xs font-bold uppercase tracking-[0.12em] text-destructive hover:underline disabled:opacity-50"
+    >
+      {busy ? "Cancelling…" : "Cancel"}
+    </button>
+  )
+}
+
 function StatusIcon({ status }: { status: JobStatus }) {
   const className = "mt-0.5 h-4 w-4 shrink-0"
   switch (status) {
@@ -271,6 +331,8 @@ function StatusIcon({ status }: { status: JobStatus }) {
       return <CheckCircle2 className={cn(className, "text-emerald-600")} />
     case "failed":
       return <XCircle className={cn(className, "text-destructive")} />
+    case "cancelled":
+      return <Ban className={cn(className, "text-muted-foreground")} />
   }
 }
 

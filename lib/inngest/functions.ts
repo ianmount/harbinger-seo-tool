@@ -1,14 +1,20 @@
 import "server-only"
 import { sendJobCompletionEmail } from "@/lib/email"
 import {
+  cancelJob,
   failJob,
   getJob,
+  JobCancelledError,
   KIND_LABELS,
   markRunning,
   type JobKind,
   type JobRow,
 } from "@/lib/jobs"
+import { runAltTagsTask } from "@/lib/tasks/alt-tags"
 import { runAuditTask } from "@/lib/tasks/audit"
+import { runCompAnalysisTask } from "@/lib/tasks/comp-analysis"
+import { runInitialStrategyTask } from "@/lib/tasks/initial-strategy"
+import { runTechnicalCrawlTask } from "@/lib/tasks/technical-crawl"
 import { inngest } from "./client"
 
 /**
@@ -33,7 +39,10 @@ export type TaskRunner = (ctx: TaskContext) => Promise<{
 
 const TASKS: Partial<Record<JobKind, TaskRunner>> = {
   audit: runAuditTask,
-  // Phase 3 fills in: comp_analysis, initial_strategy, technical_crawl, alt_tags
+  alt_tags: runAltTagsTask,
+  comp_analysis: runCompAnalysisTask,
+  initial_strategy: runInitialStrategyTask,
+  technical_crawl: runTechnicalCrawlTask,
 }
 
 /**
@@ -89,13 +98,27 @@ export const runJobFunction = inngest.createFunction(
         await completeJob(jobId, result, resultPath)
       })
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      logger.error(`Job ${jobId} failed:`, err)
-      await step.run("fail-job", () => failJob(jobId, message))
+      if (err instanceof JobCancelledError) {
+        logger.info(`Job ${jobId} cancelled`)
+        // The cancel route already flipped status; this is a no-op if so.
+        // If the task threw on its own (race with a slow status read), this
+        // ensures the row ends up in cancelled state.
+        await step.run("finalize-cancelled", () =>
+          cancelJob(jobId, "Cancelled by user"),
+        )
+      } else {
+        const message = err instanceof Error ? err.message : String(err)
+        logger.error(`Job ${jobId} failed:`, err)
+        await step.run("fail-job", () => failJob(jobId, message))
+      }
     }
 
     const final = (await getJob(jobId)) ?? job
-    await step.run("send-email", () => sendJobCompletionEmail(final))
+    // Skip email on cancellation — the user just clicked Stop, they don't
+    // need a "your job is done" confirmation. Only send for completed/failed.
+    if (final.status !== "cancelled") {
+      await step.run("send-email", () => sendJobCompletionEmail(final))
+    }
     return { ok: final.status === "completed", status: final.status }
   },
 )

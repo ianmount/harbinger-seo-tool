@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
+import { ensureNotificationPermission } from "@/components/JobsTray"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -18,28 +19,22 @@ import {
   TabsList,
   TabsTrigger,
 } from "@/components/ui/tabs"
+import { JobsForKindCard } from "@/components/JobsForKindCard"
 import type { Partner } from "@/lib/types"
-import type { CrawlRunFull } from "./types"
 
 /**
  * Kicks off a new technical crawl — either against a known Airtable
- * partner or against an arbitrary URL. Calls /api/technical-crawls/run
- * synchronously; the endpoint can take a few minutes on large sites, so
- * we surface a "this can take 5 minutes" hint and disable the button
- * while in flight.
+ * partner or against an arbitrary URL. Submits to /api/jobs/start so the
+ * crawl runs as a background job; the user can navigate away and the
+ * History tab + Jobs tray reflect progress live.
  */
-export function RunNowPanel({
-  onCompleted,
-}: {
-  onCompleted?: (run: CrawlRunFull) => void
-}) {
+export function RunNowPanel() {
   const [mode, setMode] = useState<"partner" | "url">("partner")
   const [partners, setPartners] = useState<Partner[]>([])
   const [partnersError, setPartnersError] = useState<string | null>(null)
   const [partnerId, setPartnerId] = useState<string>("")
   const [url, setUrl] = useState<string>("")
   const [running, setRunning] = useState(false)
-  const [lastResult, setLastResult] = useState<CrawlRunFull | null>(null)
   const [lastError, setLastError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -67,14 +62,8 @@ export function RunNowPanel({
 
   async function handleRun() {
     setRunning(true)
-    setLastResult(null)
     setLastError(null)
     try {
-      const body =
-        mode === "partner"
-          ? { partnerId, source: "manual" as const }
-          : { url, source: "manual" as const }
-
       if (mode === "partner" && !partnerId) {
         toast.error("Pick a partner first")
         return
@@ -84,27 +73,32 @@ export function RunNowPanel({
         return
       }
 
-      const t0 = Date.now()
-      toast.message("Crawl started", {
-        description: "This can take 3-7 minutes on a typical site.",
-      })
+      void ensureNotificationPermission()
+      const partnerLabel =
+        mode === "partner"
+          ? partners.find((p) => p.id === partnerId)?.name ?? "partner"
+          : url.trim()
 
-      const res = await fetch("/api/technical-crawls/run", {
+      const res = await fetch("/api/jobs/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          kind: "technical_crawl",
+          title: `Technical Crawl — ${partnerLabel}`,
+          input:
+            mode === "partner" ? { partnerId } : { url: url.trim() },
+        }),
       })
-      const json = (await res.json()) as { run?: CrawlRunFull; error?: string }
-      if (!res.ok || !json.run) {
+      const json = (await res.json()) as { jobId?: string; error?: string }
+      if (!res.ok || !json.jobId) {
         throw new Error(json.error ?? `HTTP ${res.status}`)
       }
-      const seconds = Math.round((Date.now() - t0) / 1000)
-      toast.success(`Crawl finished in ${seconds}s`)
-      setLastResult(json.run)
-      onCompleted?.(json.run)
+      toast.success("Crawl started", {
+        description:
+          "Running in the background. The History tab updates as it progresses.",
+      })
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Crawl failed"
-      // Sticky inline error so the user can read it after the toast fades.
+      const msg = err instanceof Error ? err.message : "Crawl failed to start"
       setLastError(msg)
       toast.error(msg, { duration: 12_000 })
     } finally {
@@ -164,23 +158,17 @@ export function RunNowPanel({
 
       <div>
         <Button onClick={handleRun} disabled={running}>
-          {running ? "Crawling…" : "Run technical crawl"}
+          {running ? "Starting…" : "Run technical crawl"}
         </Button>
         <p className="mt-2 text-xs text-muted-foreground">
           Crawls ~50 pages of the target site, runs mobile Lighthouse on a
           5-page sample, and extracts JSON-LD from up to 16 representative
-          pages. Typical runtime: 3-7 minutes.
+          pages. Runs as a background job (3-7 min typical). You can navigate
+          away — the Jobs tray and History tab update as it progresses.
         </p>
       </div>
 
-      {lastResult ? (
-        <div className="rounded-md border border-border bg-card p-4 text-sm">
-          <p className="font-medium text-foreground">Crawl complete.</p>
-          <p className="mt-1 text-muted-foreground">
-            View it in the <b>History</b> tab — id <code>{lastResult.id}</code>.
-          </p>
-        </div>
-      ) : null}
+      <JobsForKindCard kind="technical_crawl" title="Recent crawl jobs" />
 
       {lastError ? (
         <div

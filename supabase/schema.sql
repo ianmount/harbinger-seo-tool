@@ -104,7 +104,7 @@ create table if not exists public.background_jobs (
     'technical_crawl',
     'alt_tags'
   )),
-  status            text not null check (status in ('queued', 'running', 'completed', 'failed')),
+  status            text not null check (status in ('queued', 'running', 'completed', 'failed', 'cancelled')),
   title             text not null,
   -- Free-form params blob; shape is task-specific. Validated by the task
   -- implementation, not by the DB.
@@ -166,3 +166,14 @@ $$;
 
 alter table public.crawl_runs
   add column if not exists issue_pages jsonb;
+
+-- 2026-05-01: add 'cancelled' to background_jobs.status enum. Without this
+-- migration, calling /api/jobs/<id>/cancel against a project that ran the
+-- earlier schema would fail the CHECK constraint. Drops and re-adds the
+-- check; safe to re-run.
+
+alter table public.background_jobs
+  drop constraint if exists background_jobs_status_check;
+alter table public.background_jobs
+  add constraint background_jobs_status_check
+  check (status in ('queued', 'running', 'completed', 'failed', 'cancelled'));

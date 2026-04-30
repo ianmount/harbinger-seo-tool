@@ -1,9 +1,20 @@
 "use client"
 
-import { useCallback, useMemo, useState } from "react"
-import { DownloadIcon } from "lucide-react"
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
+import { DownloadIcon, Loader2 } from "lucide-react"
+import { toast } from "sonner"
+import { JobsForKindCard } from "@/components/JobsForKindCard"
+import { ensureNotificationPermission } from "@/components/JobsTray"
 import { PageHeader } from "@/components/PageHeader"
 import { Button } from "@/components/ui/button"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -23,7 +34,7 @@ interface AltTagRow {
   skipped: boolean
 }
 
-interface ApiResult {
+interface AltTagsResult {
   rows: AltTagRow[]
   pagesCrawled: number
   pagesWithImages: number
@@ -35,11 +46,15 @@ interface ApiResult {
   claudeUsd: number
 }
 
-type Phase =
-  | { status: "idle" }
-  | { status: "running" }
-  | { status: "done"; result: ApiResult }
-  | { status: "error"; message: string }
+interface JobShape {
+  id: string
+  status: "queued" | "running" | "completed" | "failed" | "cancelled"
+  title: string
+  result: AltTagsResult | null
+  progress: { stage?: string; detail?: string }
+  error: string | null
+  input: { domain?: string }
+}
 
 function csvEscape(value: unknown): string {
   if (value == null) return ""
@@ -83,56 +98,108 @@ function safeFilenameFor(domain: string): string {
   return `alt-tags-${cleaned}-${stamp}.csv`
 }
 
-export default function AltTagsPage() {
+function AltTagsPageInner() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const jobId = searchParams.get("job") ?? null
+
   const [domain, setDomain] = useState("")
   const [maxPages, setMaxPages] = useState<number>(200)
   const [skipImagesWithAlt, setSkipImagesWithAlt] = useState(true)
-  const [phase, setPhase] = useState<Phase>({ status: "idle" })
+  const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
+
+  // Polling: when ?job=<id> is present, fetch the job and refresh while
+  // running. The page renders three states from this single source of
+  // truth: in-progress, completed (table), error.
+  const [job, setJob] = useState<JobShape | null>(null)
+  const [jobLoadError, setJobLoadError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!jobId) {
+      setJob(null)
+      setJobLoadError(null)
+      return
+    }
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/jobs/${jobId}`, { cache: "no-store" })
+        if (cancelled) return
+        if (res.status === 404) {
+          setJobLoadError("Job not found.")
+          return
+        }
+        if (!res.ok) {
+          setJobLoadError(`Failed to load job (HTTP ${res.status}).`)
+          return
+        }
+        const body = (await res.json()) as { job: JobShape }
+        setJob(body.job)
+        if (body.job.status === "queued" || body.job.status === "running") {
+          timer = setTimeout(tick, 3000)
+        }
+      } catch (err) {
+        if (cancelled) return
+        setJobLoadError(
+          err instanceof Error ? err.message : "Network error",
+        )
+      }
+    }
+    void tick()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [jobId])
 
   const handleRun = useCallback(async () => {
     if (!domain.trim()) return
-    setPhase({ status: "running" })
+    setSubmitting(true)
+    setSubmitError(null)
+    void ensureNotificationPermission()
     try {
-      const response = await fetch("/api/tools/alt-tags/generate", {
+      const res = await fetch("/api/jobs/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          domain: domain.trim(),
-          maxPages,
-          skipImagesWithAlt,
+          kind: "alt_tags",
+          title: `Alt Tags — ${domain.trim()}`,
+          input: {
+            domain: domain.trim(),
+            maxPages,
+            skipImagesWithAlt,
+          },
         }),
       })
-      const body = (await response.json().catch(() => ({}))) as
-        | ApiResult
-        | { error?: string }
-      if (!response.ok) {
-        const message =
-          (body as { error?: string }).error ??
-          `Request failed (${response.status})`
-        setPhase({ status: "error", message })
-        return
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error ?? `HTTP ${res.status}`)
       }
-      setPhase({ status: "done", result: body as ApiResult })
+      const { jobId: newJobId } = (await res.json()) as { jobId: string }
+      toast.success("Alt-tag generation started")
+      router.push(`/tools/alt-tags?job=${newJobId}`)
     } catch (err) {
-      setPhase({
-        status: "error",
-        message: err instanceof Error ? err.message : "Network error",
-      })
+      const message = err instanceof Error ? err.message : "Unknown error"
+      setSubmitError(message)
+      toast.error("Could not start", { description: message })
+    } finally {
+      setSubmitting(false)
     }
-  }, [domain, maxPages, skipImagesWithAlt])
-
-  const handleDownload = useCallback(() => {
-    if (phase.status !== "done") return
-    const csv = rowsToCsv(phase.result.rows)
-    downloadCsv(safeFilenameFor(domain), csv)
-  }, [phase, domain])
-
-  const running = phase.status === "running"
+  }, [domain, maxPages, skipImagesWithAlt, router])
 
   const previewRows = useMemo(() => {
-    if (phase.status !== "done") return []
-    return phase.result.rows.slice(0, 50)
-  }, [phase])
+    return job?.result?.rows.slice(0, 50) ?? []
+  }, [job])
+
+  const handleDownload = useCallback(() => {
+    if (!job?.result) return
+    const dom = job.input.domain ?? "site"
+    downloadCsv(safeFilenameFor(dom), rowsToCsv(job.result.rows))
+  }, [job])
+
+  const showForm = !jobId
 
   return (
     <div className="space-y-6">
@@ -151,120 +218,213 @@ export default function AltTagsPage() {
             <b className="font-sans font-extrabold not-italic text-foreground">
               Claude
             </b>{" "}
-            to write descriptive, page-aware alt text. Output is a CSV with the
-            page URL, the image URL, and the suggested alt text — ready for the
-            content team to apply.
+            to write descriptive, page-aware alt text. Runs as a background
+            job — you&apos;ll get an email when it&apos;s done. Output is a
+            CSV ready for the content team to apply.
           </>
         }
       />
 
-      <section className="space-y-4 rounded-lg border p-4">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="flex flex-col gap-1.5 sm:col-span-2">
-            <Label htmlFor="domain">Domain</Label>
-            <Input
-              id="domain"
-              type="text"
-              value={domain}
-              onChange={(e) => setDomain(e.target.value)}
-              placeholder="example.com"
-              disabled={running}
-            />
-            <p className="text-xs text-muted-foreground">
-              With or without <code className="font-mono">https://</code>. We
-              auto-detect whether the site needs JavaScript rendering.
-            </p>
+      {showForm && (
+        <section className="space-y-4 rounded-lg border p-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="flex flex-col gap-1.5 sm:col-span-2">
+              <Label htmlFor="domain">Domain</Label>
+              <Input
+                id="domain"
+                type="text"
+                value={domain}
+                onChange={(e) => setDomain(e.target.value)}
+                placeholder="example.com"
+                disabled={submitting}
+              />
+              <p className="text-xs text-muted-foreground">
+                With or without <code className="font-mono">https://</code>. We
+                auto-detect whether the site needs JavaScript rendering.
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="max-pages">Max pages</Label>
+              <Input
+                id="max-pages"
+                type="number"
+                min={1}
+                max={1000}
+                value={maxPages}
+                onChange={(e) => {
+                  const v = Number(e.target.value)
+                  if (Number.isFinite(v)) setMaxPages(v)
+                }}
+                disabled={submitting}
+              />
+              <p className="text-xs text-muted-foreground">
+                Cap on pages crawled (1-1000). Default 200.
+              </p>
+            </div>
+
+            <label
+              className="flex items-start gap-2 sm:col-span-2"
+              htmlFor="skip-with-alt"
+            >
+              <input
+                id="skip-with-alt"
+                type="checkbox"
+                checked={skipImagesWithAlt}
+                onChange={(e) => setSkipImagesWithAlt(e.target.checked)}
+                disabled={submitting}
+                className="mt-1"
+              />
+              <span className="flex flex-col gap-0.5">
+                <span className="text-sm font-medium leading-none">
+                  Skip images that already have alt text
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  When checked, only generate suggestions for{" "}
+                  <code className="font-mono">&lt;img&gt;</code> tags missing the{" "}
+                  <code className="font-mono">alt</code> attribute or with empty
+                  alt.
+                </span>
+              </span>
+            </label>
           </div>
 
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="max-pages">Max pages</Label>
-            <Input
-              id="max-pages"
-              type="number"
-              min={1}
-              max={1000}
-              value={maxPages}
-              onChange={(e) => {
-                const v = Number(e.target.value)
-                if (Number.isFinite(v)) setMaxPages(v)
-              }}
-              disabled={running}
-            />
-            <p className="text-xs text-muted-foreground">
-              Cap on pages crawled (1-1000). Default 200. Larger sites may
-              hit the 13-min function limit — split into two runs by
-              tightening the cap if you need full coverage.
-            </p>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={handleRun} disabled={submitting || !domain.trim()}>
+              {submitting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Starting…
+                </>
+              ) : (
+                "Generate alt tags"
+              )}
+            </Button>
           </div>
 
-          <label
-            className="flex items-start gap-2 sm:col-span-2"
-            htmlFor="skip-with-alt"
-          >
-            <input
-              id="skip-with-alt"
-              type="checkbox"
-              checked={skipImagesWithAlt}
-              onChange={(e) => setSkipImagesWithAlt(e.target.checked)}
-              disabled={running}
-              className="mt-1"
-            />
-            <span className="flex flex-col gap-0.5">
-              <span className="text-sm font-medium leading-none">
-                Skip images that already have alt text
-              </span>
-              <span className="text-xs text-muted-foreground">
-                When checked, only generate suggestions for{" "}
-                <code className="font-mono">&lt;img&gt;</code> tags missing the{" "}
-                <code className="font-mono">alt</code> attribute or with empty
-                alt. Images with existing alt still appear in the CSV (current
-                alt preserved, suggested alt blank).
-              </span>
-            </span>
-          </label>
-        </div>
+          {submitError && (
+            <p
+              className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+              role="alert"
+            >
+              {submitError}
+            </p>
+          )}
+        </section>
+      )}
 
-        <div className="flex flex-wrap items-center gap-3">
-          <Button onClick={handleRun} disabled={running || !domain.trim()}>
-            {running ? "Crawling…" : "Generate alt tags"}
-          </Button>
-          {running ? (
-            <span className="text-xs text-muted-foreground">
-              This can take several minutes on larger sites.
-            </span>
-          ) : null}
-        </div>
-      </section>
-
-      {phase.status === "error" ? (
-        <p
-          className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-          role="alert"
-        >
-          {phase.message}
-        </p>
-      ) : null}
-
-      {phase.status === "done" ? (
-        <ResultPanel
-          result={phase.result}
+      {jobId && (
+        <JobPanel
+          job={job}
+          jobLoadError={jobLoadError}
           previewRows={previewRows}
           onDownload={handleDownload}
+          onNew={() => {
+            router.push("/tools/alt-tags")
+          }}
         />
-      ) : null}
+      )}
+
+      <JobsForKindCard kind="alt_tags" title="Recent alt-tag runs" />
     </div>
   )
 }
 
-function ResultPanel({
-  result,
+function JobPanel({
+  job,
+  jobLoadError,
   previewRows,
   onDownload,
+  onNew,
 }: {
-  result: ApiResult
+  job: JobShape | null
+  jobLoadError: string | null
   previewRows: AltTagRow[]
   onDownload: () => void
+  onNew: () => void
 }) {
+  if (jobLoadError) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Couldn&apos;t load job</CardTitle>
+          <CardDescription>{jobLoadError}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button onClick={onNew}>Start a new run</Button>
+        </CardContent>
+      </Card>
+    )
+  }
+  if (!job) {
+    return (
+      <p className="font-serif text-[14px] italic text-ink-2">Loading job…</p>
+    )
+  }
+  if (job.status === "queued" || job.status === "running") {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>{job.title}</CardTitle>
+          <CardDescription>
+            Running in the background. You can leave the tab — we&apos;ll
+            email you when it&apos;s done.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-start gap-2 text-sm">
+            <Loader2 className="mt-0.5 h-4 w-4 animate-spin text-primary" />
+            <div>
+              <div className="font-medium">
+                {job.progress?.stage ?? "Running…"}
+              </div>
+              {job.progress?.detail && (
+                <div className="text-xs text-muted-foreground">
+                  {job.progress.detail}
+                </div>
+              )}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
+  if (job.status === "failed") {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-destructive">Run failed</CardTitle>
+          <CardDescription>{job.title}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <pre className="whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+            {job.error ?? "(no error message)"}
+          </pre>
+          <Button onClick={onNew}>Start a new run</Button>
+        </CardContent>
+      </Card>
+    )
+  }
+  if (job.status === "cancelled") {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Run cancelled</CardTitle>
+          <CardDescription>{job.title}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button onClick={onNew}>Start a new run</Button>
+        </CardContent>
+      </Card>
+    )
+  }
+  if (!job.result) {
+    return (
+      <p className="font-serif text-[14px] italic text-ink-2">
+        Run completed but no result data — try starting a new run.
+      </p>
+    )
+  }
+  const result = job.result
   return (
     <section className="space-y-4 rounded-lg border p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -283,9 +443,14 @@ function ResultPanel({
             s
           </p>
         </div>
-        <Button onClick={onDownload}>
-          <DownloadIcon /> Download CSV ({result.rows.length} rows)
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={onDownload}>
+            <DownloadIcon /> Download CSV ({result.rows.length} rows)
+          </Button>
+          <Button variant="outline" onClick={onNew}>
+            Start a new run
+          </Button>
+        </div>
       </div>
 
       {result.rows.length === 0 ? (
@@ -356,5 +521,14 @@ function ResultPanel({
         </p>
       ) : null}
     </section>
+  )
+}
+
+export default function AltTagsPage() {
+  // useSearchParams must be inside a Suspense boundary in Next 16.
+  return (
+    <Suspense fallback={null}>
+      <AltTagsPageInner />
+    </Suspense>
   )
 }

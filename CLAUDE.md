@@ -122,7 +122,10 @@ Note: `Prospect` (Audit tab, in-memory only) is distinct from `Partner` (Airtabl
   4. Update the kind page UI: replace synchronous fetch with `POST /api/jobs/start`, render the in-progress state, link to `result_path` on completion.
 - **Public path.** `/api/inngest` is whitelisted in `proxy.ts` because Inngest Cloud invokes it without our auth cookie. Authentication is handled inside the SDK via `INNGEST_SIGNING_KEY`.
 - **Retries are off (`retries: 0`)** because every task makes paid API calls (Claude, DataForSEO). A retry on partial failure would double-bill. If a specific task wants opt-in retry, use `step.run` with custom retry config.
+- **Cancellation.** `POST /api/jobs/[id]/cancel` flips the row to `cancelled`. Cooperative — running tasks observe the status flip at their next progress checkpoint and throw `JobCancelledError` (see `lib/jobs.ts`). The dispatcher catches and finalizes cleanly without sending an email. Tasks should call `isCancelRequested(jobId)` between expensive sub-phases. UI: Cancel button on running rows in JobsTray + JobsForKindCard.
 - **No "no background jobs" rule anymore.** Earlier versions of this file said all actions were synchronous; that's lifted for the 5 long task kinds. Short routes (Strategy, Reporting, Keyword Research, etc.) stay synchronous.
+- **Per-kind history card.** `<JobsForKindCard kind="..." />` is mounted on each task page. It lists this session's recent jobs of that kind, shows live progress on in-flight runs, has Cancel and Dismiss buttons. Dismissed jobIds live in localStorage under `harbinger:dismissed_jobs` and are honored by the header JobsTray as well.
+- **Existing `/api/technical-crawls/run` route stayed** (legacy). The desktop Routine bot uses bearer-token auth and can't go through the jobs system; it keeps the synchronous endpoint. The UI's Run Now button switched to the jobs system.
 
 ## Instructions for Claude Code
 - Always read this file before starting a task. If a prompt asks you to do something that conflicts with this file, stop and ask.

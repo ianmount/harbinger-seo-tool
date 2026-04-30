@@ -1,6 +1,7 @@
 "use client"
 
-import { useState } from "react"
+import { Suspense, useState } from "react"
+import { useSearchParams } from "next/navigation"
 import { PageHeader } from "@/components/PageHeader"
 import { HistoryPanel } from "@/components/technical-crawls/HistoryPanel"
 import { RunNowPanel } from "@/components/technical-crawls/RunNowPanel"
@@ -14,8 +15,15 @@ import {
 
 type View = "run" | "schedules" | "history"
 
-export default function TechnicalCrawlsPage() {
-  const [view, setView] = useState<View>("run")
+function TechnicalCrawlsPageInner() {
+  const searchParams = useSearchParams()
+  const initialView: View =
+    searchParams.get("view") === "history"
+      ? "history"
+      : searchParams.get("view") === "schedules"
+        ? "schedules"
+        : "run"
+  const [view, setView] = useState<View>(initialView)
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
 
   return (
@@ -48,12 +56,7 @@ export default function TechnicalCrawlsPage() {
         </TabsList>
 
         <TabsContent value="run" className="mt-6">
-          <RunNowPanel
-            onCompleted={(run) => {
-              setSelectedRunId(run.id)
-              setView("history")
-            }}
-          />
+          <RunNowPanel />
         </TabsContent>
 
         <TabsContent value="schedules" className="mt-6">
@@ -68,5 +71,13 @@ export default function TechnicalCrawlsPage() {
         </TabsContent>
       </Tabs>
     </div>
+  )
+}
+
+export default function TechnicalCrawlsPage() {
+  return (
+    <Suspense fallback={null}>
+      <TechnicalCrawlsPageInner />
+    </Suspense>
   )
 }

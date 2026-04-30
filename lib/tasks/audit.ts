@@ -29,7 +29,11 @@ import {
 } from "@/lib/gsc"
 import { findGscSiteCandidates } from "@/lib/gsc-site-match"
 import type { TaskRunner } from "@/lib/inngest/functions"
-import { updateProgress } from "@/lib/jobs"
+import {
+  isCancelRequested,
+  JobCancelledError,
+  updateProgress,
+} from "@/lib/jobs"
 import { runPageSpeedAudit } from "@/lib/pagespeed"
 import type {
   AssessmentAuditResult,
@@ -364,13 +368,26 @@ async function gatherAuditData(
   body: AuditInput,
 ): Promise<AuditDataBundle> {
   const startedAt = Date.now()
-  const stage = (key: string, detail?: string) =>
+  // Plain progress write — never throws. Used by tight-loop callbacks
+  // (e.g. crawl_progress fires every poll cycle) where mid-iteration
+  // cancellation isn't safe.
+  const writeProgress = (key: string, detail?: string) =>
     updateProgress(jobId, {
       stage: STAGE_LABELS[key] ?? key.replace(/_/g, " "),
       detail,
     }).catch(() => {
       /* progress updates are best-effort; never fail the run on a write */
     })
+
+  // Stage checkpoint — writes progress AND throws if the user requested
+  // cancellation. Called between expensive sub-phases (crawl done, GSC
+  // done, etc.) so the runner can observe the cancellation cleanly.
+  const stage = async (key: string, detail?: string) => {
+    await writeProgress(key, detail)
+    if (await isCancelRequested(jobId)) {
+      throw new JobCancelledError(jobId)
+    }
+  }
 
   const warnings: string[] = []
   const websiteUrl = cleanWebsite(body.websiteUrl)
@@ -382,7 +399,7 @@ async function gatherAuditData(
     domain: websiteUrl,
     options: { mode: body.crawlMode },
     onProgress: (p) =>
-      void stage(
+      void writeProgress(
         "crawl_progress",
         `pages=${p.pagesCrawled} queue=${p.pagesInQueue} status=${p.status}`,
       ),
@@ -396,7 +413,7 @@ async function gatherAuditData(
   })
   const pageSpeedPromise = (async () => {
     const gscRes = await gscPromise
-    await stage("gsc_ready")
+    await writeProgress("gsc_ready")
     const topGscPages = gscRes?.data
       ? [...gscRes.data.topPages]
           .sort((a, b) => b.impressions - a.impressions)
@@ -404,13 +421,13 @@ async function gatherAuditData(
       : []
     const ps = await runPageSpeedAudit({ domain: websiteUrl, topGscPages })
     if (ps.skippedReason) warnings.push(ps.skippedReason)
-    await stage("pagespeed_done", `urls=${ps.pages.length}`)
+    await writeProgress("pagespeed_done", `urls=${ps.pages.length}`)
     return ps
   })()
 
   crawlPromise
     .then((c) =>
-      void stage(
+      void writeProgress(
         "crawl_done",
         `pages=${c.crawledCount} sitemap=${c.sitemapUrls.length}`,
       ),
@@ -494,6 +511,9 @@ async function synthesizeAudit(
   jobId: string,
   bundle: AuditDataBundle,
 ): Promise<{ markdown: string; durationSeconds: number }> {
+  if (await isCancelRequested(jobId)) {
+    throw new JobCancelledError(jobId)
+  }
   await updateProgress(jobId, {
     stage: STAGE_LABELS.synthesizing,
   }).catch(() => {})

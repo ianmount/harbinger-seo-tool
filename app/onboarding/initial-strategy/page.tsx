@@ -1,10 +1,21 @@
 "use client"
 
-import { useCallback, useMemo, useState } from "react"
-import { DownloadIcon } from "lucide-react"
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
+import { DownloadIcon, Loader2 } from "lucide-react"
+import { toast } from "sonner"
+import { JobsForKindCard } from "@/components/JobsForKindCard"
+import { ensureNotificationPermission } from "@/components/JobsTray"
 import { PageHeader } from "@/components/PageHeader"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import {
@@ -36,11 +47,14 @@ import type {
  * of `lib/xlsx-export` so the heavy ExcelJS bundle only loads on download.
  */
 
-type Phase =
-  | { status: "idle" }
-  | { status: "running" }
-  | { status: "done"; result: InitialStrategyOutput }
-  | { status: "error"; message: string }
+interface JobShape {
+  id: string
+  status: "queued" | "running" | "completed" | "failed" | "cancelled"
+  title: string
+  result: { strategy: InitialStrategyOutput } | null
+  progress: { stage?: string; detail?: string }
+  error: string | null
+}
 
 const SITEMAP_PLACEHOLDER = `Home
 Services
@@ -77,22 +91,68 @@ function formatCurrency(n: number): string {
   return `$${n.toFixed(2)}`
 }
 
-export default function InitialStrategyPage() {
+function InitialStrategyPageInner() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const jobId = searchParams.get("job") ?? null
+
   const { partner, loading: partnerLoading, error: partnerError } =
     useSelectedPartner()
   const [sitemapText, setSitemapText] = useState("")
   const [keywordsText, setKeywordsText] = useState("")
-  const [phase, setPhase] = useState<Phase>({ status: "idle" })
+  const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
   const [downloading, setDownloading] = useState(false)
+
+  // Job polling — same pattern as /tools/alt-tags.
+  const [job, setJob] = useState<JobShape | null>(null)
+  const [jobLoadError, setJobLoadError] = useState<string | null>(null)
+  useEffect(() => {
+    if (!jobId) {
+      setJob(null)
+      setJobLoadError(null)
+      return
+    }
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/jobs/${jobId}`, { cache: "no-store" })
+        if (cancelled) return
+        if (res.status === 404) {
+          setJobLoadError("Job not found.")
+          return
+        }
+        if (!res.ok) {
+          setJobLoadError(`Failed to load job (HTTP ${res.status}).`)
+          return
+        }
+        const body = (await res.json()) as { job: JobShape }
+        setJob(body.job)
+        if (body.job.status === "queued" || body.job.status === "running") {
+          timer = setTimeout(tick, 3000)
+        }
+      } catch (err) {
+        if (cancelled) return
+        setJobLoadError(
+          err instanceof Error ? err.message : "Network error",
+        )
+      }
+    }
+    void tick()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [jobId])
 
   const canRun =
     !!partner &&
     sitemapText.trim().length > 0 &&
     keywordsText.trim().length > 0 &&
-    phase.status !== "running"
+    !submitting
 
   const sitemapStats = useMemo(() => {
-    // Cheap pre-flight: count non-blank, non-comment lines.
     const lines = sitemapText.split(/\r?\n/).filter((l) => {
       const t = l.trim()
       return t.length > 0 && !t.startsWith("#") && !t.startsWith("//")
@@ -113,40 +173,48 @@ export default function InitialStrategyPage() {
 
   const handleRun = useCallback(async () => {
     if (!partner) return
-    setPhase({ status: "running" })
+    setSubmitting(true)
+    setSubmitError(null)
+    void ensureNotificationPermission()
     try {
-      const response = await fetch("/api/onboarding/initial-strategy", {
+      const res = await fetch("/api/jobs/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          partnerId: partner.id,
-          sitemapText,
-          keywordsText,
+          kind: "initial_strategy",
+          title: `Initial Strategy — ${partner.name}`,
+          input: {
+            partnerId: partner.id,
+            sitemapText,
+            keywordsText,
+          },
         }),
       })
-      const body = (await response.json().catch(() => ({}))) as {
-        result?: InitialStrategyOutput
-        error?: string
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error ?? `HTTP ${res.status}`)
       }
-      if (!response.ok || !body.result) {
-        throw new Error(body.error ?? `Request failed (${response.status})`)
-      }
-      setPhase({ status: "done", result: body.result })
+      const { jobId: newJobId } = (await res.json()) as { jobId: string }
+      toast.success("Strategy started — we'll email you when it's ready.")
+      router.push(`/onboarding/initial-strategy?job=${newJobId}`)
     } catch (err) {
-      setPhase({
-        status: "error",
-        message: err instanceof Error ? err.message : "Failed to run workflow",
-      })
+      const message = err instanceof Error ? err.message : "Unknown error"
+      setSubmitError(message)
+      toast.error("Could not start", { description: message })
+    } finally {
+      setSubmitting(false)
     }
-  }, [partner, sitemapText, keywordsText])
+  }, [partner, sitemapText, keywordsText, router])
+
+  const result = job?.result?.strategy ?? null
 
   const handleDownload = useCallback(async () => {
-    if (phase.status !== "done") return
+    if (!result) return
     setDownloading(true)
     try {
       const [{ buildInitialStrategyWorkbook, workbookToArrayBuffer }] =
         await Promise.all([import("@/lib/xlsx-export")])
-      const wb = buildInitialStrategyWorkbook(phase.result)
+      const wb = buildInitialStrategyWorkbook(result)
       const buf = await workbookToArrayBuffer(wb)
       const blob = new Blob([buf], {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -154,7 +222,7 @@ export default function InitialStrategyPage() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement("a")
       const stamp = new Date().toISOString().slice(0, 10)
-      const slug = slugify(phase.result.partnerName) || "partner"
+      const slug = slugify(result.partnerName) || "partner"
       a.href = url
       a.download = `${slug}-initial-strategy-${stamp}.xlsx`
       document.body.appendChild(a)
@@ -164,7 +232,9 @@ export default function InitialStrategyPage() {
     } finally {
       setDownloading(false)
     }
-  }, [phase])
+  }, [result])
+
+  const showForm = !jobId
 
   return (
     <div className="space-y-6">
@@ -198,95 +268,199 @@ export default function InitialStrategyPage() {
         <p className="text-sm text-destructive" role="alert">
           {partnerError}
         </p>
-      ) : !partner ? (
+      ) : !partner && showForm ? (
         <p className="text-sm text-muted-foreground">
           Please select a partner from the dropdown above.
         </p>
       ) : (
         <>
-          <PartnerSummary partner={partner} />
+          {partner && showForm && <PartnerSummary partner={partner} />}
 
-          <section className="space-y-3 rounded-lg border p-4">
-            <Label htmlFor="sitemap">Approved new-site sitemap (indented)</Label>
-            <Textarea
-              id="sitemap"
-              placeholder={SITEMAP_PLACEHOLDER}
-              value={sitemapText}
-              onChange={(e) => setSitemapText(e.target.value)}
-              className="min-h-[180px] font-mono text-xs"
-              disabled={phase.status === "running"}
-            />
-            <p className="text-xs text-muted-foreground">
-              One page per line. Indent with tabs or 2/4 spaces to nest. Top-level
-              page named &ldquo;Home&rdquo; maps to{" "}
-              <code className="font-mono">/</code>.{" "}
-              {sitemapStats.lines > 0 ? (
-                <>
-                  <strong>{sitemapStats.lines}</strong> page line
-                  {sitemapStats.lines === 1 ? "" : "s"} detected.
-                </>
+          {showForm && (
+            <>
+              <section className="space-y-3 rounded-lg border p-4">
+                <Label htmlFor="sitemap">Approved new-site sitemap (indented)</Label>
+                <Textarea
+                  id="sitemap"
+                  placeholder={SITEMAP_PLACEHOLDER}
+                  value={sitemapText}
+                  onChange={(e) => setSitemapText(e.target.value)}
+                  className="min-h-[180px] font-mono text-xs"
+                  disabled={submitting}
+                />
+                <p className="text-xs text-muted-foreground">
+                  One page per line. Indent with tabs or 2/4 spaces to nest.
+                  Top-level page named &ldquo;Home&rdquo; maps to{" "}
+                  <code className="font-mono">/</code>.{" "}
+                  {sitemapStats.lines > 0 ? (
+                    <>
+                      <strong>{sitemapStats.lines}</strong> page line
+                      {sitemapStats.lines === 1 ? "" : "s"} detected.
+                    </>
+                  ) : null}
+                </p>
+              </section>
+
+              <section className="space-y-3 rounded-lg border p-4">
+                <Label htmlFor="keywords">Approved keyword list</Label>
+                <Textarea
+                  id="keywords"
+                  placeholder={KEYWORDS_PLACEHOLDER}
+                  value={keywordsText}
+                  onChange={(e) => setKeywordsText(e.target.value)}
+                  className="min-h-[180px] font-mono text-xs"
+                  disabled={submitting}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Paste a CSV with a <code className="font-mono">Keyword</code>{" "}
+                  column, or one keyword per line.{" "}
+                  {keywordStats.count > 0 ? (
+                    <>
+                      <strong>{keywordStats.count}</strong> keyword
+                      {keywordStats.count === 1 ? "" : "s"} detected
+                      {keywordStats.hasHeader ? " (CSV header found)" : ""}.
+                    </>
+                  ) : null}
+                </p>
+              </section>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <Button onClick={handleRun} disabled={!canRun}>
+                  {submitting ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Starting…
+                    </>
+                  ) : (
+                    "Generate Initial Strategy"
+                  )}
+                </Button>
+              </div>
+
+              {submitError ? (
+                <p
+                  className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+                  role="alert"
+                >
+                  {submitError}
+                </p>
               ) : null}
-            </p>
-          </section>
+            </>
+          )}
 
-          <section className="space-y-3 rounded-lg border p-4">
-            <Label htmlFor="keywords">Approved keyword list</Label>
-            <Textarea
-              id="keywords"
-              placeholder={KEYWORDS_PLACEHOLDER}
-              value={keywordsText}
-              onChange={(e) => setKeywordsText(e.target.value)}
-              className="min-h-[180px] font-mono text-xs"
-              disabled={phase.status === "running"}
+          {jobId && (
+            <JobPanel
+              job={job}
+              jobLoadError={jobLoadError}
+              onNew={() => router.push("/onboarding/initial-strategy")}
             />
-            <p className="text-xs text-muted-foreground">
-              Paste a CSV with a <code className="font-mono">Keyword</code>{" "}
-              column, or one keyword per line.{" "}
-              {keywordStats.count > 0 ? (
-                <>
-                  <strong>{keywordStats.count}</strong> keyword
-                  {keywordStats.count === 1 ? "" : "s"} detected
-                  {keywordStats.hasHeader ? " (CSV header found)" : ""}.
-                </>
-              ) : null}
-            </p>
-          </section>
+          )}
 
-          <div className="flex flex-wrap items-center gap-3">
-            <Button onClick={handleRun} disabled={!canRun}>
-              {phase.status === "running"
-                ? "Generating strategy…"
-                : "Generate Initial Strategy"}
-            </Button>
-            {phase.status === "running" ? (
-              <span className="text-xs text-muted-foreground" aria-live="polite">
-                Crawling{" "}
-                <code className="font-mono">{partner.website}</code>, pulling
-                last 180 days of GSC traffic, and calling Claude. This usually
-                takes 1–3 minutes for a small site.
-              </span>
-            ) : null}
-          </div>
-
-          {phase.status === "error" ? (
-            <p
-              className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-              role="alert"
-            >
-              {phase.message}
-            </p>
-          ) : null}
-
-          {phase.status === "done" ? (
+          {result ? (
             <ResultView
-              result={phase.result}
+              result={result}
               onDownload={handleDownload}
               downloading={downloading}
             />
           ) : null}
+
+          <JobsForKindCard
+            kind="initial_strategy"
+            title="Recent strategy runs"
+          />
         </>
       )}
     </div>
+  )
+}
+
+function JobPanel({
+  job,
+  jobLoadError,
+  onNew,
+}: {
+  job: JobShape | null
+  jobLoadError: string | null
+  onNew: () => void
+}) {
+  if (jobLoadError) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Couldn&apos;t load job</CardTitle>
+          <CardDescription>{jobLoadError}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button onClick={onNew}>Start a new run</Button>
+        </CardContent>
+      </Card>
+    )
+  }
+  if (!job) return null
+  if (job.status === "queued" || job.status === "running") {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>{job.title}</CardTitle>
+          <CardDescription>
+            Running in the background. Crawling the site, pulling 180 days of
+            GSC, and asking Claude to draft the three artifacts.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-start gap-2 text-sm">
+            <Loader2 className="mt-0.5 h-4 w-4 animate-spin text-primary" />
+            <div>
+              <div className="font-medium">
+                {job.progress?.stage ?? "Running…"}
+              </div>
+              {job.progress?.detail && (
+                <div className="text-xs text-muted-foreground">
+                  {job.progress.detail}
+                </div>
+              )}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
+  if (job.status === "failed") {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-destructive">Run failed</CardTitle>
+          <CardDescription>{job.title}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <pre className="whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+            {job.error ?? "(no error message)"}
+          </pre>
+          <Button onClick={onNew}>Start a new run</Button>
+        </CardContent>
+      </Card>
+    )
+  }
+  if (job.status === "cancelled") {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Run cancelled</CardTitle>
+          <CardDescription>{job.title}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button onClick={onNew}>Start a new run</Button>
+        </CardContent>
+      </Card>
+    )
+  }
+  return null
+}
+
+export default function InitialStrategyPage() {
+  return (
+    <Suspense fallback={null}>
+      <InitialStrategyPageInner />
+    </Suspense>
   )
 }
 

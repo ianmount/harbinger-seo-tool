@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
-import { Bell, CheckCircle2, Loader2, XCircle } from "lucide-react"
+import { Bell, Ban, CheckCircle2, Loader2, XCircle } from "lucide-react"
 import { toast } from "sonner"
 import {
   Popover,
@@ -25,7 +25,12 @@ import { cn } from "@/lib/utils"
  * job in a terminal state. We track "already announced" jobIds in a ref so
  * a tab refresh doesn't re-fire announcements for already-completed jobs.
  */
-type JobStatus = "queued" | "running" | "completed" | "failed"
+type JobStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
 type JobKind =
   | "audit"
   | "comp_analysis"
@@ -142,7 +147,10 @@ export function JobsTray() {
   useEffect(() => {
     if (!jobs || !initializedRef.current) return
     for (const job of jobs) {
-      const terminal = job.status === "completed" || job.status === "failed"
+      const terminal =
+        job.status === "completed" ||
+        job.status === "failed" ||
+        job.status === "cancelled"
       if (!terminal) continue
       if (announcedRef.current.has(job.id)) continue
       announcedRef.current.add(job.id)
@@ -211,6 +219,11 @@ export function JobsTray() {
 
 function JobRow({ job, onNavigate }: { job: Job; onNavigate: () => void }) {
   const href = job.result_path ?? `/jobs/${job.id}`
+  const active = job.status === "running" || job.status === "queued"
+  const terminal =
+    job.status === "completed" ||
+    job.status === "failed" ||
+    job.status === "cancelled"
   return (
     <div className="flex items-start gap-3">
       <StatusIcon status={job.status} />
@@ -221,7 +234,7 @@ function JobRow({ job, onNavigate }: { job: Job; onNavigate: () => void }) {
           </span>
         </div>
         <div className="truncate text-sm font-medium">{job.title}</div>
-        {job.status === "running" || job.status === "queued" ? (
+        {active ? (
           <div className="mt-0.5 truncate text-xs text-muted-foreground">
             {job.progress?.stage
               ? `${job.progress.stage}${job.progress.detail ? ` — ${job.progress.detail}` : ""}`
@@ -233,18 +246,64 @@ function JobRow({ job, onNavigate }: { job: Job; onNavigate: () => void }) {
           <div className="mt-0.5 truncate text-xs text-destructive">
             {job.error ?? "Failed"}
           </div>
+        ) : job.status === "cancelled" ? (
+          <div className="mt-0.5 truncate text-xs text-muted-foreground">
+            Cancelled
+          </div>
         ) : null}
-        {(job.status === "completed" || job.status === "failed") && (
-          <Link
-            href={href}
-            onClick={onNavigate}
-            className="mt-1 inline-block text-xs font-bold uppercase tracking-[0.12em] text-primary hover:underline"
-          >
-            View
-          </Link>
-        )}
+        <div className="mt-1 flex items-center gap-3">
+          {(job.status === "completed" || job.status === "failed") && (
+            <Link
+              href={href}
+              onClick={onNavigate}
+              className="text-xs font-bold uppercase tracking-[0.12em] text-primary hover:underline"
+            >
+              View
+            </Link>
+          )}
+          {active && <CancelButton jobId={job.id} />}
+          {terminal && job.status !== "completed" && job.status !== "failed" && (
+            // cancelled — no-op slot to keep visual rhythm
+            <span aria-hidden />
+          )}
+        </div>
       </div>
     </div>
+  )
+}
+
+function CancelButton({ jobId }: { jobId: string }) {
+  const [busy, setBusy] = useState(false)
+  const onClick = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        toast.error("Could not cancel", {
+          description: body.error ?? `HTTP ${res.status}`,
+        })
+      } else {
+        toast.message("Cancelling…")
+      }
+    } catch (err) {
+      toast.error("Could not cancel", {
+        description: err instanceof Error ? err.message : "Network error",
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      className="text-xs font-bold uppercase tracking-[0.12em] text-destructive hover:underline disabled:opacity-50"
+    >
+      {busy ? "Cancelling…" : "Cancel"}
+    </button>
   )
 }
 
@@ -260,6 +319,8 @@ function StatusIcon({ status }: { status: JobStatus }) {
       return <CheckCircle2 className={cn(className, "text-emerald-600")} />
     case "failed":
       return <XCircle className={cn(className, "text-destructive")} />
+    case "cancelled":
+      return <Ban className={cn(className, "text-muted-foreground")} />
   }
 }
 
@@ -274,6 +335,10 @@ function announce(job: Job) {
           window.location.href = job.result_path ?? `/jobs/${job.id}`
         },
       },
+    })
+  } else if (job.status === "cancelled") {
+    toast.message(`${label} cancelled`, {
+      description: job.title,
     })
   } else {
     toast.error(`${label} failed`, {

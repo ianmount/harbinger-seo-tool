@@ -26,7 +26,25 @@ export type JobKind =
   | "technical_crawl"
   | "alt_tags"
 
-export type JobStatus = "queued" | "running" | "completed" | "failed"
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+
+/**
+ * Thrown by task code when it observes the job has been cancelled. The
+ * runner catches this and finalizes the row as `cancelled` (rather than
+ * `failed`, so the email + UI can distinguish user-initiated stops from
+ * actual failures).
+ */
+export class JobCancelledError extends Error {
+  constructor(jobId: string) {
+    super(`Job ${jobId} was cancelled`)
+    this.name = "JobCancelledError"
+  }
+}
 
 export interface JobProgress {
   stage?: string
@@ -199,4 +217,48 @@ export async function failJob(id: string, message: string): Promise<void> {
     })
     .eq("id", id)
   if (error) throw new Error(`failJob failed: ${error.message}`)
+}
+
+/**
+ * Mark a job as cancelled. Idempotent — calling on a terminal job is a
+ * no-op (the conditional update fails silently). Called from the cancel
+ * route AND from the runner's catch path when the task throws
+ * JobCancelledError.
+ *
+ * Cooperative: cancel() flips the row, then the running task observes
+ * `isCancelRequested(id)` at its next progress checkpoint and throws
+ * JobCancelledError. The runner finalizes via this same helper, which
+ * fills in completed_at the second time.
+ */
+export async function cancelJob(id: string, reason?: string): Promise<void> {
+  const supabase = getSupabase()
+  const { error } = await supabase
+    .from(TABLE)
+    .update({
+      status: "cancelled",
+      error: reason ?? "Cancelled by user",
+      completed_at: new Date().toISOString(),
+    })
+    .eq("id", id)
+    // Don't overwrite already-terminal rows. completed/failed jobs stay as
+    // they were; queued/running flip to cancelled.
+    .in("status", ["queued", "running"])
+  if (error) throw new Error(`cancelJob failed: ${error.message}`)
+}
+
+/**
+ * Has someone requested cancellation while this task is running? Tasks
+ * call this between expensive sub-steps (network requests, large
+ * computations) and throw JobCancelledError when it returns true.
+ *
+ * Best-effort: a transient DB error returns false (let the task keep
+ * running) rather than aborting on a hiccup.
+ */
+export async function isCancelRequested(id: string): Promise<boolean> {
+  try {
+    const job = await getJob(id)
+    return job?.status === "cancelled"
+  } catch {
+    return false
+  }
 }

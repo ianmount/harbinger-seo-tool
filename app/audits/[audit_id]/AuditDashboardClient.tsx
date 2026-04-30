@@ -27,7 +27,7 @@ import type { AssessmentAuditResult } from "@/lib/types"
 
 interface JobShape {
   id: string
-  status: "queued" | "running" | "completed" | "failed"
+  status: "queued" | "running" | "completed" | "failed" | "cancelled"
   title: string
   result: { audit: AssessmentAuditResult; costUsd?: number } | null
   progress: { stage?: string; detail?: string }
@@ -108,7 +108,10 @@ export function AuditDashboardClient({ auditId }: { auditId: string }) {
           // widget see the result. Only do it the first time we observe
           // completion to avoid clobbering the user's edits.
           setField("auditResult", auditResult)
-        } else if (body.job.status !== "failed") {
+        } else if (
+          body.job.status !== "failed" &&
+          body.job.status !== "cancelled"
+        ) {
           timer = setTimeout(tick, 3000)
         }
       } catch (err) {
@@ -200,6 +203,26 @@ export function AuditDashboardClient({ auditId }: { auditId: string }) {
               )}
             </div>
           </div>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  // Cancelled job — show short note + retry CTA.
+  if (!data && job && job.status === "cancelled") {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Audit cancelled</CardTitle>
+          <CardDescription>{job.title}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Link
+            href="/audit"
+            className="inline-flex items-center rounded-md bg-brand-navy px-4 py-2 font-sans text-[11.5px] font-bold uppercase tracking-[0.08em] text-brand-cream"
+          >
+            Run a new audit
+          </Link>
         </CardContent>
       </Card>
     )

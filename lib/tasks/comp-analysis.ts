@@ -1,0 +1,393 @@
+import "server-only"
+import { z } from "zod"
+import {
+  DFS_LABS_COUNTRY_CODE_US,
+  domainRankOverview,
+  indexedPageCount,
+  referringDomainCount,
+  serpRankedDomains,
+  type SerpRankedDomain,
+} from "@/lib/dataforseo"
+import type { TaskRunner } from "@/lib/inngest/functions"
+import {
+  isCancelRequested,
+  JobCancelledError,
+  updateProgress,
+} from "@/lib/jobs"
+import type {
+  CompAnalysisDomainRow,
+  CompAnalysisLocationRows,
+} from "@/lib/types"
+
+/**
+ * Competitive Analysis task. Lifted from /api/comp-analysis/run. SERP-based
+ * methodology: per (seed × location), probe DataForSEO at depth=100 and
+ * count how many seeds each domain ranks for in the top 3/10/20/100. Mix
+ * with per-domain referring-domains / pages-indexed / organic-traffic
+ * pulls (one per unique domain, country-level).
+ */
+
+const locationCompetitorsSchema = z.object({
+  location: z.string().min(1),
+  locationCode: z.number().int().positive(),
+  competitors: z.array(z.string().min(3)).max(20),
+})
+
+export const CompAnalysisInputSchema = z.object({
+  partnerUrl: z.string().min(3),
+  seedKeywords: z.array(z.string().min(1)).min(1).max(200),
+  locationCompetitors: z.array(locationCompetitorsSchema).min(1).max(10),
+})
+
+export type CompAnalysisInput = z.infer<typeof CompAnalysisInputSchema>
+
+const SERP_CONCURRENCY = 5
+const SERP_COST_USD = 0.002
+
+function cleanDomain(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^https?:\/\//i, "")
+    .replace(/^www\./i, "")
+    .replace(/\/.*$/, "")
+    .toLowerCase()
+}
+
+function compactThousands(n: number): string {
+  if (n >= 1000) {
+    return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`
+  }
+  return String(Math.round(n))
+}
+
+function domainMatchesRoot(serpDomain: string, rootDomain: string): boolean {
+  const s = serpDomain.toLowerCase().replace(/^www\./, "")
+  const r = rootDomain.toLowerCase().replace(/^www\./, "")
+  if (!s || !r) return false
+  return s === r || s.endsWith("." + r)
+}
+
+function bestRank(hits: SerpRankedDomain[], targetDomain: string): number | null {
+  let best: number | null = null
+  for (const h of hits) {
+    if (!domainMatchesRoot(h.domain, targetDomain)) continue
+    if (best == null || h.rankAbsolute < best) best = h.rankAbsolute
+  }
+  return best
+}
+
+interface DomainMetrics {
+  referringDomains: number
+  pagesIndexed: number
+  organicTrafficRaw: number
+}
+
+interface DomainMetricsResult extends DomainMetrics {
+  failed?: boolean
+  errors: string[]
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message.length > 220
+      ? `${err.message.slice(0, 217)}…`
+      : err.message
+  }
+  return String(err)
+}
+
+async function fetchDomainMetrics(domain: string): Promise<DomainMetricsResult> {
+  let referringDomains = 0
+  let pagesIndexed = 0
+  let organicTrafficRaw = 0
+  let failed = false
+  const errors: string[] = []
+  try {
+    referringDomains = await referringDomainCount(domain)
+  } catch (err) {
+    failed = true
+    errors.push(`referringDomainCount(${domain}): ${describeError(err)}`)
+  }
+  try {
+    pagesIndexed = await indexedPageCount(domain, DFS_LABS_COUNTRY_CODE_US)
+  } catch (err) {
+    failed = true
+    errors.push(`indexedPageCount(${domain}, country): ${describeError(err)}`)
+  }
+  try {
+    const overview = await domainRankOverview(domain, {
+      code: DFS_LABS_COUNTRY_CODE_US,
+    })
+    organicTrafficRaw = Math.round(overview.organicTraffic)
+  } catch (err) {
+    failed = true
+    errors.push(
+      `domainRankOverview(${domain}, country): ${describeError(err)}`,
+    )
+  }
+  return { referringDomains, pagesIndexed, organicTrafficRaw, failed, errors }
+}
+
+async function mapWithConcurrency<T, U>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<U>,
+): Promise<U[]> {
+  const results: U[] = new Array(items.length)
+  let next = 0
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    async () => {
+      while (true) {
+        const i = next++
+        if (i >= items.length) return
+        results[i] = await fn(items[i], i)
+      }
+    },
+  )
+  await Promise.all(workers)
+  return results
+}
+
+function csvEscape(v: string): string {
+  if (v.includes(",") || v.includes('"') || v.includes("\n")) {
+    return `"${v.replace(/"/g, '""')}"`
+  }
+  return v
+}
+
+function buildCsv(
+  rows: CompAnalysisLocationRows[],
+  seedCount: number,
+): string {
+  const lines: string[] = []
+  lines.push(
+    `# Top 3/10/20/100 reflects how many of your ${seedCount} approved target keywords each domain ranks for in the specified city. Numbers vary by city because rankings are measured against city-level Google SERPs.`,
+  )
+  lines.push(
+    "Website,Top 3,Top 10,Top 20,Top 100,Referring Domains,Pages Indexed,Organic Traffic",
+  )
+  for (const loc of rows) {
+    lines.push(",,,,,,,")
+    lines.push(`${csvEscape(loc.location)},,,,,,,`)
+    for (const d of loc.domains) {
+      lines.push(
+        [
+          csvEscape(d.domain),
+          d.top3,
+          d.top10,
+          d.top20,
+          d.top100,
+          d.referringDomains,
+          d.pagesIndexed,
+          csvEscape(d.organicTraffic),
+        ].join(","),
+      )
+    }
+  }
+  return lines.join("\n")
+}
+
+function buildRow(params: {
+  domain: string
+  isPartner: boolean
+  buckets: { top3: number; top10: number; top20: number; top100: number }
+  dm: DomainMetricsResult
+}): CompAnalysisDomainRow {
+  const { domain, isPartner, buckets, dm } = params
+  return {
+    domain,
+    isPartner,
+    top3: buckets.top3,
+    top10: buckets.top10,
+    top20: buckets.top20,
+    top100: buckets.top100,
+    referringDomains: dm.referringDomains,
+    pagesIndexed: dm.pagesIndexed,
+    organicTraffic: compactThousands(dm.organicTrafficRaw),
+    organicTrafficRaw: dm.organicTrafficRaw,
+    failed: dm.failed,
+  }
+}
+
+function bucketize(
+  domain: string,
+  seeds: string[],
+  hitsBySeed: Map<string, SerpRankedDomain[]>,
+): { top3: number; top10: number; top20: number; top100: number } {
+  let top3 = 0
+  let top10 = 0
+  let top20 = 0
+  let top100 = 0
+  for (const seed of seeds) {
+    const hits = hitsBySeed.get(seed)
+    if (!hits || hits.length === 0) continue
+    const rank = bestRank(hits, domain)
+    if (rank == null) continue
+    if (rank <= 3) top3++
+    if (rank <= 10) top10++
+    if (rank <= 20) top20++
+    if (rank <= 100) top100++
+  }
+  return { top3, top10, top20, top100 }
+}
+
+export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
+  const parsed = CompAnalysisInputSchema.safeParse(job.input)
+  if (!parsed.success) {
+    throw new Error(
+      `Invalid comp-analysis input: ${JSON.stringify(parsed.error.flatten())}`,
+    )
+  }
+  const body = parsed.data
+
+  const stage = async (label: string, detail?: string) => {
+    if (await isCancelRequested(jobId)) throw new JobCancelledError(jobId)
+    await updateProgress(jobId, { stage: label, detail }).catch(() => {})
+  }
+
+  const partnerDomain = cleanDomain(body.partnerUrl)
+
+  const locationCompetitors = body.locationCompetitors.map((lc) => {
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const c of lc.competitors) {
+      const cd = cleanDomain(c)
+      if (!cd || cd === partnerDomain || seen.has(cd)) continue
+      seen.add(cd)
+      out.push(cd)
+    }
+    return { ...lc, competitors: out }
+  })
+  if (locationCompetitors.some((lc) => lc.competitors.length === 0)) {
+    throw new Error(
+      "Every location must have at least one competitor. Add competitors per-location and run again.",
+    )
+  }
+
+  const uniqueDomains = new Set<string>([partnerDomain])
+  for (const lc of locationCompetitors) {
+    for (const c of lc.competitors) uniqueDomains.add(c)
+  }
+  const uniqueDomainsList = [...uniqueDomains]
+
+  const seeds = Array.from(
+    new Set(
+      body.seedKeywords
+        .map((k) => k.trim())
+        .filter((k) => k.length > 0)
+        .map((k) => k.toLowerCase()),
+    ),
+  )
+  if (seeds.length === 0) {
+    throw new Error("At least one seed keyword is required.")
+  }
+
+  const warnings: string[] = []
+
+  // 1. Domain-level metrics.
+  await stage("Pulling domain metrics", `${uniqueDomainsList.length} domains`)
+  const domainMetrics = new Map<string, DomainMetricsResult>()
+  const dmResults = await mapWithConcurrency(uniqueDomainsList, 3, (d) =>
+    fetchDomainMetrics(d),
+  )
+  for (let i = 0; i < uniqueDomainsList.length; i++) {
+    domainMetrics.set(uniqueDomainsList[i], dmResults[i])
+  }
+
+  // 2. SERP probes.
+  await stage(
+    "Probing SERPs",
+    `${seeds.length} seeds × ${locationCompetitors.length} locations`,
+  )
+  const serpTasks: Array<{ seed: string; locationIdx: number }> = []
+  for (const seed of seeds) {
+    for (let li = 0; li < locationCompetitors.length; li++) {
+      serpTasks.push({ seed, locationIdx: li })
+    }
+  }
+  interface SerpProbeResult {
+    hits: SerpRankedDomain[]
+    error: string | null
+  }
+  const serpResults = await mapWithConcurrency(
+    serpTasks,
+    SERP_CONCURRENCY,
+    async (t): Promise<SerpProbeResult> => {
+      const lc = locationCompetitors[t.locationIdx]
+      try {
+        const hits = await serpRankedDomains(
+          t.seed,
+          { code: lc.locationCode },
+          { depth: 100 },
+        )
+        return { hits, error: null }
+      } catch (err) {
+        const msg = `serp("${t.seed}", loc=${lc.locationCode} ${lc.location}): ${describeError(err)}`
+        return { hits: [], error: msg }
+      }
+    },
+  )
+
+  const serpByLocation: Array<Map<string, SerpRankedDomain[]>> =
+    locationCompetitors.map(() => new Map())
+  const serpErrors: Array<string[]> = locationCompetitors.map(() => [])
+  for (let i = 0; i < serpTasks.length; i++) {
+    const { seed, locationIdx } = serpTasks[i]
+    const r = serpResults[i]
+    serpByLocation[locationIdx].set(seed, r.hits)
+    if (r.error) serpErrors[locationIdx].push(r.error)
+  }
+
+  await stage("Building rows")
+
+  // 3. Build rows.
+  const rows: CompAnalysisLocationRows[] = []
+  for (let li = 0; li < locationCompetitors.length; li++) {
+    const lc = locationCompetitors[li]
+    const partnerRow = buildRow({
+      domain: partnerDomain,
+      isPartner: true,
+      buckets: bucketize(partnerDomain, seeds, serpByLocation[li]),
+      dm: domainMetrics.get(partnerDomain)!,
+    })
+    const competitorRows: CompAnalysisDomainRow[] = lc.competitors.map((d) =>
+      buildRow({
+        domain: d,
+        isPartner: false,
+        buckets: bucketize(d, seeds, serpByLocation[li]),
+        dm: domainMetrics.get(d)!,
+      }),
+    )
+    competitorRows.sort((a, b) => b.top10 - a.top10)
+    rows.push({
+      location: lc.location,
+      locationCode: lc.locationCode,
+      locationType: "",
+      domains: [partnerRow, ...competitorRows],
+    })
+  }
+
+  for (const [domain, dm] of domainMetrics) {
+    for (const e of dm.errors) warnings.push(`${domain} — ${e}`)
+  }
+  for (let li = 0; li < locationCompetitors.length; li++) {
+    const lc = locationCompetitors[li]
+    const errs = Array.from(new Set(serpErrors[li]))
+    for (const e of errs) warnings.push(`${lc.location} — ${e}`)
+  }
+
+  const csv = buildCsv(rows, seeds.length)
+
+  return {
+    result: {
+      rows,
+      csv,
+      warnings,
+      seedCount: seeds.length,
+      estimatedSerpCost:
+        seeds.length * locationCompetitors.length * SERP_COST_USD,
+    },
+    resultPath: `/comp-analysis?job=${jobId}`,
+  }
+}
