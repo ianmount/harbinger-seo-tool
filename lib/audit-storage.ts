@@ -34,14 +34,6 @@ function isBrowser(): boolean {
   return typeof window !== "undefined" && typeof window.sessionStorage !== "undefined"
 }
 
-export function generateAuditId(): string {
-  // Short, URL-safe, sortable. Doesn't need cryptographic strength — the
-  // page is auth-gated and the id only routes to in-tab storage.
-  const ts = Date.now().toString(36)
-  const rand = Math.random().toString(36).slice(2, 8)
-  return `${ts}-${rand}`
-}
-
 function readIndex(): string[] {
   if (!isBrowser()) return []
   try {

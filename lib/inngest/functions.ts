@@ -8,6 +8,7 @@ import {
   type JobKind,
   type JobRow,
 } from "@/lib/jobs"
+import { runAuditTask } from "@/lib/tasks/audit"
 import { inngest } from "./client"
 
 /**
@@ -31,7 +32,8 @@ export type TaskRunner = (ctx: TaskContext) => Promise<{
 }>
 
 const TASKS: Partial<Record<JobKind, TaskRunner>> = {
-  // Filled in by Phase 2 (audit) and Phase 3 (rest).
+  audit: runAuditTask,
+  // Phase 3 fills in: comp_analysis, initial_strategy, technical_crawl, alt_tags
 }
 
 /**
