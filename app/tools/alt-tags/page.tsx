@@ -191,7 +191,9 @@ export default function AltTagsPage() {
               disabled={running}
             />
             <p className="text-xs text-muted-foreground">
-              Cap on pages crawled (1-1000). Default 200.
+              Cap on pages crawled (1-1000). Default 200. Larger sites may
+              hit the 13-min function limit — split into two runs by
+              tightening the cap if you need full coverage.
             </p>
           </div>
 
