@@ -1,27 +1,44 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
 import { getPartner } from "@/lib/airtable"
+import {
+  computeNextRunAt,
+  type Frequency,
+  type TaskKind,
+} from "@/lib/scheduling"
 import { getSupabase } from "@/lib/supabase"
-import { computeNextRunAt } from "@/lib/technical-crawl"
 
 export const dynamic = "force-dynamic"
 
 /**
- * GET  /api/technical-crawls/subscriptions
- * POST /api/technical-crawls/subscriptions
+ * GET  /api/scheduled-tasks/subscriptions
+ * POST /api/scheduled-tasks/subscriptions
  *
- * One subscription per partner. POST upserts on partner_id so re-submitting
- * the same partner with a different schedule overwrites the previous one
- * cleanly (vs. erroring on the unique constraint).
+ * Unified schedule pipeline replacing the old per-kind crawl subscriptions
+ * routes. One row per (partner, kind) pair — POST upserts on that pair so
+ * re-submitting the same partner+kind with a different schedule overwrites
+ * the previous row cleanly (vs. erroring on the unique constraint).
  */
+
+const KIND_VALUES = ["technical_crawl", "full_audit"] as const
+
+const baseFields = {
+  partnerId: z.string().min(1),
+  kind: z.enum(KIND_VALUES),
+}
+
 const createSchema = z.discriminatedUnion("frequency", [
   z.object({
-    partnerId: z.string().min(1),
+    ...baseFields,
+    frequency: z.literal("daily"),
+  }),
+  z.object({
+    ...baseFields,
     frequency: z.literal("weekly"),
     dayOfWeek: z.number().int().min(0).max(6),
   }),
   z.object({
-    partnerId: z.string().min(1),
+    ...baseFields,
     frequency: z.literal("monthly"),
     dayOfMonth: z.number().int().min(1).max(31),
   }),
@@ -49,11 +66,11 @@ export async function GET() {
   if (!safe.ok) return safe.response
   const supabase = safe.client
   const { data, error } = await supabase
-    .from("crawl_subscriptions")
+    .from("task_schedules")
     .select("*")
     .order("partner_name", { ascending: true })
   if (error) {
-    console.error("[api/technical-crawls/subscriptions GET] failed:", error.message)
+    console.error("[api/scheduled-tasks/subscriptions GET] failed:", error.message)
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
   return NextResponse.json({ subscriptions: data ?? [] })
@@ -88,7 +105,9 @@ export async function POST(request: Request) {
 
   const dayOfWeek = body.frequency === "weekly" ? body.dayOfWeek : null
   const dayOfMonth = body.frequency === "monthly" ? body.dayOfMonth : null
-  const nextRunAt = computeNextRunAt(body.frequency, {
+  const frequency: Frequency = body.frequency
+  const kind: TaskKind = body.kind
+  const nextRunAt = computeNextRunAt(kind, frequency, {
     dayOfWeek,
     dayOfMonth,
   }).toISOString()
@@ -97,25 +116,26 @@ export async function POST(request: Request) {
   if (!safe.ok) return safe.response
   const supabase = safe.client
   const { data, error } = await supabase
-    .from("crawl_subscriptions")
+    .from("task_schedules")
     .upsert(
       {
         partner_id: partner.id,
         partner_name: partner.name,
-        frequency: body.frequency,
+        kind,
+        frequency,
         day_of_week: dayOfWeek,
         day_of_month: dayOfMonth,
         enabled: true,
         next_run_at: nextRunAt,
         updated_at: new Date().toISOString(),
       },
-      { onConflict: "partner_id" },
+      { onConflict: "partner_id,kind" },
     )
     .select("*")
     .single()
 
   if (error) {
-    console.error("[api/technical-crawls/subscriptions POST] failed:", error.message)
+    console.error("[api/scheduled-tasks/subscriptions POST] failed:", error.message)
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
   return NextResponse.json({ subscription: data })

@@ -37,6 +37,7 @@ export type JobKind =
   | "initial_strategy"
   | "technical_crawl"
   | "alt_tags"
+  | "full_audit"
 
 interface Job {
   id: string
