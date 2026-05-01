@@ -1,9 +1,9 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import { toast } from "sonner"
-import { Trash2 } from "lucide-react"
+import { ChevronLeft, ChevronRight, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   Table,
@@ -64,6 +64,23 @@ export function SchedulePipeline() {
   const [subs, setSubs] = useState<TaskSchedule[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [page, setPage] = useState(0)
+
+  const pageSize = 5
+  const totalPages = Math.max(1, Math.ceil(subs.length / pageSize))
+  // Clamp the current page when the underlying list shrinks (e.g. after a
+  // delete leaves the last page empty). useMemo so the page index settles
+  // before the slice computation runs.
+  const safePage = useMemo(
+    () => Math.min(page, totalPages - 1),
+    [page, totalPages],
+  )
+  const visibleSubs = useMemo(
+    () => subs.slice(safePage * pageSize, safePage * pageSize + pageSize),
+    [subs, safePage],
+  )
+  const rangeStart = subs.length === 0 ? 0 : safePage * pageSize + 1
+  const rangeEnd = Math.min(subs.length, safePage * pageSize + pageSize)
 
   async function reload() {
     setLoading(true)
@@ -207,7 +224,7 @@ export function SchedulePipeline() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {subs.map((s) => (
+              {visibleSubs.map((s) => (
                 <TableRow key={s.id}>
                   <TableCell className="font-medium">{s.partner_name}</TableCell>
                   <TableCell>{KIND_LABELS[s.kind]}</TableCell>
@@ -257,6 +274,40 @@ export function SchedulePipeline() {
               ))}
             </TableBody>
           </Table>
+          {subs.length > pageSize ? (
+            <div className="flex items-center justify-between border-t border-border bg-muted/20 px-4 py-2 text-xs text-muted-foreground">
+              <span className="tabular-nums">
+                Showing {rangeStart}–{rangeEnd} of {subs.length}
+              </span>
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setPage((p) => Math.max(0, p - 1))}
+                  disabled={safePage === 0}
+                  aria-label="Previous page"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                  Prev
+                </Button>
+                <span className="px-2 tabular-nums">
+                  Page {safePage + 1} of {totalPages}
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() =>
+                    setPage((p) => Math.min(totalPages - 1, p + 1))
+                  }
+                  disabled={safePage >= totalPages - 1}
+                  aria-label="Next page"
+                >
+                  Next
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          ) : null}
         </div>
       )}
     </section>

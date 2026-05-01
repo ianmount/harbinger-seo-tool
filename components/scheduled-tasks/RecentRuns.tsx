@@ -1,7 +1,8 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
+import { ChevronLeft, ChevronRight } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -48,6 +49,20 @@ export function RecentRuns() {
   const [runs, setRuns] = useState<RecentRun[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [page, setPage] = useState(0)
+
+  const pageSize = 5
+  const totalPages = Math.max(1, Math.ceil(runs.length / pageSize))
+  const safePage = useMemo(
+    () => Math.min(page, totalPages - 1),
+    [page, totalPages],
+  )
+  const visibleRuns = useMemo(
+    () => runs.slice(safePage * pageSize, safePage * pageSize + pageSize),
+    [runs, safePage],
+  )
+  const rangeStart = runs.length === 0 ? 0 : safePage * pageSize + 1
+  const rangeEnd = Math.min(runs.length, safePage * pageSize + pageSize)
 
   async function reload() {
     setLoading(true)
@@ -121,7 +136,7 @@ export function RecentRuns() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {runs.map((r) => (
+              {visibleRuns.map((r) => (
                 <TableRow key={r.id}>
                   <TableCell className="text-xs">
                     <div>{formatDate(r.created_at)}</div>
@@ -156,6 +171,40 @@ export function RecentRuns() {
               ))}
             </TableBody>
           </Table>
+          {runs.length > pageSize ? (
+            <div className="flex items-center justify-between border-t border-border bg-muted/20 px-4 py-2 text-xs text-muted-foreground">
+              <span className="tabular-nums">
+                Showing {rangeStart}–{rangeEnd} of {runs.length}
+              </span>
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setPage((p) => Math.max(0, p - 1))}
+                  disabled={safePage === 0}
+                  aria-label="Previous page"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                  Prev
+                </Button>
+                <span className="px-2 tabular-nums">
+                  Page {safePage + 1} of {totalPages}
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() =>
+                    setPage((p) => Math.min(totalPages - 1, p + 1))
+                  }
+                  disabled={safePage >= totalPages - 1}
+                  aria-label="Next page"
+                >
+                  Next
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          ) : null}
         </div>
       )}
     </section>
