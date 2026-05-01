@@ -1,21 +1,26 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
+import {
+  computeNextRunAt,
+  type Frequency,
+  type TaskKind,
+} from "@/lib/scheduling"
 import { getSupabase } from "@/lib/supabase"
-import { computeNextRunAt } from "@/lib/technical-crawl"
 
 export const dynamic = "force-dynamic"
 
 /**
- * PATCH  /api/technical-crawls/subscriptions/[id]   — toggle enabled / change schedule
- * DELETE /api/technical-crawls/subscriptions/[id]   — remove the subscription
+ * PATCH  /api/scheduled-tasks/subscriptions/[id]   — toggle enabled / change schedule
+ * DELETE /api/scheduled-tasks/subscriptions/[id]   — remove the subscription
  *
- * The id is the row's uuid (not partner_id). PATCH supports partial
- * updates: pass only the fields you want to change. Toggling `enabled`
- * does not advance `next_run_at`; changing `frequency` / `dayOf*` does.
+ * Partial updates: pass only the fields you want to change. Toggling
+ * `enabled` does not advance `next_run_at`; changing `frequency` /
+ * `dayOf*` does. The `kind` of an existing schedule is immutable —
+ * change a schedule's task type by deleting and recreating.
  */
 const patchSchema = z.object({
   enabled: z.boolean().optional(),
-  frequency: z.enum(["weekly", "monthly"]).optional(),
+  frequency: z.enum(["daily", "weekly", "monthly"]).optional(),
   dayOfWeek: z.number().int().min(0).max(6).nullable().optional(),
   dayOfMonth: z.number().int().min(1).max(31).nullable().optional(),
 })
@@ -53,10 +58,8 @@ export async function PATCH(
     )
   }
 
-  // Read existing row so we can compute next_run_at when the schedule
-  // changes and validate frequency/day-of-* consistency before writing.
   const existing = await supabase
-    .from("crawl_subscriptions")
+    .from("task_schedules")
     .select("*")
     .eq("id", id)
     .maybeSingle()
@@ -67,11 +70,12 @@ export async function PATCH(
     return NextResponse.json({ error: "Subscription not found" }, { status: 404 })
   }
 
-  const nextFrequency = body.frequency ?? existing.data.frequency
+  const nextFrequency: Frequency = (body.frequency ?? existing.data.frequency) as Frequency
   const nextDayOfWeek =
     body.dayOfWeek !== undefined ? body.dayOfWeek : existing.data.day_of_week
   const nextDayOfMonth =
     body.dayOfMonth !== undefined ? body.dayOfMonth : existing.data.day_of_month
+  const kind: TaskKind = existing.data.kind as TaskKind
 
   const update: Record<string, unknown> = {
     updated_at: new Date().toISOString(),
@@ -84,7 +88,12 @@ export async function PATCH(
     body.dayOfMonth !== undefined
 
   if (scheduleChanged) {
-    if (nextFrequency === "weekly") {
+    if (nextFrequency === "daily") {
+      update.frequency = "daily"
+      update.day_of_week = null
+      update.day_of_month = null
+      update.next_run_at = computeNextRunAt(kind, "daily").toISOString()
+    } else if (nextFrequency === "weekly") {
       if (nextDayOfWeek == null) {
         return NextResponse.json(
           { error: "weekly schedule requires dayOfWeek" },
@@ -94,7 +103,7 @@ export async function PATCH(
       update.frequency = "weekly"
       update.day_of_week = nextDayOfWeek
       update.day_of_month = null
-      update.next_run_at = computeNextRunAt("weekly", {
+      update.next_run_at = computeNextRunAt(kind, "weekly", {
         dayOfWeek: nextDayOfWeek,
       }).toISOString()
     } else {
@@ -107,14 +116,14 @@ export async function PATCH(
       update.frequency = "monthly"
       update.day_of_month = nextDayOfMonth
       update.day_of_week = null
-      update.next_run_at = computeNextRunAt("monthly", {
+      update.next_run_at = computeNextRunAt(kind, "monthly", {
         dayOfMonth: nextDayOfMonth,
       }).toISOString()
     }
   }
 
   const { data, error } = await supabase
-    .from("crawl_subscriptions")
+    .from("task_schedules")
     .update(update)
     .eq("id", id)
     .select("*")
@@ -122,7 +131,7 @@ export async function PATCH(
 
   if (error) {
     console.error(
-      `[api/technical-crawls/subscriptions/${id} PATCH] failed:`,
+      `[api/scheduled-tasks/subscriptions/${id} PATCH] failed:`,
       error.message,
     )
     return NextResponse.json({ error: error.message }, { status: 500 })
@@ -146,12 +155,12 @@ export async function DELETE(
     )
   }
   const { error } = await supabase
-    .from("crawl_subscriptions")
+    .from("task_schedules")
     .delete()
     .eq("id", id)
   if (error) {
     console.error(
-      `[api/technical-crawls/subscriptions/${id} DELETE] failed:`,
+      `[api/scheduled-tasks/subscriptions/${id} DELETE] failed:`,
       error.message,
     )
     return NextResponse.json({ error: error.message }, { status: 500 })

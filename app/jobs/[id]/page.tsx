@@ -41,6 +41,7 @@ const KIND_LABELS: Record<string, string> = {
   initial_strategy: "Initial Strategy",
   technical_crawl: "Technical Crawl",
   alt_tags: "Alt Tags",
+  full_audit: "Full Audit",
 }
 
 export default function JobsLandingPage() {

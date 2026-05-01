@@ -9,6 +9,7 @@ const KINDS = [
   "initial_strategy",
   "technical_crawl",
   "alt_tags",
+  "full_audit",
 ] as const
 
 const StartSchema = z.object({

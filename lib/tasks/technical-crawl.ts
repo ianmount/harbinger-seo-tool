@@ -1,6 +1,10 @@
 import "server-only"
 import { z } from "zod"
 import { getPartner } from "@/lib/airtable"
+import {
+  computeTechnicalCrawlAttention,
+  markJobAttention,
+} from "@/lib/attention"
 import type { TaskRunner } from "@/lib/inngest/functions"
 import {
   isCancelRequested,
@@ -11,14 +15,11 @@ import { getSupabase } from "@/lib/supabase"
 import { runTechnicalCrawl, TechnicalCrawlError } from "@/lib/technical-crawl"
 
 /**
- * Technical Crawl task. Wraps the existing `runTechnicalCrawl` engine,
- * persisting a row in `crawl_runs` exactly the way /api/technical-crawls/run
- * does. The legacy route stays for the desktop Routine bot (which uses
- * bearer-token auth, not the session cookie). This task path is for the
- * UI's Run Now button.
- *
- * Subscription bookkeeping (`computeNextRunAt` etc.) lives only in the
- * routine path — manual UI runs don't bump schedules.
+ * Technical Crawl task. Wraps the `runTechnicalCrawl` engine and persists
+ * a row in `crawl_runs` for both manual ("Run now" button on the schedule
+ * pipeline) and scheduled (fired by /api/scheduled-tasks/run) entry
+ * points. Schedule bookkeeping (next_run_at advancement, last_job_id) is
+ * the dispatcher's responsibility, not this task's.
  */
 
 export const TechnicalCrawlInputSchema = z
@@ -168,10 +169,11 @@ export const runTechnicalCrawlTask: TaskRunner = async ({ jobId, job }) => {
     throw new Error(`Supabase update failed: ${update.error.message}`)
   }
 
+  await markJobAttention(jobId, computeTechnicalCrawlAttention(result))
+
   return {
     result: { runId: crawlId, run: update.data },
-    // No per-run detail page yet — drop the user back at the History tab.
-    // The crawl_runs row id is on the result for future deep-linking.
-    resultPath: `/technical-crawls?view=history`,
+    // Per-run viewer reuses CrawlDetail; lives under /scheduled-tasks/runs/<crawlId>.
+    resultPath: `/scheduled-tasks/runs/${crawlId}`,
   }
 }

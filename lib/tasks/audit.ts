@@ -1,5 +1,9 @@
 import "server-only"
 import { z } from "zod"
+import {
+  computeFullAuditAttention,
+  markJobAttention,
+} from "@/lib/attention"
 import { createCostAccumulator, withAuditCost } from "@/lib/audit-cost"
 import { detectBrokenInternalLinks } from "@/lib/audit-broken-links"
 import { crawlSite } from "@/lib/audit-crawl"
@@ -590,15 +594,22 @@ async function synthesizeAudit(
   }
 }
 
-export const runAuditTask: TaskRunner = async ({ jobId, job }) => {
-  const parsed = AuditInputSchema.safeParse(job.input)
-  if (!parsed.success) {
-    throw new Error(
-      `Invalid audit input: ${JSON.stringify(parsed.error.flatten())}`,
-    )
-  }
-  const input = parsed.data
-
+/**
+ * Run the full audit pipeline from an already-validated input. Shared by
+ * `runAuditTask` (manual form-driven) and `runFullAuditTask` (scheduled,
+ * partner-driven). Caller is responsible for parsing/building the input.
+ *
+ * Returns the same shape as runAuditTask's TaskRunner contract so the
+ * dispatcher can complete the job uniformly regardless of which entry
+ * point produced the run.
+ */
+export async function runAuditPipeline(
+  jobId: string,
+  input: AuditInput,
+): Promise<{
+  result: { audit: AssessmentAuditResult; costUsd: number }
+  resultPath: string
+}> {
   const cost = createCostAccumulator()
   const result = await withAuditCost(cost, async () => {
     const bundle = await gatherAuditData(jobId, input)
@@ -621,8 +632,20 @@ export const runAuditTask: TaskRunner = async ({ jobId, job }) => {
     `[audit:done] job=${jobId} domain=${result.websiteUrl} duration=${result.durationSeconds}s cost=$${(cost.dataforseoUsd + cost.claudeUsd).toFixed(2)}`,
   )
 
+  await markJobAttention(jobId, computeFullAuditAttention(result))
+
   return {
     result: { audit: result, costUsd: cost.dataforseoUsd + cost.claudeUsd },
     resultPath: `/audits/${jobId}`,
   }
+}
+
+export const runAuditTask: TaskRunner = async ({ jobId, job }) => {
+  const parsed = AuditInputSchema.safeParse(job.input)
+  if (!parsed.success) {
+    throw new Error(
+      `Invalid audit input: ${JSON.stringify(parsed.error.flatten())}`,
+    )
+  }
+  return runAuditPipeline(jobId, parsed.data)
 }

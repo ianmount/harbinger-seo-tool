@@ -1,13 +1,18 @@
--- Schema for the Technical Crawls tab.
+-- Schema for the Scheduled Tasks tab (and supporting tables).
 --
 -- Run this once against a fresh Supabase project (Dashboard → SQL Editor →
 -- New query → paste → Run). Idempotent: every CREATE uses IF NOT EXISTS.
 --
 -- Tables:
---   crawl_runs           — one row per technical crawl (manual or routine).
---   crawl_subscriptions  — one row per partner enrolled in scheduled crawls.
+--   crawl_runs           — one row per technical crawl run (manual, ad-hoc,
+--                          or fired by a scheduled task).
+--   task_schedules       — unified schedule pipeline. One row per
+--                          (partner, task kind) pair. Replaces the older
+--                          per-partner-only crawl_subscriptions table.
+--   background_jobs      — one row per long-running task (crawls, audits,
+--                          comp analysis, etc.) fired through Inngest.
 --
--- The app accesses both tables exclusively via the service-role key from a
+-- The app accesses these tables exclusively via the service-role key from a
 -- Next.js server route, so RLS stays disabled. The whole app already sits
 -- behind APP_PASSWORD or a bearer token (see proxy.ts).
 
@@ -51,36 +56,56 @@ create index if not exists crawl_runs_partner_started_idx
 create index if not exists crawl_runs_started_idx
   on public.crawl_runs (started_at desc);
 
--- ── crawl_subscriptions ────────────────────────────────────────────────────
+-- ── task_schedules ─────────────────────────────────────────────────────────
+--
+-- Unified schedule pipeline for the Scheduled Tasks tab. One row per
+-- (partner_id, kind) pair — a partner can have one technical crawl AND one
+-- full audit on different cadences, but not two crawls. The desktop Routine
+-- bot polls this table for rows where enabled AND next_run_at <= now() and
+-- enqueues a matching background job for each.
+--
+-- Replaces the older crawl_subscriptions table; see the 2026-05-01 migration
+-- block at the bottom of this file for the one-time data move.
 
-create table if not exists public.crawl_subscriptions (
+create table if not exists public.task_schedules (
   id              uuid primary key default gen_random_uuid(),
-  partner_id      text not null unique,                       -- Airtable record id; one subscription per partner
+  partner_id      text not null,                              -- Airtable record id
   partner_name    text not null,
-  frequency       text not null check (frequency in ('weekly', 'monthly')),
-  -- 0=Sun..6=Sat for weekly. Null for monthly.
+  kind            text not null check (kind in ('technical_crawl', 'full_audit')),
+  frequency       text not null check (frequency in ('daily', 'weekly', 'monthly')),
+  -- 0=Sun..6=Sat for weekly. Null for daily/monthly.
   day_of_week     smallint check (day_of_week is null or (day_of_week >= 0 and day_of_week <= 6)),
-  -- 1..31 for monthly (clamped to month length at run time). Null for weekly.
+  -- 1..31 for monthly (clamped to month length at run time). Null for daily/weekly.
   day_of_month    smallint check (day_of_month is null or (day_of_month >= 1 and day_of_month <= 31)),
   enabled         boolean not null default true,
   -- next_run_at drives the Routine's "what's due" query. Server bumps this
-  -- after every successful crawl based on (frequency, day_*) using the
-  -- America/New_York timezone for "day boundary" math. Stored UTC.
+  -- after every successful run based on (frequency, day_*). Stored UTC.
   next_run_at     timestamptz not null,
   last_run_at     timestamptz,
-  last_crawl_id   uuid references public.crawl_runs(id) on delete set null,
+  -- Last background_jobs row id this schedule produced. Drives "View runs"
+  -- shortcuts in the UI.
+  last_job_id     uuid references public.background_jobs(id) on delete set null,
   created_at      timestamptz not null default now(),
   updated_at      timestamptz not null default now(),
-  -- Sanity: weekly rows must have day_of_week, monthly rows must have day_of_month.
-  constraint crawl_subscriptions_frequency_day_consistent
+  -- One schedule per (partner, kind) pair.
+  constraint task_schedules_partner_kind_unique unique (partner_id, kind),
+  -- Sanity:
+  --   daily   → both day_of_* null
+  --   weekly  → day_of_week set, day_of_month null
+  --   monthly → day_of_month set, day_of_week null
+  constraint task_schedules_frequency_day_consistent
     check (
-      (frequency = 'weekly'  and day_of_week is not null and day_of_month is null) or
+      (frequency = 'daily'   and day_of_week is null     and day_of_month is null)    or
+      (frequency = 'weekly'  and day_of_week is not null and day_of_month is null)    or
       (frequency = 'monthly' and day_of_month is not null and day_of_week is null)
     )
 );
 
-create index if not exists crawl_subscriptions_due_idx
-  on public.crawl_subscriptions (enabled, next_run_at);
+create index if not exists task_schedules_due_idx
+  on public.task_schedules (enabled, next_run_at);
+
+create index if not exists task_schedules_kind_idx
+  on public.task_schedules (kind, enabled);
 
 -- ── background_jobs ────────────────────────────────────────────────────────
 --
@@ -102,7 +127,8 @@ create table if not exists public.background_jobs (
     'comp_analysis',
     'initial_strategy',
     'technical_crawl',
-    'alt_tags'
+    'alt_tags',
+    'full_audit'
   )),
   status            text not null check (status in ('queued', 'running', 'completed', 'failed', 'cancelled')),
   title             text not null,
@@ -119,6 +145,15 @@ create table if not exists public.background_jobs (
   session_id        text not null,
   -- Where to render results. Used by the Jobs tray's "View" link.
   result_path       text,
+  -- Set by the task at finalize-time when the run produced findings worth
+  -- a human's attention (broken pages, high-severity audit findings, etc.).
+  -- Drives the "Needs Attention" dashboard on /scheduled-tasks. Heuristics
+  -- live in lib/attention/<kind>.ts.
+  needs_attention   boolean not null default false,
+  -- Human-readable summary of what flagged the row, used to render the
+  -- attention dashboard cards without re-parsing the full result.
+  -- Shape: { severity: 'high'|'medium'|'low', issues: [{title, detail?, count?}] }
+  attention_summary jsonb,
   created_at        timestamptz not null default now(),
   updated_at        timestamptz not null default now(),
   completed_at      timestamptz
@@ -177,3 +212,68 @@ alter table public.background_jobs
 alter table public.background_jobs
   add constraint background_jobs_status_check
   check (status in ('queued', 'running', 'completed', 'failed', 'cancelled'));
+
+-- 2026-05-01: add 'full_audit' to background_jobs.kind enum. The Scheduled
+-- Tasks tab introduces a second schedulable task kind that wraps the
+-- existing audit pipeline. Existing projects need this constraint widened
+-- before /api/jobs/start will accept the new kind.
+
+alter table public.background_jobs
+  drop constraint if exists background_jobs_kind_check;
+alter table public.background_jobs
+  add constraint background_jobs_kind_check
+  check (kind in (
+    'audit',
+    'comp_analysis',
+    'initial_strategy',
+    'technical_crawl',
+    'alt_tags',
+    'full_audit'
+  ));
+
+-- 2026-05-01: needs_attention + attention_summary columns on background_jobs.
+-- Drives the "Needs Attention" dashboard on the new Scheduled Tasks page.
+-- Existing rows default to false / null and never get back-filled — this
+-- is a forward-only signal computed by the task at finalize-time.
+
+alter table public.background_jobs
+  add column if not exists needs_attention boolean not null default false;
+
+alter table public.background_jobs
+  add column if not exists attention_summary jsonb;
+
+create index if not exists background_jobs_attention_idx
+  on public.background_jobs (needs_attention, completed_at desc)
+  where needs_attention = true;
+
+-- 2026-05-01: migrate crawl_subscriptions → task_schedules.
+--
+-- The new task_schedules table is a generalization of the old
+-- crawl_subscriptions table that supports multiple task kinds per partner
+-- and adds 'daily' as a frequency option. This block copies any existing
+-- crawl_subscriptions rows over with kind='technical_crawl' and then drops
+-- the old table.
+--
+-- Idempotent: the INSERT uses ON CONFLICT DO NOTHING so re-running this
+-- file after the migration has already executed is a no-op. The DROP is
+-- guarded by IF EXISTS for the same reason.
+
+do $$
+begin
+  if to_regclass('public.crawl_subscriptions') is not null then
+    insert into public.task_schedules (
+      partner_id, partner_name, kind, frequency,
+      day_of_week, day_of_month, enabled,
+      next_run_at, last_run_at, created_at, updated_at
+    )
+    select
+      partner_id, partner_name, 'technical_crawl', frequency,
+      day_of_week, day_of_month, enabled,
+      next_run_at, last_run_at, created_at, updated_at
+    from public.crawl_subscriptions
+    on conflict (partner_id, kind) do nothing;
+  end if;
+end;
+$$;
+
+drop table if exists public.crawl_subscriptions;

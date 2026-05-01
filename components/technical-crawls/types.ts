@@ -1,10 +1,8 @@
 /**
- * Shared client-side row shapes for the Technical Crawls tab.
- *
- * These are intentionally hand-typed (not derived from Supabase types) and
- * mirror what the API returns. The server-side engine types live in
- * `lib/technical-crawl.ts` — those are the source of truth for the JSONB
- * column contents; this file just describes the row envelope.
+ * Crawl row shapes for the CrawlDetail component. The schedule pipeline
+ * has moved to /scheduled-tasks; this file is now scoped to the per-run
+ * detail viewer at /scheduled-tasks/runs/[id], which still consumes the
+ * /api/technical-crawls/runs/[id] endpoint for the heavy JSONB payload.
  */
 
 import type {
@@ -18,9 +16,8 @@ import type { SchemaCoverageMatrix } from "@/lib/types"
 
 export type CrawlSource = "manual" | "routine"
 export type CrawlStatus = "running" | "done" | "failed"
-export type Frequency = "weekly" | "monthly"
 
-/** Shallow row returned by /list — heavy JSONB columns omitted. */
+/** Shallow row returned by /api/technical-crawls/list. */
 export interface CrawlRunListItem {
   id: string
   partner_id: string | null
@@ -34,7 +31,7 @@ export interface CrawlRunListItem {
   cost_usd: number | null
 }
 
-/** Full crawl row returned by /runs/[id]. */
+/** Full crawl row returned by /api/technical-crawls/runs/[id]. */
 export interface CrawlRunFull extends CrawlRunListItem {
   summary: TechnicalCrawlSummary | null
   lighthouse: TechnicalCrawlLighthouse | null
@@ -43,19 +40,4 @@ export interface CrawlRunFull extends CrawlRunListItem {
   sample_pages: TechnicalSamplePage[] | null
   issue_pages: TechnicalIssuePages | null
   errors: string[] | null
-}
-
-export interface Subscription {
-  id: string
-  partner_id: string
-  partner_name: string
-  frequency: Frequency
-  day_of_week: number | null
-  day_of_month: number | null
-  enabled: boolean
-  next_run_at: string
-  last_run_at: string | null
-  last_crawl_id: string | null
-  created_at: string
-  updated_at: string
 }

@@ -25,6 +25,7 @@ export type JobKind =
   | "initial_strategy"
   | "technical_crawl"
   | "alt_tags"
+  | "full_audit"
 
 export type JobStatus =
   | "queued"
@@ -77,6 +78,7 @@ export const KIND_LABELS: Record<JobKind, string> = {
   initial_strategy: "Initial Strategy",
   technical_crawl: "Technical Crawl",
   alt_tags: "Alt Tags",
+  full_audit: "Full Audit",
 }
 
 // ── Session id ─────────────────────────────────────────────────────────────

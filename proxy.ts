@@ -19,13 +19,27 @@ function isPublicPath(pathname: string): boolean {
 
 /**
  * Bearer-token auth for the Claude Code desktop Routine that drives
- * scheduled technical crawls. The Routine runs from the user's machine and
- * can't carry the cookie set by /login, so we accept `Authorization: Bearer
- * <ROUTINE_API_TOKEN>` for the /api/technical-crawls/* prefix only. Constant
- * time compare via timingSafeEqual to avoid a length-leaking shortcut.
+ * scheduled tasks. The Routine runs from the user's machine and can't
+ * carry the cookie set by /login, so we accept `Authorization: Bearer
+ * <ROUTINE_API_TOKEN>` for the routine-facing API prefixes only.
+ *
+ * Allowed prefixes:
+ *   /api/scheduled-tasks/   — current dispatcher (sweeps task_schedules,
+ *                             fires audits + crawls in one call)
+ *   /api/technical-crawls/  — legacy endpoint kept around so existing
+ *                             desktop routines don't break before users
+ *                             update the bot to point at the new path
+ *
+ * Constant-time compare via timingSafeEqual to avoid a length-leaking
+ * shortcut.
  */
+const ROUTINE_PREFIXES = [
+  "/api/scheduled-tasks/",
+  "/api/technical-crawls/",
+] as const
+
 function isRoutineAuthorized(request: NextRequest, pathname: string): boolean {
-  if (!pathname.startsWith("/api/technical-crawls/")) return false
+  if (!ROUTINE_PREFIXES.some((p) => pathname.startsWith(p))) return false
   const expected = process.env.ROUTINE_API_TOKEN
   if (!expected) return false
   const header = request.headers.get("authorization")
