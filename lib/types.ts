@@ -1,4 +1,5 @@
 import type { BrokenInternalLinks } from "@/lib/audit-broken-links"
+import type { HeadingIssues } from "@/lib/audit-h-tags"
 import type { UrlStructureIssues } from "@/lib/audit-url-structure"
 
 /**
@@ -660,6 +661,21 @@ export interface BacklinkProfileDomain {
  * from `BacklinkReport`, which is the spammy-domain example list rendered
  * in the existing Backlink Risk PDF page.
  */
+/**
+ * One bucket from `/v3/backlinks/timeseries_summary/live`. The endpoint
+ * returns one row per group_range (we use "month") with the cumulative
+ * counts as of that date. Two consecutive months can be diffed to derive
+ * net growth.
+ */
+export interface BacklinkTimeseriesPoint {
+  /** ISO date of the bucket (YYYY-MM-DD; first day of month for monthly). */
+  date: string
+  /** Total live backlinks as of this date. */
+  backlinks: number
+  /** Total referring domains as of this date. */
+  referringDomains: number
+}
+
 export interface BacklinkProfile {
   domain: string
   totalBacklinks: number
@@ -680,6 +696,13 @@ export interface BacklinkProfile {
   sampleLowQualityLinks: BacklinkProfileDomain[]
   /** Up to 100 referring domains by domain_rank desc, with spam scores joined. */
   topReferringDomains: BacklinkProfileDomain[]
+  /**
+   * Monthly time-series of total backlinks + referring domains. Populated
+   * by `lib/tasks/audit.ts` after a parallel call to
+   * `backlinksTimeseriesSummary()`. May be empty if the call failed; the
+   * synthesis prompt skips the growth section when this is empty/missing.
+   */
+  monthlyTimeseries?: BacklinkTimeseriesPoint[]
 }
 
 // ── GSC / GA4 slices the audit passes to Claude ───────────────────────────
@@ -1172,6 +1195,33 @@ export interface AssessmentGscData {
    * attempted (e.g. site verification mismatch). See `IndexCoverageReport`.
    */
   indexCoverage: IndexCoverageReport | null
+  /**
+   * Branded vs non-branded split of `topQueries`, derived heuristically from
+   * the partner display name + apex domain. Populated by `lib/tasks/audit.ts`.
+   * Optional for backwards compatibility with stored audit results predating
+   * this field. See `lib/branded-keywords.ts`.
+   */
+  brandedSplit?: BrandedQuerySplit | null
+}
+
+/**
+ * Branded vs non-branded breakdown of GSC queries. Mirrors the in-memory
+ * `BrandedSplit` from `lib/branded-keywords.ts` — duplicated here so the
+ * shape is part of the public types contract.
+ */
+export interface BrandedQuerySplit {
+  brandTokens: string[]
+  totalQueries: number
+  brandedQueries: number
+  nonBrandedQueries: number
+  brandedClicks: number
+  nonBrandedClicks: number
+  brandedImpressions: number
+  nonBrandedImpressions: number
+  brandedSharePctClicks: number
+  brandedSharePctImpressions: number
+  topBrandedQueries: GSCTopQueryRow[]
+  topNonBrandedQueries: GSCTopQueryRow[]
 }
 
 /** GA4 slice the assessment Audit tab returns to the client. */
@@ -1274,6 +1324,8 @@ export interface AuditDataBundle {
   backlinkProfile: BacklinkProfile | null
   urlStructureIssues: UrlStructureIssues | null
   brokenInternalLinks: BrokenInternalLinks | null
+  /** Heading-structure analysis (missing H1, multiple H1, missing H2). */
+  headingIssues: HeadingIssues | null
   metaUnreliable: boolean
   /** Pre-computed for the client so it doesn't need to re-summarize. */
   crawlSummary: AuditCrawlSummary

@@ -6,6 +6,7 @@ import type {
   BacklinkProfile,
   BacklinkProfileDomain,
   BacklinkReport,
+  BacklinkTimeseriesPoint,
   CompetitionLevel,
   DfsLabsLocation,
   DfsLocation,
@@ -1130,4 +1131,69 @@ export async function backlinkProfile(domain: string): Promise<BacklinkProfile> 
     sampleLowQualityLinks,
     topReferringDomains: enriched,
   }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Backlink growth pattern. Monthly time-series of total backlinks + total
+// referring domains for the last ~13 months. Drives the "growth pattern"
+// finding in the audit (steady accrual, sudden spikes that often correlate
+// with link-buying, or decline that flags lost relationships).
+
+const backlinksTimeseriesItemSchema = z
+  .object({
+    date: z.string(),
+    backlinks: z.number().nullable().optional(),
+    referring_domains: z.number().nullable().optional(),
+  })
+  .passthrough()
+
+/**
+ * /v3/backlinks/timeseries_summary/live
+ *
+ * Returns one item per group_range bucket (default `month`). DataForSEO
+ * accepts ISO date strings for `date_from` / `date_to`. We default to a
+ * 13-month window so the chart can show the last completed year + the
+ * partial current month for trend continuity.
+ */
+export async function backlinksTimeseriesSummary(
+  domain: string,
+  opts: {
+    dateFrom?: string
+    dateTo?: string
+    groupRange?: "day" | "week" | "month"
+  } = {},
+): Promise<BacklinkTimeseriesPoint[]> {
+  const target = stripDomain(domain)
+
+  const today = new Date()
+  const thirteenMonthsAgo = new Date(today)
+  thirteenMonthsAgo.setUTCMonth(thirteenMonthsAgo.getUTCMonth() - 13)
+
+  const params = {
+    target,
+    date_from: opts.dateFrom ?? thirteenMonthsAgo.toISOString().slice(0, 10),
+    date_to: opts.dateTo ?? today.toISOString().slice(0, 10),
+    group_range: opts.groupRange ?? "month",
+    backlinks_status_type: "live",
+  }
+  const envelope = await dfsRequest("/v3/backlinks/timeseries_summary/live", [
+    params,
+  ])
+  const result = envelope.tasks[0]?.result?.[0] as
+    | { items?: unknown[] }
+    | undefined
+  const items = result?.items ?? []
+  const out: BacklinkTimeseriesPoint[] = []
+  for (const raw of items) {
+    const parsed = backlinksTimeseriesItemSchema.safeParse(raw)
+    if (!parsed.success) continue
+    out.push({
+      date: parsed.data.date,
+      backlinks: parsed.data.backlinks ?? 0,
+      referringDomains: parsed.data.referring_domains ?? 0,
+    })
+  }
+  // Sort ascending by date so chart + delta math don't have to.
+  out.sort((a, b) => a.date.localeCompare(b.date))
+  return out
 }

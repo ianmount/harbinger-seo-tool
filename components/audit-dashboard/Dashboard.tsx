@@ -3,6 +3,7 @@
 import { useMemo } from "react"
 import ReactMarkdown from "react-markdown"
 import rehypeRaw from "rehype-raw"
+import rehypeSlug from "rehype-slug"
 import { Section } from "./Section"
 import { Toc } from "./Toc"
 import { SortableTable, type ColumnDef } from "./SortableTable"
@@ -49,6 +50,18 @@ export function Dashboard({
       items.push({ id: "opportunities", label: "Top Opportunities" })
     if (data.topPages) items.push({ id: "top-pages", label: "Top Pages" })
     if (data.performance) items.push({ id: "performance", label: "Site Health" })
+    // In-narrative sections — anchor IDs match the rehype-slug output for the
+    // matching ## headings emitted by buildSynthesisPrompt + Claude. Gated on
+    // narrative.outline so we don't surface dead links if Claude renames or
+    // omits a section.
+    const outlineHas = (id: string) =>
+      data.narrative.outline.some((o) => o.id === id)
+    if (outlineHas("backlink-profile"))
+      items.push({ id: "backlink-profile", label: "Backlinks" })
+    if (outlineHas("heading-structure-h1h2"))
+      items.push({ id: "heading-structure-h1h2", label: "H1/H2 Headings" })
+    if (outlineHas("image-alt-text-coverage"))
+      items.push({ id: "image-alt-text-coverage", label: "Alt Tags" })
     items.push({ id: "narrative", label: "Full Narrative" })
     return items
   }, [data])
@@ -605,10 +618,12 @@ function NarrativeSection({ markdown }: { markdown: string }) {
       eyebrow="§ 10"
       title="Full Audit Narrative"
       meta="Claude's full synthesis — supports the structured sections above."
-      defaultOpen={false}
+      defaultOpen
     >
-      <article className="prose prose-sm max-w-none prose-headings:font-sans prose-headings:font-extrabold prose-headings:tracking-[-0.005em] prose-h1:text-[22px] prose-h2:text-[18px] prose-h3:text-[14.5px] prose-strong:text-foreground prose-a:text-foreground prose-a:underline prose-a:decoration-line">
-        <ReactMarkdown rehypePlugins={[rehypeRaw]}>{markdown}</ReactMarkdown>
+      <article className="prose prose-sm max-w-none prose-headings:font-sans prose-headings:font-extrabold prose-headings:tracking-[-0.005em] prose-h1:text-[22px] prose-h2:text-[18px] prose-h3:text-[14.5px] prose-headings:scroll-mt-28 prose-strong:text-foreground prose-a:text-foreground prose-a:underline prose-a:decoration-line">
+        <ReactMarkdown rehypePlugins={[rehypeRaw, rehypeSlug]}>
+          {markdown}
+        </ReactMarkdown>
       </article>
     </Section>
   )
