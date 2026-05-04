@@ -31,13 +31,13 @@ const SECTIONS: TileSection[] = [
       {
         href: "/audit",
         label: "Audit",
-        description: "Pre-sales SEO audit → polished PDF report for prospects",
+        description: "Pre-sales SEO audit → polished PDF report",
         icon: FileSearch,
       },
       {
         href: "/comp-analysis",
         label: "Comp Analysis",
-        description: "Competitive landscape analysis and keyword gap identification",
+        description: "Competitive landscape and keyword gap analysis",
         icon: BarChart2,
       },
     ],
@@ -48,13 +48,13 @@ const SECTIONS: TileSection[] = [
       {
         href: "/partners",
         label: "Partner Dashboard",
-        description: "View and manage all active partner accounts",
+        description: "View and manage active partner accounts",
         icon: Users,
       },
       {
         href: "/strategy",
         label: "Strategy",
-        description: "Generate and refine keyword strategy documents with Claude",
+        description: "Generate keyword strategy documents with Claude",
         icon: Target,
       },
     ],
@@ -65,13 +65,13 @@ const SECTIONS: TileSection[] = [
       {
         href: "/keyword-research",
         label: "Keyword Research",
-        description: "GSC queries + DataForSEO volume and difficulty scoring",
+        description: "GSC queries + DataForSEO volume and difficulty",
         icon: Search,
       },
       {
         href: "/scheduled-tasks",
         label: "Scheduled Tasks",
-        description: "Manage recurring SEO tasks and automation runs",
+        description: "Manage recurring SEO tasks and automation",
         icon: Clock,
       },
       {
@@ -83,7 +83,7 @@ const SECTIONS: TileSection[] = [
       {
         href: "/tools/dataforseo",
         label: "DataForSEO APIs",
-        description: "Direct access to DataForSEO API endpoints for ad-hoc queries",
+        description: "Direct access to DataForSEO API endpoints",
         icon: Code2,
       },
     ],
@@ -92,55 +92,38 @@ const SECTIONS: TileSection[] = [
 
 export default function Home() {
   return (
-    <div className="space-y-12 py-2">
-      <header>
-        <p className="eyebrow eyebrow-red">Harbinger · Internal</p>
-        <h1 className="mt-2 font-serif text-[34px] font-medium italic leading-[1.08] tracking-[-0.01em] text-foreground">
-          The SEO cycle,{" "}
-          <b className="font-sans font-extrabold not-italic">end&#8209;to&#8209;end</b>, for every
-          partner.
-        </h1>
-        <p className="mt-3 max-w-[600px] font-serif text-[15px] leading-relaxed text-ink-2">
-          Choose a workflow below. Each section wraps one or more external APIs —{" "}
-          <b className="font-sans font-extrabold text-foreground not-italic">DataForSEO</b>,{" "}
-          <b className="font-sans font-extrabold text-foreground not-italic">GSC</b>,{" "}
-          <b className="font-sans font-extrabold text-foreground not-italic">GA4</b>, and{" "}
-          <b className="font-sans font-extrabold text-foreground not-italic">Claude</b> — and
-          produces one artifact.
-        </p>
-      </header>
+    <div className="space-y-8 py-2">
+      <h1 className="font-sans text-[22px] font-extrabold tracking-[-0.005em] text-foreground">
+        Harbinger SEO Tool
+      </h1>
 
-      <div className="space-y-10">
+      <div className="space-y-6">
         {SECTIONS.map((section) => (
           <section key={section.label}>
-            <div className="mb-4 border-t border-dashed border-line-strong pt-5">
-              <h2 className="font-sans text-[10px] font-extrabold uppercase tracking-[0.22em] text-ink-3">
-                {section.label}
-              </h2>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <h2 className="mb-3 font-sans text-[10px] font-extrabold uppercase tracking-[0.22em] text-ink-3">
+              {section.label}
+            </h2>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
               {section.items.map((item) => {
                 const Icon = item.icon
                 return (
                   <Link
                     key={item.href}
                     href={item.href}
-                    className="group flex flex-col gap-4 rounded-xl border border-line bg-card p-5 shadow-sm transition-all hover:border-brand-navy/25 hover:shadow-md"
+                    className="group flex items-center gap-3 rounded-lg border border-line bg-card px-4 py-3 shadow-sm transition-all hover:border-brand-navy/25 hover:shadow-md"
                   >
-                    <div className="flex items-start justify-between">
-                      <div className="rounded-lg bg-brand-navy/8 p-2.5">
-                        <Icon className="h-5 w-5 text-brand-navy" />
-                      </div>
-                      <ArrowRight className="mt-1 h-4 w-4 text-ink-3 transition-transform group-hover:translate-x-0.5" />
+                    <div className="shrink-0 rounded-md bg-brand-navy/8 p-1.5">
+                      <Icon className="h-4 w-4 text-brand-navy" />
                     </div>
-                    <div>
-                      <h3 className="font-sans text-[14px] font-extrabold tracking-[-0.005em] text-foreground">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-sans text-[13px] font-extrabold tracking-[-0.005em] text-foreground">
                         {item.label}
-                      </h3>
-                      <p className="mt-1 font-serif text-[13px] leading-snug text-ink-2">
+                      </p>
+                      <p className="mt-0.5 truncate font-serif text-[11.5px] text-ink-3">
                         {item.description}
                       </p>
                     </div>
+                    <ArrowRight className="ml-auto h-3.5 w-3.5 shrink-0 text-ink-3 transition-transform group-hover:translate-x-0.5" />
                   </Link>
                 )
               })}
