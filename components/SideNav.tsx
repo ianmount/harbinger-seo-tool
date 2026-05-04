@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils"
 type Tab = { href: string; label: string }
 
 type Section = {
-  key: "assessments" | "onboarding" | "ongoing" | "tools"
+  key: "assessments" | "ongoing" | "tools"
   label: string
   tabs: Tab[]
 }
@@ -22,18 +22,11 @@ const SECTIONS: Section[] = [
     ],
   },
   {
-    key: "onboarding",
-    label: "Onboarding",
-    tabs: [{ href: "/onboarding/initial-strategy", label: "Initial Strategy" }],
-  },
-  {
     key: "ongoing",
     label: "Ongoing",
     tabs: [
       { href: "/partners", label: "Partner Dashboard" },
       { href: "/strategy", label: "Strategy" },
-      { href: "/content", label: "Content" },
-      { href: "/backlinks", label: "Backlinks" },
     ],
   },
   {
