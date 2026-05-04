@@ -30,10 +30,10 @@ const SECTIONS: Section[] = [
     key: "ongoing",
     label: "Ongoing",
     tabs: [
+      { href: "/partners", label: "Partner Dashboard" },
       { href: "/strategy", label: "Strategy" },
       { href: "/content", label: "Content" },
       { href: "/backlinks", label: "Backlinks" },
-      { href: "/reporting", label: "Reporting" },
     ],
   },
   {

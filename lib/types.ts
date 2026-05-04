@@ -1585,3 +1585,53 @@ export interface InitialStrategyOutput {
   /** Non-fatal issues for the UI to surface (e.g. "12 keywords were not used"). */
   warnings: string[]
 }
+
+// ── Partner Dashboard ────────────────────────────────────────────────────────
+
+/** Aggregated GSC metrics over a date range. */
+export interface PartnerSnapshotPeriod {
+  clicks: number
+  impressions: number
+  /** Weighted average position, null when impressions = 0. */
+  avgPosition: number | null
+  /** clicks / impressions, 0 when impressions = 0. */
+  avgCtr: number
+}
+
+/** Latest scheduled-task run stub for the dashboard tile. */
+export interface PartnerSnapshotRun {
+  id: string
+  kind: string
+  status: string
+  needsAttention: boolean
+  attentionSummary: unknown | null
+  completedAt: string | null
+  resultPath: string | null
+}
+
+/**
+ * One row returned by GET /api/partners/snapshot. Contains the partner record
+ * plus aggregated GSC/GA4 metrics for the requested date range and the
+ * immediately-prior period of equal length (for deltas).
+ */
+export interface PartnerSnapshot {
+  partner: Partner
+  /** Best-matched GSC siteUrl for this partner, or null if no match. */
+  gscSiteUrl: string | null
+  /** Resolved GA4 property ID (full "properties/X" form), or null if no match. */
+  ga4PropertyId: string | null
+  /** Metrics for the requested date range; null on GSC error or no site. */
+  current: PartnerSnapshotPeriod | null
+  /** Metrics for the equal-length prior period; null on error or no site. */
+  prior: PartnerSnapshotPeriod | null
+  /** GA4 totals for the current period; null if no property or fetch failed. */
+  ga4: {
+    sessions: number
+    conversions: number
+    conversionsConfigured: boolean
+  } | null
+  /** Most-recent scheduled task run for this partner; null if none. */
+  latestRun: PartnerSnapshotRun | null
+  /** Non-fatal error message (e.g. GSC fetch failed). */
+  error: string | null
+}
