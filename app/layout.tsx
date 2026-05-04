@@ -2,6 +2,7 @@ import "@/lib/env";
 import type { Metadata } from "next";
 import { Montserrat, Source_Serif_4 } from "next/font/google";
 import { AppShell } from "@/components/AppShell";
+import { ThemeProvider } from "@/components/ThemeProvider";
 import "./globals.css";
 
 const montserrat = Montserrat({
@@ -31,9 +32,12 @@ export default function RootLayout({
     <html
       lang="en"
       className={`${montserrat.variable} ${sourceSerif.variable} h-full antialiased`}
+      suppressHydrationWarning
     >
       <body className="min-h-full flex flex-col">
-        <AppShell>{children}</AppShell>
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+          <AppShell>{children}</AppShell>
+        </ThemeProvider>
       </body>
     </html>
   );

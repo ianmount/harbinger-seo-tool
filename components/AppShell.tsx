@@ -7,6 +7,7 @@ import { Menu, X } from "lucide-react"
 import { ChatBaseContextSync, ChatWidget } from "@/components/ChatWidget"
 import { JobsTray } from "@/components/JobsTray"
 import { SideNav } from "@/components/SideNav"
+import { ThemeToggle } from "@/components/ThemeToggle"
 import { Toaster } from "@/components/ui/sonner"
 import { AssessmentProvider } from "@/lib/assessment-context"
 import { ChatProvider } from "@/lib/chat-context"
@@ -136,7 +137,8 @@ export function AppShell({ children }: { children: ReactNode }) {
                     <Menu className="h-5 w-5" />
                   </button>
                 )}
-                <div className="ml-auto flex items-center gap-2">
+                <div className="ml-auto flex items-center gap-1">
+                  <ThemeToggle />
                   <JobsTray />
                 </div>
               </div>
