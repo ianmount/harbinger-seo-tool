@@ -1,12 +1,13 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import type { DateRange } from "react-day-picker"
-import { CalendarIcon, RefreshCwIcon } from "lucide-react"
+import { CalendarIcon, RefreshCwIcon, SearchIcon, XIcon } from "lucide-react"
 import { PageHeader } from "@/components/PageHeader"
 import { PartnerTile } from "@/components/partner-dashboard/PartnerTile"
 import { Button } from "@/components/ui/button"
 import { Calendar } from "@/components/ui/calendar"
+import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 import type { PartnerSnapshot } from "@/lib/types"
@@ -45,6 +46,7 @@ export default function PartnerDashboardPage() {
   const [range, setRange] = useState<DateRange | undefined>(defaultRange)
   const [popoverOpen, setPopoverOpen] = useState(false)
   const [state, setState] = useState<LoadState>({ status: "idle" })
+  const [search, setSearch] = useState("")
 
   const load = useCallback(
     async (r: DateRange | undefined, bust = false) => {
@@ -106,6 +108,17 @@ export default function PartnerDashboardPage() {
       ? state.snapshots.filter((s) => s.latestRun?.needsAttention).length
       : 0
 
+  const filteredSnapshots = useMemo(() => {
+    if (state.status !== "done") return []
+    const q = search.trim().toLowerCase()
+    if (!q) return state.snapshots
+    return state.snapshots.filter((s) => {
+      const name = s.partner.name.toLowerCase()
+      const website = s.partner.website.toLowerCase()
+      return name.includes(q) || website.includes(q)
+    })
+  }, [state, search])
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -164,6 +177,28 @@ export default function PartnerDashboardPage() {
           <span className="ml-1.5">Refresh</span>
         </Button>
 
+        <div className="relative w-[260px]">
+          <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search partners…"
+            className="h-9 pl-8 pr-8 text-sm"
+            aria-label="Search partners by name or website"
+          />
+          {search && (
+            <button
+              type="button"
+              onClick={() => setSearch("")}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded text-muted-foreground hover:text-foreground"
+              aria-label="Clear search"
+            >
+              <XIcon className="size-3.5" />
+            </button>
+          )}
+        </div>
+
         {state.status === "done" && (
           <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
             {hasAttention > 0 && (
@@ -177,7 +212,10 @@ export default function PartnerDashboardPage() {
               </span>
             )}
             <span>
-              {state.snapshots.length} partners ·{" "}
+              {search
+                ? `${filteredSnapshots.length} of ${state.snapshots.length}`
+                : `${state.snapshots.length} partners`}{" "}
+              ·{" "}
               {new Date(state.cachedAt).toLocaleTimeString(undefined, {
                 hour: "numeric",
                 minute: "2-digit",
@@ -212,9 +250,17 @@ export default function PartnerDashboardPage() {
         <p className="text-sm text-muted-foreground">No partners found in Airtable.</p>
       )}
 
-      {state.status === "done" && state.snapshots.length > 0 && (
+      {state.status === "done" &&
+        state.snapshots.length > 0 &&
+        filteredSnapshots.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            No partners match &ldquo;{search}&rdquo;.
+          </p>
+        )}
+
+      {state.status === "done" && filteredSnapshots.length > 0 && (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
-          {state.snapshots.map((snapshot) => (
+          {filteredSnapshots.map((snapshot) => (
             <PartnerTile key={snapshot.partner.id} snapshot={snapshot} />
           ))}
         </div>
