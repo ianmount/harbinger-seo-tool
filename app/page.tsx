@@ -7,7 +7,6 @@ import {
   FileSearch,
   ImageIcon,
   Search,
-  Target,
   Users,
 } from "lucide-react"
 import type { ComponentType } from "react"
@@ -50,12 +49,6 @@ const SECTIONS: TileSection[] = [
         label: "Partner Dashboard",
         description: "View and manage active partner accounts",
         icon: Users,
-      },
-      {
-        href: "/strategy",
-        label: "Strategy",
-        description: "Generate keyword strategy documents with Claude",
-        icon: Target,
       },
     ],
   },

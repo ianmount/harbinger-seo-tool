@@ -26,7 +26,6 @@ const SECTIONS: Section[] = [
     label: "Ongoing",
     tabs: [
       { href: "/partners", label: "Partner Dashboard" },
-      { href: "/strategy", label: "Strategy" },
     ],
   },
   {
