@@ -265,7 +265,7 @@ function buildDfsPayload(
       return [
         {
           ...params,
-          categories: ["performance", "accessibility", "best-practices", "seo"],
+          categories: ["performance", "accessibility", "best_practices", "seo"],
         },
       ]
     }
