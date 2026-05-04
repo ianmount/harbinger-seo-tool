@@ -10,16 +10,16 @@ const badgeVariants = cva(
     variants: {
       variant: {
         default:
-          "border-[rgba(3,41,58,0.2)] bg-[rgba(3,41,58,0.08)] text-brand-navy [a&]:hover:bg-[rgba(3,41,58,0.12)]",
+          "border-[rgba(3,41,58,0.2)] bg-[rgba(3,41,58,0.08)] text-brand-navy [a&]:hover:bg-[rgba(3,41,58,0.12)] dark:border-[rgba(246,241,234,0.15)] dark:bg-[rgba(246,241,234,0.08)] dark:text-brand-cream",
         secondary:
-          "border-line bg-brand-paper text-ink-2 [a&]:hover:bg-brand-sand",
+          "border-line bg-brand-paper text-ink-2 [a&]:hover:bg-brand-sand dark:bg-muted dark:text-muted-foreground",
         success:
-          "border-[color-mix(in_srgb,var(--color-success)_30%,transparent)] bg-success-light text-success-dark",
+          "border-[color-mix(in_srgb,var(--color-success)_30%,transparent)] bg-success-light text-success-dark dark:bg-[color-mix(in_srgb,var(--color-success)_18%,transparent)] dark:border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] dark:text-[color:var(--color-success)]",
         warning:
-          "border-[color-mix(in_srgb,var(--color-warning)_30%,transparent)] bg-warning-light text-warning-dark",
+          "border-[color-mix(in_srgb,var(--color-warning)_30%,transparent)] bg-warning-light text-warning-dark dark:bg-[color-mix(in_srgb,var(--color-warning)_18%,transparent)] dark:border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] dark:text-[color:var(--color-warning)]",
         danger:
-          "border-[color-mix(in_srgb,var(--color-danger)_30%,transparent)] bg-danger-light text-danger-dark",
-        info: "border-[color-mix(in_srgb,var(--color-info)_30%,transparent)] bg-info-light text-info-dark",
+          "border-[color-mix(in_srgb,var(--color-danger)_30%,transparent)] bg-danger-light text-danger-dark dark:bg-[color-mix(in_srgb,var(--color-danger)_18%,transparent)] dark:border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] dark:text-[color:var(--color-danger)]",
+        info: "border-[color-mix(in_srgb,var(--color-info)_30%,transparent)] bg-info-light text-info-dark dark:bg-[color-mix(in_srgb,var(--color-info)_18%,transparent)] dark:border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] dark:text-info-light",
         destructive:
           "border-transparent bg-destructive text-white focus-visible:ring-destructive/20 dark:bg-destructive/60 dark:focus-visible:ring-destructive/40 [a&]:hover:bg-destructive/90",
         outline:
