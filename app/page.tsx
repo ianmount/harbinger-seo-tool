@@ -110,10 +110,10 @@ export default function Home() {
                   <Link
                     key={item.href}
                     href={item.href}
-                    className="group flex items-center gap-3 rounded-lg border border-line bg-card px-4 py-3 shadow-sm transition-all hover:border-brand-navy/25 hover:shadow-md"
+                    className="group flex items-center gap-3 rounded-lg border border-line bg-card px-4 py-3 shadow-sm transition-all hover:border-foreground/25 hover:shadow-md"
                   >
-                    <div className="shrink-0 rounded-md bg-brand-navy/8 p-1.5">
-                      <Icon className="h-4 w-4 text-brand-navy" />
+                    <div className="shrink-0 rounded-md bg-foreground/8 p-1.5">
+                      <Icon className="h-4 w-4 text-foreground/70" />
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="font-sans text-[13px] font-extrabold tracking-[-0.005em] text-foreground">
