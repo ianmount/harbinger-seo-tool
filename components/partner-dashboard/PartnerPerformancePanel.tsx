@@ -46,6 +46,13 @@ type Ga4State =
   | { status: "error"; message: string }
   | { status: "done"; report: GA4SeoReport }
 
+type PriorGscState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "done"; clicks: number; impressions: number }
+
+type ActivePreset = "yoy" | "thisQ" | "thisQvsLastQ" | null
+
 function iso(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
 }
@@ -55,6 +62,34 @@ function defaultRange(): DateRange {
   const from = new Date()
   from.setDate(to.getDate() - 27)
   return { from, to }
+}
+
+function quarterStart(d: Date): Date {
+  return new Date(d.getFullYear(), Math.floor(d.getMonth() / 3) * 3, 1)
+}
+
+function yoyRange(today: Date): { current: DateRange; prior: DateRange } {
+  const jan1 = new Date(today.getFullYear(), 0, 1)
+  const jan1LastYear = new Date(today.getFullYear() - 1, 0, 1)
+  const todayLastYear = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate())
+  return {
+    current: { from: jan1, to: today },
+    prior: { from: jan1LastYear, to: todayLastYear },
+  }
+}
+
+function thisQRange(today: Date): DateRange {
+  return { from: quarterStart(today), to: today }
+}
+
+function thisQvsLastQRanges(today: Date): { current: DateRange; prior: DateRange } {
+  const qStart = quarterStart(today)
+  const prevQEnd = new Date(qStart.getTime() - 86_400_000)
+  const prevQStart = quarterStart(prevQEnd)
+  return {
+    current: { from: qStart, to: today },
+    prior: { from: prevQStart, to: prevQEnd },
+  }
 }
 
 function formatRange(range: DateRange | undefined): string {
@@ -77,6 +112,12 @@ function fmtCtr(n: number): string {
 
 function fmtPos(n: number): string {
   return n.toFixed(1)
+}
+
+function deltaLabel(current: number, prior: number): string {
+  const pct = ((current - prior) / prior) * 100
+  const sign = pct >= 0 ? "+" : ""
+  return `${sign}${pct.toFixed(1)}% vs prior`
 }
 
 function MetricCard({
@@ -104,11 +145,42 @@ function MetricCard({
 export function PartnerPerformancePanel({ gscSiteUrl, ga4PropertyId }: Props) {
   const [range, setRange] = useState<DateRange | undefined>(defaultRange)
   const [popoverOpen, setPopoverOpen] = useState(false)
+  const [activePreset, setActivePreset] = useState<ActivePreset>(null)
   const [gsc, setGsc] = useState<GscState>({ status: "idle" })
   const [ga4, setGa4] = useState<Ga4State>({ status: "idle" })
+  const [priorGsc, setPriorGsc] = useState<PriorGscState>({ status: "idle" })
+
+  const fetchGscTotals = useCallback(
+    async (r: DateRange): Promise<{ clicks: number; impressions: number }> => {
+      if (!gscSiteUrl || !r.from || !r.to) return { clicks: 0, impressions: 0 }
+      const res = await fetch("/api/gsc/report-data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          siteUrl: gscSiteUrl,
+          startDate: iso(r.from),
+          endDate: iso(r.to),
+          rowLimit: 1,
+        }),
+      })
+      const body = (await res.json()) as {
+        dailyClicks?: GSCDailyRow[]
+        error?: string
+      }
+      if (!res.ok) return { clicks: 0, impressions: 0 }
+      let clicks = 0
+      let impressions = 0
+      for (const d of body.dailyClicks ?? []) {
+        clicks += d.clicks
+        impressions += d.impressions
+      }
+      return { clicks, impressions }
+    },
+    [gscSiteUrl],
+  )
 
   const load = useCallback(
-    async (r: DateRange) => {
+    async (r: DateRange, priorRange?: DateRange) => {
       if (!r.from || !r.to) return
       const startDate = iso(r.from)
       const endDate = iso(r.to)
@@ -116,35 +188,49 @@ export function PartnerPerformancePanel({ gscSiteUrl, ga4PropertyId }: Props) {
       // GSC
       if (gscSiteUrl) {
         setGsc({ status: "loading" })
+        if (priorRange?.from && priorRange?.to) {
+          setPriorGsc({ status: "loading" })
+        } else {
+          setPriorGsc({ status: "idle" })
+        }
         try {
-          const res = await fetch("/api/gsc/report-data", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              siteUrl: gscSiteUrl,
-              startDate,
-              endDate,
-              rowLimit: 1000,
+          const [gscRes, priorTotals] = await Promise.all([
+            fetch("/api/gsc/report-data", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                siteUrl: gscSiteUrl,
+                startDate,
+                endDate,
+                rowLimit: 1000,
+              }),
             }),
-          })
-          const body = (await res.json()) as {
+            priorRange?.from && priorRange?.to
+              ? fetchGscTotals(priorRange)
+              : Promise.resolve(null),
+          ])
+          const body = (await gscRes.json()) as {
             topQueries?: GSCTopQueryRow[]
             topPages?: GSCTopPageRow[]
             dailyClicks?: GSCDailyRow[]
             error?: string
           }
-          if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`)
+          if (!gscRes.ok) throw new Error(body.error ?? `HTTP ${gscRes.status}`)
           setGsc({
             status: "done",
             topQueries: body.topQueries ?? [],
             topPages: body.topPages ?? [],
             dailyClicks: body.dailyClicks ?? [],
           })
+          if (priorTotals) {
+            setPriorGsc({ status: "done", ...priorTotals })
+          }
         } catch (err) {
           setGsc({
             status: "error",
             message: err instanceof Error ? err.message : "GSC fetch failed",
           })
+          setPriorGsc({ status: "idle" })
         }
       }
 
@@ -176,7 +262,7 @@ export function PartnerPerformancePanel({ gscSiteUrl, ga4PropertyId }: Props) {
         }
       }
     },
-    [gscSiteUrl, ga4PropertyId],
+    [gscSiteUrl, ga4PropertyId, fetchGscTotals],
   )
 
   useEffect(() => {
@@ -186,7 +272,28 @@ export function PartnerPerformancePanel({ gscSiteUrl, ga4PropertyId }: Props) {
 
   function handleRangeChange(r: DateRange | undefined) {
     setRange(r)
+    setActivePreset(null)
+    setPriorGsc({ status: "idle" })
     if (r?.from && r?.to) load(r)
+  }
+
+  function applyPreset(preset: ActivePreset) {
+    if (!preset) return
+    const today = new Date()
+    setActivePreset(preset)
+    if (preset === "yoy") {
+      const { current, prior } = yoyRange(today)
+      setRange(current)
+      load(current, prior)
+    } else if (preset === "thisQ") {
+      const r = thisQRange(today)
+      setRange(r)
+      load(r)
+    } else if (preset === "thisQvsLastQ") {
+      const { current, prior } = thisQvsLastQRanges(today)
+      setRange(current)
+      load(current, prior)
+    }
   }
 
   // Derived totals from dailyClicks
@@ -231,34 +338,63 @@ export function PartnerPerformancePanel({ gscSiteUrl, ga4PropertyId }: Props) {
         <h2 className="font-sans text-xs font-extrabold uppercase tracking-[0.18em] text-muted-foreground">
           Performance Detail
         </h2>
-        <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
-          <PopoverTrigger asChild>
+        <div className="flex flex-wrap items-center gap-2">
+          {(
+            [
+              { id: "yoy", label: "YoY" },
+              { id: "thisQ", label: "This Qtr" },
+              { id: "thisQvsLastQ", label: "Qtr vs Qtr" },
+            ] as { id: ActivePreset; label: string }[]
+          ).map(({ id, label }) => (
             <Button
-              variant="outline"
+              key={id}
+              variant={activePreset === id ? "secondary" : "outline"}
               size="sm"
-              className={cn(
-                "h-8 w-[260px] justify-start text-left text-xs font-normal",
-                !range?.from && "text-muted-foreground",
-              )}
+              className="h-7 px-2.5 text-[11px]"
+              onClick={() => applyPreset(id)}
             >
-              <CalendarIcon className="mr-2 size-3.5" />
-              {formatRange(range)}
+              {label}
             </Button>
-          </PopoverTrigger>
-          <PopoverContent className="w-auto p-0" align="end">
-            <Calendar
-              mode="range"
-              selected={range}
-              onSelect={(r) => {
-                setPopoverOpen(false)
-                handleRangeChange(r)
-              }}
-              numberOfMonths={2}
-              defaultMonth={range?.from}
-            />
-          </PopoverContent>
-        </Popover>
+          ))}
+          <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className={cn(
+                  "h-7 w-[220px] justify-start text-left text-[11px] font-normal",
+                  !range?.from && "text-muted-foreground",
+                )}
+              >
+                <CalendarIcon className="mr-2 size-3.5" />
+                {formatRange(range)}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-auto p-0" align="end">
+              <Calendar
+                mode="range"
+                selected={range}
+                onSelect={(r) => {
+                  setPopoverOpen(false)
+                  handleRangeChange(r)
+                }}
+                numberOfMonths={2}
+                defaultMonth={range?.from}
+              />
+            </PopoverContent>
+          </Popover>
+        </div>
       </div>
+      {activePreset === "yoy" && (
+        <p className="text-[11px] text-muted-foreground">
+          Comparing Jan 1 – today vs the same period last year.
+        </p>
+      )}
+      {activePreset === "thisQvsLastQ" && (
+        <p className="text-[11px] text-muted-foreground">
+          Comparing current quarter to the previous quarter.
+        </p>
+      )}
 
       {/* GSC source ------------------------------------------------------- */}
       {!gscSiteUrl ? (
@@ -288,10 +424,23 @@ export function PartnerPerformancePanel({ gscSiteUrl, ga4PropertyId }: Props) {
           {/* Metric cards */}
           {totals && (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <MetricCard label="Clicks" value={fmt(totals.clicks)} />
+              <MetricCard
+                label="Clicks"
+                value={fmt(totals.clicks)}
+                sub={
+                  priorGsc.status === "done" && priorGsc.clicks > 0
+                    ? deltaLabel(totals.clicks, priorGsc.clicks)
+                    : undefined
+                }
+              />
               <MetricCard
                 label="Impressions"
                 value={fmt(totals.impressions)}
+                sub={
+                  priorGsc.status === "done" && priorGsc.impressions > 0
+                    ? deltaLabel(totals.impressions, priorGsc.impressions)
+                    : undefined
+                }
               />
               <MetricCard
                 label="Avg Position"
