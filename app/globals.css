@@ -57,14 +57,14 @@
   --color-brand-sand: #ede4d6;
   --color-brand-paper: #faf7f2;
 
-  /* Ink scale */
-  --color-ink-1: #03293a;
-  --color-ink-2: rgba(3, 41, 58, 0.74);
-  --color-ink-3: rgba(3, 41, 58, 0.52);
+  /* Ink scale — references CSS vars so dark mode overrides propagate */
+  --color-ink-1: var(--ink-1);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
 
   /* Warm lines */
-  --color-line: #e5ded2;
-  --color-line-strong: #cfc6b6;
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
 
   /* Status palette (semantic; distinct from brand red) */
   --color-success: #1a8f5a;
@@ -109,6 +109,15 @@
   /* Radius base — yields 14px card / 10px input / 8px button / 6px sm */
   --radius: 0.625rem;
 
+  /* Ink scale (light) */
+  --ink-1: #03293a;
+  --ink-2: rgba(3, 41, 58, 0.74);
+  --ink-3: rgba(3, 41, 58, 0.52);
+
+  /* Warm lines (light) */
+  --line: #e5ded2;
+  --line-strong: #cfc6b6;
+
   /* Shadcn slots mapped to Harbinger palette */
   --background: #faf7f2; /* paper */
   --foreground: #03293a; /* ink-1 */
@@ -148,6 +157,15 @@
 }
 
 .dark {
+  /* Ink scale (dark — cream-based) */
+  --ink-1: #f6f1ea;
+  --ink-2: rgba(246, 241, 234, 0.74);
+  --ink-3: rgba(246, 241, 234, 0.52);
+
+  /* Lines (dark) */
+  --line: rgba(246, 241, 234, 0.12);
+  --line-strong: rgba(246, 241, 234, 0.2);
+
   /* Dark = navy-black, never pitch black */
   --background: #0b1820;
   --foreground: #f6f1ea;
