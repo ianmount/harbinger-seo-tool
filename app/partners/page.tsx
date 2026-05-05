@@ -16,11 +16,30 @@ function iso(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
 }
 
+type ActivePreset = "last28" | "yoy" | "thisQ" | "thisQvsLastQ" | null
+
 function defaultRange(): DateRange {
   const to = new Date()
   const from = new Date()
   from.setDate(to.getDate() - 27) // 28 days inclusive
   return { from, to }
+}
+
+function quarterStart(d: Date): Date {
+  return new Date(d.getFullYear(), Math.floor(d.getMonth() / 3) * 3, 1)
+}
+
+function yoyRange(today: Date): DateRange {
+  return { from: new Date(today.getFullYear(), 0, 1), to: today }
+}
+
+function thisQRange(today: Date): DateRange {
+  return { from: quarterStart(today), to: today }
+}
+
+function thisQvsLastQRange(today: Date): DateRange {
+  const qStart = quarterStart(today)
+  return { from: qStart, to: today }
 }
 
 function formatRange(range: DateRange | undefined): string {
@@ -44,6 +63,7 @@ type LoadState =
 
 export default function PartnerDashboardPage() {
   const [range, setRange] = useState<DateRange | undefined>(defaultRange)
+  const [activePreset, setActivePreset] = useState<ActivePreset>("last28")
   const [popoverOpen, setPopoverOpen] = useState(false)
   const [state, setState] = useState<LoadState>({ status: "idle" })
   const [search, setSearch] = useState("")
@@ -94,9 +114,23 @@ export default function PartnerDashboardPage() {
 
   function handleRangeChange(newRange: DateRange | undefined) {
     setRange(newRange)
+    setActivePreset(null)
     if (newRange?.from && newRange?.to) {
       load(newRange)
     }
+  }
+
+  function applyPreset(preset: ActivePreset) {
+    if (!preset) return
+    const today = new Date()
+    setActivePreset(preset)
+    let r: DateRange
+    if (preset === "last28") r = defaultRange()
+    else if (preset === "yoy") r = yoyRange(today)
+    else if (preset === "thisQ") r = thisQRange(today)
+    else r = thisQvsLastQRange(today)
+    setRange(r)
+    load(r)
   }
 
   const noGsc =
@@ -138,12 +172,30 @@ export default function PartnerDashboardPage() {
 
       {/* Controls */}
       <div className="flex flex-wrap items-center gap-3">
+        {(
+          [
+            { id: "last28", label: "Last 28d" },
+            { id: "yoy", label: "YoY" },
+            { id: "thisQ", label: "This Qtr" },
+            { id: "thisQvsLastQ", label: "Qtr vs Qtr" },
+          ] as { id: ActivePreset; label: string }[]
+        ).map(({ id, label }) => (
+          <Button
+            key={id}
+            variant={activePreset === id ? "secondary" : "outline"}
+            size="sm"
+            className="h-9 px-3 text-sm"
+            onClick={() => applyPreset(id)}
+          >
+            {label}
+          </Button>
+        ))}
         <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
           <PopoverTrigger asChild>
             <Button
               variant="outline"
               className={cn(
-                "w-[260px] justify-start text-left text-sm font-normal",
+                "w-[240px] justify-start text-left text-sm font-normal",
                 !range?.from && "text-muted-foreground",
               )}
             >
