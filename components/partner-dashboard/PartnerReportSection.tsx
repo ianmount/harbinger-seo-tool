@@ -58,6 +58,8 @@ type Ga4State =
       source: "airtable" | "auto" | "none"
     }
 
+type ActivePreset = "last28" | "yoy" | "thisQ" | "thisQvsLastQ" | null
+
 function iso(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
 }
@@ -65,8 +67,36 @@ function iso(d: Date): string {
 function defaultRange(): DateRange {
   const to = new Date()
   const from = new Date()
-  from.setDate(to.getDate() - 29)
+  from.setDate(to.getDate() - 27) // 28 days inclusive
   return { from, to }
+}
+
+function quarterStart(d: Date): Date {
+  return new Date(d.getFullYear(), Math.floor(d.getMonth() / 3) * 3, 1)
+}
+
+function yoyRange(today: Date): { current: DateRange; prior: DateRange } {
+  const jan1 = new Date(today.getFullYear(), 0, 1)
+  const jan1LastYear = new Date(today.getFullYear() - 1, 0, 1)
+  const todayLastYear = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate())
+  return {
+    current: { from: jan1, to: today },
+    prior: { from: jan1LastYear, to: todayLastYear },
+  }
+}
+
+function thisQRange(today: Date): DateRange {
+  return { from: quarterStart(today), to: today }
+}
+
+function thisQvsLastQRanges(today: Date): { current: DateRange; prior: DateRange } {
+  const qStart = quarterStart(today)
+  const prevQEnd = new Date(qStart.getTime() - 86_400_000)
+  const prevQStart = quarterStart(prevQEnd)
+  return {
+    current: { from: qStart, to: today },
+    prior: { from: prevQStart, to: prevQEnd },
+  }
 }
 
 function formatRange(range: DateRange | undefined): string {
@@ -122,6 +152,7 @@ function triggerHtmlDownload(report: string, partnerName: string, range: DateRan
 
 export function PartnerReportSection({ partner }: { partner: Partner }) {
   const [range, setRange] = useState<DateRange | undefined>(defaultRange)
+  const [activePreset, setActivePreset] = useState<ActivePreset>("last28")
   const [phase, setPhase] = useState<Phase>({ status: "idle" })
   const [popoverOpen, setPopoverOpen] = useState(false)
   const [sitesState, setSitesState] = useState<SitesState>({ status: "idle" })
@@ -344,31 +375,68 @@ export function PartnerReportSection({ partner }: { partner: Partner }) {
 
       <div className="flex flex-wrap items-end gap-3 rounded-lg border border-border p-3">
         {/* Date range */}
-        <div className="flex flex-col gap-1">
+        <div className="flex flex-col gap-1.5">
           <span className="text-xs font-medium text-muted-foreground">Date range</span>
-          <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
-            <PopoverTrigger asChild>
+          <div className="flex flex-wrap items-center gap-2">
+            {(
+              [
+                { id: "last28", label: "Last 28d" },
+                { id: "yoy", label: "YoY" },
+                { id: "thisQ", label: "This Qtr" },
+                { id: "thisQvsLastQ", label: "Qtr vs Qtr" },
+              ] as { id: ActivePreset; label: string }[]
+            ).map(({ id, label }) => (
               <Button
-                variant="outline"
-                className={cn(
-                  "h-8 w-[240px] justify-start text-left text-xs font-normal",
-                  !range?.from && "text-muted-foreground",
-                )}
+                key={id}
+                variant={activePreset === id ? "secondary" : "outline"}
+                size="sm"
+                className="h-7 px-2.5 text-[11px]"
+                onClick={() => {
+                  const today = new Date()
+                  setActivePreset(id)
+                  if (id === "last28") {
+                    setRange(defaultRange())
+                  } else if (id === "yoy") {
+                    setRange(yoyRange(today).current)
+                  } else if (id === "thisQ") {
+                    setRange(thisQRange(today))
+                  } else if (id === "thisQvsLastQ") {
+                    setRange(thisQvsLastQRanges(today).current)
+                  }
+                }}
               >
-                <CalendarIcon className="mr-2 size-3.5" />
-                {formatRange(range)}
+                {label}
               </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-auto p-0" align="start">
-              <Calendar
-                mode="range"
-                selected={range}
-                onSelect={setRange}
-                numberOfMonths={2}
-                defaultMonth={range?.from}
-              />
-            </PopoverContent>
-          </Popover>
+            ))}
+            <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className={cn(
+                    "h-7 w-[200px] justify-start text-left text-[11px] font-normal",
+                    !range?.from && "text-muted-foreground",
+                  )}
+                >
+                  <CalendarIcon className="mr-2 size-3.5" />
+                  {formatRange(range)}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-0" align="start">
+                <Calendar
+                  mode="range"
+                  selected={range}
+                  onSelect={(r) => {
+                    setPopoverOpen(false)
+                    setRange(r)
+                    setActivePreset(null)
+                  }}
+                  numberOfMonths={2}
+                  defaultMonth={range?.from}
+                />
+              </PopoverContent>
+            </Popover>
+          </div>
         </div>
 
         {/* GSC property */}
