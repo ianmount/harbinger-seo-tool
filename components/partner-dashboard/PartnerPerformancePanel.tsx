@@ -51,7 +51,7 @@ type PriorGscState =
   | { status: "loading" }
   | { status: "done"; clicks: number; impressions: number }
 
-type ActivePreset = "yoy" | "thisQ" | "thisQvsLastQ" | null
+type ActivePreset = "last28" | "yoy" | "thisQ" | "thisQvsLastQ" | null
 
 function iso(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
@@ -145,7 +145,7 @@ function MetricCard({
 export function PartnerPerformancePanel({ gscSiteUrl, ga4PropertyId }: Props) {
   const [range, setRange] = useState<DateRange | undefined>(defaultRange)
   const [popoverOpen, setPopoverOpen] = useState(false)
-  const [activePreset, setActivePreset] = useState<ActivePreset>(null)
+  const [activePreset, setActivePreset] = useState<ActivePreset>("last28")
   const [gsc, setGsc] = useState<GscState>({ status: "idle" })
   const [ga4, setGa4] = useState<Ga4State>({ status: "idle" })
   const [priorGsc, setPriorGsc] = useState<PriorGscState>({ status: "idle" })
@@ -281,7 +281,11 @@ export function PartnerPerformancePanel({ gscSiteUrl, ga4PropertyId }: Props) {
     if (!preset) return
     const today = new Date()
     setActivePreset(preset)
-    if (preset === "yoy") {
+    if (preset === "last28") {
+      const r = defaultRange()
+      setRange(r)
+      load(r)
+    } else if (preset === "yoy") {
       const { current, prior } = yoyRange(today)
       setRange(current)
       load(current, prior)
@@ -341,6 +345,7 @@ export function PartnerPerformancePanel({ gscSiteUrl, ga4PropertyId }: Props) {
         <div className="flex flex-wrap items-center gap-2">
           {(
             [
+              { id: "last28", label: "Last 28d" },
               { id: "yoy", label: "YoY" },
               { id: "thisQ", label: "This Qtr" },
               { id: "thisQvsLastQ", label: "Qtr vs Qtr" },
