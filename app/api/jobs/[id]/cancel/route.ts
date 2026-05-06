@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { cancelJob, deriveSessionId, getJob } from "@/lib/jobs"
+import { canAccessJob, cancelJob, deriveSessionId, getJob } from "@/lib/jobs"
 
 /**
  * POST /api/jobs/[id]/cancel
@@ -21,7 +21,7 @@ export async function POST(
 
   const sessionId = await deriveSessionId()
   const job = await getJob(id)
-  if (!job || job.session_id !== sessionId) {
+  if (!job || !canAccessJob(job, sessionId)) {
     return NextResponse.json({ error: "not_found" }, { status: 404 })
   }
 
