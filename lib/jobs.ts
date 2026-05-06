@@ -84,6 +84,24 @@ export const KIND_LABELS: Record<JobKind, string> = {
 // ── Session id ─────────────────────────────────────────────────────────────
 
 /**
+ * Reserved session_id for jobs created by the scheduled-task dispatcher
+ * (desktop Routine bot). These jobs aren't owned by any logged-in user, so
+ * the per-session access check would always 404 them. `canAccessJob` lets
+ * any authenticated session view them.
+ */
+export const ROUTINE_SESSION_ID = "routine"
+
+/**
+ * Whether the current session is allowed to read or cancel `job`. Allows
+ * the owning session OR any authenticated session for routine/scheduled
+ * jobs (which have no real owner). The proxy already gates these routes
+ * for unauthenticated callers.
+ */
+export function canAccessJob(job: JobRow, sessionId: string): boolean {
+  return job.session_id === sessionId || job.session_id === ROUTINE_SESSION_ID
+}
+
+/**
  * Derive a stable session id from the auth cookie. Returns the cookie's
  * `iat` as a string. Throws if the cookie is missing or invalid — but the
  * proxy in `proxy.ts` already gates the routes that call this, so a missing

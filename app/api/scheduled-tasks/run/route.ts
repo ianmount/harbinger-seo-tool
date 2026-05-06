@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server"
 import { inngest } from "@/lib/inngest/client"
-import { createJob, KIND_LABELS, type JobKind } from "@/lib/jobs"
+import {
+  createJob,
+  KIND_LABELS,
+  ROUTINE_SESSION_ID,
+  type JobKind,
+} from "@/lib/jobs"
 import {
   computeNextRunAt,
   type Frequency,
@@ -127,7 +132,7 @@ export async function POST() {
         kind: kind as JobKind,
         title: `${title} — ${row.partner_name}`,
         input,
-        sessionId: "routine",
+        sessionId: ROUTINE_SESSION_ID,
       })
       await inngest.send({ name: "jobs/run", data: { jobId: job.id } })
       // Stamp the schedule with the job id so the UI can deep-link.
