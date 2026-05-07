@@ -88,6 +88,7 @@ function locationAndLanguageParams(
 export async function dfsRequest<T = DfsEnvelope>(
   endpoint: string,
   body: unknown,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<T> {
   const url = `${DFS_BASE}${endpoint}`
   const init: RequestInit = {
@@ -97,6 +98,7 @@ export async function dfsRequest<T = DfsEnvelope>(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
+    signal: opts.signal,
   }
 
   // Retry up to 3 times on 429 with exponential backoff + jitter so a
@@ -707,7 +709,7 @@ export interface SerpRankedDomain {
 export async function serpRankedDomains(
   keyword: string,
   location: DfsLocation,
-  opts: { depth?: number } = {},
+  opts: { depth?: number; signal?: AbortSignal } = {},
 ): Promise<SerpRankedDomain[]> {
   const envelope = await dfsRequest(
     "/v3/serp/google/organic/live/advanced",
@@ -718,6 +720,7 @@ export async function serpRankedDomains(
         depth: opts.depth ?? 100,
       },
     ],
+    { signal: opts.signal },
   )
   const firstTask = envelope.tasks[0]
   const result = firstTask?.result?.[0] as { items?: unknown[] } | undefined
