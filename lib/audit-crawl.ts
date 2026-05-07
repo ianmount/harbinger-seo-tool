@@ -79,11 +79,23 @@ function originFor(domain: string): string {
 }
 
 interface SampleSlot {
-  homepage: string | null
-  serviceUrls: string[]
-  locationUrls: string[]
-  blogUrls: string[]
-  unclassified: string[]
+  homepage: SampleCandidate | null
+  serviceUrls: SampleCandidate[]
+  locationUrls: SampleCandidate[]
+  blogUrls: SampleCandidate[]
+  unclassified: SampleCandidate[]
+}
+
+/**
+ * A page from the crawl, with both the original `url` we asked DataForSEO
+ * to crawl and the post-redirect `finalUrl`. The raw_html endpoint indexes
+ * pages by the URL DFS originally crawled, which after redirects differs
+ * from `finalUrl`. We carry both so `fetchSchemaSamples` can try the
+ * primary URL and fall back to the alternate if DFS returns no HTML.
+ */
+interface SampleCandidate {
+  primary: string
+  alternate: string | null
 }
 
 /**
@@ -92,7 +104,9 @@ interface SampleSlot {
  * service / location / blog buckets. Falls back to unclassified URLs
  * only after the bucketed picks are exhausted.
  */
-function pickSchemaSampleUrls(crawledUrls: string[]): string[] {
+function pickSchemaSampleUrls(
+  crawledPages: { url: string; finalUrl: string }[],
+): SampleCandidate[] {
   const slots: SampleSlot = {
     homepage: null,
     serviceUrls: [],
@@ -100,65 +114,79 @@ function pickSchemaSampleUrls(crawledUrls: string[]): string[] {
     blogUrls: [],
     unclassified: [],
   }
-  for (const url of crawledUrls) {
-    const bucket = classifyPageType(url)
+  for (const page of crawledPages) {
+    const candidate: SampleCandidate = {
+      primary: page.finalUrl || page.url,
+      alternate:
+        page.url && page.url !== (page.finalUrl || page.url) ? page.url : null,
+    }
+    const bucket = classifyPageType(candidate.primary)
     if (bucket === "homepage" && !slots.homepage) {
-      slots.homepage = url
+      slots.homepage = candidate
     } else if (
       bucket === "service" &&
       slots.serviceUrls.length < SCHEMA_SAMPLE_PER_BUCKET
     ) {
-      slots.serviceUrls.push(url)
+      slots.serviceUrls.push(candidate)
     } else if (
       bucket === "location" &&
       slots.locationUrls.length < SCHEMA_SAMPLE_PER_BUCKET
     ) {
-      slots.locationUrls.push(url)
+      slots.locationUrls.push(candidate)
     } else if (
       bucket === "blog" &&
       slots.blogUrls.length < SCHEMA_SAMPLE_PER_BUCKET
     ) {
-      slots.blogUrls.push(url)
+      slots.blogUrls.push(candidate)
     } else if (bucket === null) {
-      slots.unclassified.push(url)
+      slots.unclassified.push(candidate)
     }
   }
 
-  const ordered: string[] = []
+  const ordered: SampleCandidate[] = []
   if (slots.homepage) ordered.push(slots.homepage)
   ordered.push(
     ...slots.serviceUrls,
     ...slots.locationUrls,
     ...slots.blogUrls,
   )
-  for (const u of slots.unclassified) {
+  for (const c of slots.unclassified) {
     if (ordered.length >= SCHEMA_SAMPLE_CAP) break
-    ordered.push(u)
+    ordered.push(c)
   }
   return ordered.slice(0, SCHEMA_SAMPLE_CAP)
 }
 
 async function fetchSchemaSamples(
   taskId: string,
-  urls: string[],
+  candidates: SampleCandidate[],
 ): Promise<SchemaSample[]> {
-  if (urls.length === 0) return []
+  if (candidates.length === 0) return []
   const out: SchemaSample[] = []
+  let nullHtmlCount = 0
   for (
     let start = 0;
-    start < urls.length;
+    start < candidates.length;
     start += SCHEMA_SAMPLE_CONCURRENCY
   ) {
-    const slice = urls.slice(start, start + SCHEMA_SAMPLE_CONCURRENCY)
+    const slice = candidates.slice(start, start + SCHEMA_SAMPLE_CONCURRENCY)
     const results = await Promise.all(
-      slice.map(async (url) => {
+      slice.map(async (candidate) => {
         try {
-          const html = await fetchRawHtml(taskId, url)
-          if (!html) return null
+          let html = await fetchRawHtml(taskId, candidate.primary)
+          // After redirects, DFS sometimes only has the start URL keyed —
+          // try the alternate before giving up.
+          if (!html && candidate.alternate) {
+            html = await fetchRawHtml(taskId, candidate.alternate)
+          }
+          if (!html) {
+            nullHtmlCount += 1
+            return null
+          }
           const extracted = extractSchemaFromHtml(html)
           const altStats = extractImageAltStats(html)
           return {
-            url,
+            url: candidate.primary,
             types: extracted.types,
             blocks: extracted.blocks,
             imagesTotal: altStats.imagesTotal,
@@ -168,7 +196,7 @@ async function fetchSchemaSamples(
           // Schema extraction is best-effort. A single failure should not
           // tank the audit — log + continue so the rest of the sample lands.
           console.warn(
-            `[audit-crawl] raw_html failed for ${url}: ${err instanceof Error ? err.message : "unknown"}`,
+            `[audit-crawl] raw_html failed for ${candidate.primary}: ${err instanceof Error ? err.message : "unknown"}`,
           )
           return null
         }
@@ -178,6 +206,15 @@ async function fetchSchemaSamples(
       if (r) out.push(r)
     }
   }
+  if (nullHtmlCount > 0) {
+    console.log(
+      `[audit-crawl] raw_html returned no html for ${nullHtmlCount}/${candidates.length} sampled urls`,
+    )
+  }
+  const totalTypes = out.reduce((s, x) => s + x.types.length, 0)
+  console.log(
+    `[audit-crawl] schema extraction parsed=${out.length} pages json_ld_types=${totalTypes}`,
+  )
   return out
 }
 
@@ -279,13 +316,16 @@ export async function crawlSite(params: {
     `[audit-crawl] link graph sources=${linkGraph.size}`,
   )
 
-  const crawledFinalUrls = onPage.pages
+  const okCrawledPages = onPage.pages
     .filter((p) => p.statusCode >= 200 && p.statusCode < 300)
-    .map((p) => p.finalUrl || p.url)
-  const sampleUrls = pickSchemaSampleUrls(crawledFinalUrls)
-  const schemaSamples = await fetchSchemaSamples(onPage.taskId, sampleUrls)
+    .map((p) => ({ url: p.url, finalUrl: p.finalUrl || p.url }))
+  const sampleCandidates = pickSchemaSampleUrls(okCrawledPages)
+  const schemaSamples = await fetchSchemaSamples(
+    onPage.taskId,
+    sampleCandidates,
+  )
   console.log(
-    `[audit-crawl] schema samples requested=${sampleUrls.length} collected=${schemaSamples.length}`,
+    `[audit-crawl] schema samples requested=${sampleCandidates.length} collected=${schemaSamples.length}`,
   )
 
   const report = await buildCrawlReportFromOnPage({

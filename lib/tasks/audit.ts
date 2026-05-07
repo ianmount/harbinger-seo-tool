@@ -9,6 +9,7 @@ import { createCostAccumulator, withAuditCost } from "@/lib/audit-cost"
 import { detectBrokenInternalLinks } from "@/lib/audit-broken-links"
 import { crawlSite } from "@/lib/audit-crawl"
 import { detectHeadingIssues } from "@/lib/audit-h-tags"
+import { analyzeInternalLinks } from "@/lib/audit-internal-links"
 import {
   buildSynthesisPrompt,
   detectMetaUnreliable,
@@ -356,6 +357,37 @@ async function tryFetchGa4(
 }
 
 function summarizeCrawl(crawl: CrawlReport): AuditCrawlSummary {
+  const okPageCount = crawl.pages.filter(
+    (p) => p.status >= 200 && p.status < 300,
+  ).length
+  const internalLinks = okPageCount > 0 ? analyzeInternalLinks(crawl) : null
+
+  // Sitemap-vs-crawl reconciliation: every sitemap URL we couldn't reach in
+  // the crawl is a candidate "not indexed" page. Hostname-only comparison
+  // strips trailing slashes / fragments / query strings on both sides so
+  // `/foo` == `/foo/` == `/foo?utm=...` for the purposes of the diff.
+  const normalize = (u: string): string => {
+    try {
+      const parsed = new URL(u)
+      let path = parsed.pathname.replace(/\/+$/, "")
+      if (path === "") path = "/"
+      return `${parsed.origin}${path}`
+    } catch {
+      return u
+    }
+  }
+  const crawledNormalized = new Set<string>()
+  for (const page of crawl.pages) {
+    crawledNormalized.add(normalize(page.url))
+    if (page.finalUrl) crawledNormalized.add(normalize(page.finalUrl))
+  }
+  const sitemapUrlsNotCrawled: string[] = []
+  for (const sitemapUrl of crawl.sitemapUrls) {
+    if (!crawledNormalized.has(normalize(sitemapUrl))) {
+      sitemapUrlsNotCrawled.push(sitemapUrl)
+    }
+  }
+
   return {
     domain: crawl.domain,
     pagesAnalyzed: crawl.crawledCount,
@@ -367,6 +399,9 @@ function summarizeCrawl(crawl: CrawlReport): AuditCrawlSummary {
     thinContentPages: crawl.thinContentPages.length,
     spaShellPages: crawl.spaShellPages.length,
     schemaTypesPresent: crawl.schemaTypesPresent,
+    internalLinks,
+    sitemapUrlCount: crawl.sitemapUrls.length,
+    sitemapUrlsNotCrawled,
   }
 }
 

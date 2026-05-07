@@ -241,13 +241,30 @@ function collectSchemaTypes(
 /**
  * Returns parsed JSON-LD blocks AND the union of all @type values seen.
  * Blocks that fail to JSON.parse are silently dropped.
+ *
+ * Reads script content via `$(el).html()` rather than
+ * `$(el).contents().text()`. In cheerio v1 (parse5-backed) the `text()` path
+ * sometimes returns an empty string for raw-text elements when the script
+ * body contains markup-like sequences (e.g. JSON-LD with `</`-escapes), so
+ * `.html()` is the reliable accessor for `<script>` payloads. We also match
+ * the type attribute case-insensitively and strip a UTF-8 BOM that some
+ * SEO plugins emit before the JSON body.
  */
 export function extractSchemaFromHtml(html: string): SchemaExtraction {
   const $ = cheerio.load(html)
   const blocks: unknown[] = []
   const types = new Set<string>()
-  $('script[type="application/ld+json"]').each((_, el) => {
-    const text = $(el).contents().text().trim()
+  $("script").each((_, el) => {
+    const typeAttr = ($(el).attr("type") ?? "").toLowerCase().trim()
+    // Tolerate `application/ld+json; charset=utf-8` and similar variants.
+    if (!typeAttr.startsWith("application/ld+json")) return
+    let raw = $(el).html() ?? ""
+    if (!raw) {
+      // Belt-and-braces fallback for cheerio versions/builds where script
+      // children only surface via .contents().text().
+      raw = $(el).contents().text() ?? ""
+    }
+    const text = raw.replace(/^﻿/, "").trim()
     if (!text) return
     let parsed: unknown
     try {

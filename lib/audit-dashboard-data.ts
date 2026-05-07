@@ -32,11 +32,31 @@ export interface DashboardData {
   traffic: TrafficSection | null
   competitors: CompetitorsSection | null
   schema: SchemaSection | null
+  internalLinks: InternalLinksDisplaySection | null
   opportunities: OpportunitiesSection | null
   topPages: TopPagesSection | null
   performance: PerformanceSection | null
   aiMentions: AIMentionsDisplaySection | null
   narrative: NarrativeSection
+}
+
+export interface InternalLinksDisplaySection {
+  score: number
+  scoreLabel: string
+  pagesAnalyzed: number
+  averageOutLinks: number
+  averageInLinks: number
+  orphanCount: number
+  linkPoorCount: number
+  orphanSample: string[]
+  linkPoorSample: { url: string; outLinks: number }[]
+  hubPages: { url: string; inLinks: number }[]
+  recommendations: {
+    id: string
+    title: string
+    detail: string
+    exampleUrls: string[]
+  }[]
 }
 
 /**
@@ -106,11 +126,16 @@ export interface ExecutiveSummary {
 }
 
 export interface IndexationSection {
+  /** "gsc" when GSC data drives the section, "sitemap" when only sitemap-vs-crawl reconciliation is available. */
+  source: "gsc" | "sitemap"
   siteUrl: string
   windowStart: string
   windowEnd: string
   sitemapCount: number
   indexedCount: number
+  /** Pages in the sitemap that the on-page crawl could not reach (404, redirect chain that didn't terminate, etc.) — surfaced even when GSC is connected because they're a separate signal. */
+  sitemapNotCrawledCount: number
+  sitemapNotCrawled: string[]
   notIndexed: NotIndexedRow[]
   /** True when at least one inspected sample was successfully retrieved. */
   hasInspectionData: boolean
@@ -285,28 +310,87 @@ function inspectionLookup(coverage: AssessmentGscData["indexCoverage"]):
 
 function buildIndexation(
   gsc: AssessmentGscData | null,
+  crawlSummary: AssessmentAuditResult["crawlSummary"],
 ): IndexationSection | null {
-  if (!gsc?.indexCoverage) return null
-  const cov = gsc.indexCoverage
-  const samples = inspectionLookup(gsc.indexCoverage)
-  const notIndexed: NotIndexedRow[] = cov.probablyNotIndexed.map((url) => {
-    const sample = samples.get(url)
+  if (gsc?.indexCoverage) {
+    const cov = gsc.indexCoverage
+    const samples = inspectionLookup(gsc.indexCoverage)
+    const notIndexed: NotIndexedRow[] = cov.probablyNotIndexed.map((url) => {
+      const sample = samples.get(url)
+      return {
+        url,
+        pattern: pathPattern(url),
+        lastCrawl: formatDate(sample?.lastCrawlTime ?? null),
+        coverageState: sample?.coverageState ?? null,
+        verdict: sample?.verdict ?? null,
+      }
+    })
     return {
+      source: "gsc",
+      siteUrl: cov.siteUrl,
+      windowStart: cov.dateRange.startDate,
+      windowEnd: cov.dateRange.endDate,
+      sitemapCount: cov.sitemapCount,
+      indexedCount: cov.indexedUrls.length,
+      sitemapNotCrawledCount: crawlSummary?.sitemapUrlsNotCrawled.length ?? 0,
+      sitemapNotCrawled: crawlSummary?.sitemapUrlsNotCrawled ?? [],
+      notIndexed,
+      hasInspectionData: cov.inspectedSample.some((s) => !s.error),
+    }
+  }
+
+  // No GSC connection — fall back to a sitemap-vs-crawl reconciliation. Each
+  // URL the sitemap declared but the crawler couldn't reach is reported as a
+  // "likely not indexed" candidate. Less precise than GSC's impression-based
+  // signal (no impression data, no URL Inspection coverage state) but it's
+  // the only honest indexation signal we can produce without authenticated
+  // access to the property.
+  if (!crawlSummary || crawlSummary.sitemapUrlCount === 0) return null
+  const notIndexed: NotIndexedRow[] = crawlSummary.sitemapUrlsNotCrawled.map(
+    (url) => ({
       url,
       pattern: pathPattern(url),
-      lastCrawl: formatDate(sample?.lastCrawlTime ?? null),
-      coverageState: sample?.coverageState ?? null,
-      verdict: sample?.verdict ?? null,
-    }
-  })
+      lastCrawl: null,
+      coverageState: "Not reached during crawl",
+      verdict: null,
+    }),
+  )
   return {
-    siteUrl: cov.siteUrl,
-    windowStart: cov.dateRange.startDate,
-    windowEnd: cov.dateRange.endDate,
-    sitemapCount: cov.sitemapCount,
-    indexedCount: cov.indexedUrls.length,
+    source: "sitemap",
+    siteUrl: crawlSummary.domain,
+    windowStart: "",
+    windowEnd: "",
+    sitemapCount: crawlSummary.sitemapUrlCount,
+    indexedCount:
+      crawlSummary.sitemapUrlCount - crawlSummary.sitemapUrlsNotCrawled.length,
+    sitemapNotCrawledCount: crawlSummary.sitemapUrlsNotCrawled.length,
+    sitemapNotCrawled: crawlSummary.sitemapUrlsNotCrawled,
     notIndexed,
-    hasInspectionData: cov.inspectedSample.some((s) => !s.error),
+    hasInspectionData: false,
+  }
+}
+
+function buildInternalLinks(
+  crawlSummary: AssessmentAuditResult["crawlSummary"],
+): InternalLinksDisplaySection | null {
+  if (!crawlSummary?.internalLinks) return null
+  const il = crawlSummary.internalLinks
+  let scoreLabel = "Needs work"
+  if (il.score >= 80) scoreLabel = "Healthy"
+  else if (il.score >= 60) scoreLabel = "Decent"
+  else if (il.score >= 40) scoreLabel = "Patchy"
+  return {
+    score: il.score,
+    scoreLabel,
+    pagesAnalyzed: il.pagesAnalyzed,
+    averageOutLinks: il.averageOutLinks,
+    averageInLinks: il.averageInLinks,
+    orphanCount: il.orphanPages.length,
+    linkPoorCount: il.linkPoorPages.length,
+    orphanSample: il.orphanPages.slice(0, 25),
+    linkPoorSample: il.linkPoorPages.slice(0, 25),
+    hubPages: il.hubPages,
+    recommendations: il.recommendations,
   }
 }
 
@@ -727,13 +811,14 @@ export function buildDashboardData(
     summary: buildSummary(result),
     warnings: result.warnings,
     executiveSummary: buildExecutiveSummary(result),
-    indexation: buildIndexation(result.gscData),
+    indexation: buildIndexation(result.gscData, result.crawlSummary),
     cannibalization: buildCannibalization(result.cannibalization, topPages),
     traffic: buildTraffic(result.ga4Data),
     competitors: buildCompetitors(options.compAnalysisRows ?? null),
     schema: result.crawlSummary
       ? buildSchema(result.crawlSummary.schemaTypesPresent)
       : null,
+    internalLinks: buildInternalLinks(result.crawlSummary),
     opportunities: buildOpportunities(topQueries),
     topPages: buildTopPages(topPages),
     performance: buildPerformance(result),

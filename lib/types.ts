@@ -1245,7 +1245,18 @@ export interface CompAnalysisDomainRow {
   top10: number
   top20: number
   top100: number
+  /**
+   * Referring domains pointing to pages on this domain that rank for at
+   * least one seed keyword in this specific city. When per-URL backlinks
+   * data couldn't be fetched, falls back to the domain-wide referring
+   * domain count and the same value is shown across every location.
+   */
   referringDomains: number
+  /**
+   * Distinct URLs from this domain that rank in the top 100 for any seed
+   * keyword in this specific city. Replaces the prior global "indexed
+   * pages" count and is what makes the column genuinely vary by city.
+   */
   pagesIndexed: number
   /** Pre-formatted compact-thousands string ("894", "1.2k", "22.4k"). */
   organicTraffic: string
@@ -1276,6 +1287,35 @@ export interface AuditCrawlSummary {
   thinContentPages: number
   spaShellPages: number
   schemaTypesPresent: string[]
+  /**
+   * Internal-linking analysis. Null when the crawl returned no OK pages
+   * (e.g. WAF-blocked) and the analysis can't run.
+   */
+  internalLinks: InternalLinksSummary | null
+  /**
+   * Sitemap URLs (from robots.txt / sitemap.xml discovery) that were NOT
+   * reached during the on-page crawl. Together with sitemapUrlCount lets
+   * the dashboard surface "X URLs in your sitemap weren't crawled" without
+   * the assessment-side caller needing to re-fetch the sitemap.
+   */
+  sitemapUrlCount: number
+  sitemapUrlsNotCrawled: string[]
+}
+
+export interface InternalLinksSummary {
+  pagesAnalyzed: number
+  averageOutLinks: number
+  averageInLinks: number
+  orphanPages: string[]
+  linkPoorPages: { url: string; outLinks: number }[]
+  hubPages: { url: string; inLinks: number }[]
+  score: number
+  recommendations: {
+    id: string
+    title: string
+    detail: string
+    exampleUrls: string[]
+  }[]
 }
 
 export interface AssessmentAuditResult {
