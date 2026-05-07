@@ -79,7 +79,7 @@ export const AuditInputSchema = z.object({
   negativeKeywords: z.string().optional().default(""),
   existingTargetKeywords: z.string().optional().default(""),
   idealCustomer: z.string().optional().default(""),
-  targetMarkets: z.array(targetMarketSchema).max(10).optional().default([]),
+  targetMarkets: z.array(targetMarketSchema).max(30).optional().default([]),
   crawlMode: z.enum(["full", "sample"]).optional().default("full"),
 })
 
