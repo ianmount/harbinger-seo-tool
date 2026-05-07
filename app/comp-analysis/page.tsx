@@ -889,10 +889,15 @@ function CompResults({
       )}
 
       <p className="text-xs text-ink-3">
-        Note: &ldquo;Pages Indexed&rdquo; uses Google&apos;s <code>site:</code>{" "}
-        operator at the city level and is approximate. &ldquo;Organic
-        Traffic&rdquo; is country-wide (Labs domain_rank_overview accepts
-        country codes only).
+        Note: &ldquo;Pages Ranking&rdquo; counts distinct URLs from the
+        domain that rank in top 100 for any seed keyword in this specific
+        city — it&apos;s derived from the same SERP probes that drive Top
+        3/10/20/100, no extra API cost. &ldquo;Referring Domains&rdquo;
+        sums per-URL referring-domain counts across those ranking URLs (so
+        it varies by city); when a domain has no ranking URLs in a city we
+        fall back to the global referring-domain count to keep the cell
+        meaningful. &ldquo;Organic Traffic&rdquo; is country-wide (Labs
+        domain_rank_overview accepts country codes only).
       </p>
 
       <div className="space-y-6">
@@ -923,7 +928,7 @@ function LocationTable({ location }: { location: CompAnalysisLocationRows }) {
               <th className="px-3 py-2 text-right font-medium">Top 20</th>
               <th className="px-3 py-2 text-right font-medium">Top 100</th>
               <th className="px-3 py-2 text-right font-medium">Ref. Domains</th>
-              <th className="px-3 py-2 text-right font-medium">Pages Indexed</th>
+              <th className="px-3 py-2 text-right font-medium">Pages Ranking</th>
               <th className="px-3 py-2 text-right font-medium">
                 Organic Traffic
               </th>

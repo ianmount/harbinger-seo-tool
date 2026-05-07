@@ -52,6 +52,7 @@ export function renderStandaloneHtml(data: DashboardData): string {
       ${data.traffic ? renderTraffic(data.traffic) : ""}
       ${data.competitors ? renderCompetitors(data.competitors) : ""}
       ${data.schema ? renderSchema(data.schema) : ""}
+      ${data.internalLinks ? renderInternalLinks(data.internalLinks) : ""}
       ${data.opportunities ? renderOpportunities(data.opportunities) : ""}
       ${data.topPages ? renderTopPages(data.topPages) : ""}
       ${data.performance ? renderPerformance(data.performance) : ""}
@@ -76,6 +77,8 @@ function renderToc(data: DashboardData): string {
   if (data.traffic) items.push({ id: "traffic", label: "Traffic (YoY)" })
   if (data.competitors) items.push({ id: "competitors", label: "Competitors" })
   if (data.schema) items.push({ id: "schema", label: "Schema Coverage" })
+  if (data.internalLinks)
+    items.push({ id: "internal-links", label: "Internal Linking" })
   if (data.opportunities)
     items.push({ id: "opportunities", label: "Top Opportunities" })
   if (data.topPages) items.push({ id: "top-pages", label: "Top Pages" })
@@ -187,14 +190,21 @@ function renderExecutiveSummary(data: DashboardData): string {
 }
 
 function renderIndexation(data: IndexationSection): string {
-  const meta = `${data.indexedCount} of ${data.sitemapCount} sitemap URLs received impressions in the 90-day window.`
+  const meta =
+    data.source === "gsc"
+      ? `${data.indexedCount.toLocaleString()} of ${data.sitemapCount.toLocaleString()} sitemap URLs received impressions in the 90-day window. ${data.notIndexed.length.toLocaleString()} URL${data.notIndexed.length === 1 ? "" : "s"} likely not indexed.`
+      : `${data.notIndexed.length.toLocaleString()} of ${data.sitemapCount.toLocaleString()} sitemap URLs were not reached during the on-page crawl — probable not-indexed candidates. Connect Search Console for an authoritative read.`
   if (data.notIndexed.length === 0) {
+    const empty =
+      data.source === "gsc"
+        ? "Every sitemap URL received impressions in the window."
+        : "Every sitemap URL was reached during the crawl."
     return renderSection(
       "indexation",
       "§ 02",
       "Indexation Status",
       meta,
-      `<p style="font-style:italic;color:rgba(3,41,58,0.52)">Every sitemap URL received impressions in the window.</p>`,
+      `<p style="font-style:italic;color:rgba(3,41,58,0.52)">${escapeHtml(empty)}</p>`,
     )
   }
   const cols = [
@@ -215,6 +225,67 @@ function renderIndexation(data: IndexationSection): string {
     ${renderTable(tableId, cols, rows, { initialSort: "pattern", initialDir: "asc", linkCol: "url" })}
   `
   return renderSection("indexation", "§ 02", "Indexation Status", meta, body)
+}
+
+function renderInternalLinks(
+  data: NonNullable<DashboardData["internalLinks"]>,
+): string {
+  const stats = `
+    <div class="il-stats">
+      <div class="il-score">
+        <p class="eyebrow">Score</p>
+        <p class="il-score-value">${data.score}<span>/100</span></p>
+        <p class="il-score-label">${escapeHtml(data.scoreLabel)}</p>
+      </div>
+      <div class="il-grid">
+        <div class="il-stat"><p class="eyebrow">Orphan pages</p><p>${data.orphanCount.toLocaleString()}</p></div>
+        <div class="il-stat"><p class="eyebrow">Link-poor pages</p><p>${data.linkPoorCount.toLocaleString()}</p></div>
+        <div class="il-stat"><p class="eyebrow">Avg out-links / page</p><p>${data.averageOutLinks.toFixed(1)}</p></div>
+        <div class="il-stat"><p class="eyebrow">Avg in-links / page</p><p>${data.averageInLinks.toFixed(1)}</p></div>
+      </div>
+    </div>
+  `
+  const recs = data.recommendations
+    .map(
+      (r) => `
+        <li class="il-rec">
+          <p class="il-rec-title">${escapeHtml(r.title)}</p>
+          <p class="il-rec-detail">${escapeHtml(r.detail)}</p>
+          ${
+            r.exampleUrls.length > 0
+              ? `<ul class="il-rec-urls">${r.exampleUrls
+                  .map(
+                    (u) =>
+                      `<li><a href="${escapeAttr(u)}" target="_blank" rel="noreferrer">${escapeHtml(u)}</a></li>`,
+                  )
+                  .join("")}</ul>`
+              : ""
+          }
+        </li>
+      `,
+    )
+    .join("")
+  const hubs =
+    data.hubPages.length > 0
+      ? `<div><p class="eyebrow">Top internal-link hubs</p><ul class="il-hubs">${data.hubPages
+          .map(
+            (h) =>
+              `<li><a href="${escapeAttr(h.url)}" target="_blank" rel="noreferrer">${escapeHtml(h.url)}</a><span>${h.inLinks} in</span></li>`,
+          )
+          .join("")}</ul></div>`
+      : ""
+  const body = `
+    ${stats}
+    ${data.recommendations.length > 0 ? `<div><p class="eyebrow">Recommendations</p><ol class="il-recs">${recs}</ol></div>` : ""}
+    ${hubs}
+  `
+  return renderSection(
+    "internal-links",
+    "§ 06b",
+    "Internal Linking",
+    `${data.pagesAnalyzed} pages analyzed · avg ${data.averageOutLinks} out-links and ${data.averageInLinks} in-links per page.`,
+    body,
+  )
 }
 
 function renderCannibalization(data: CannibalizationSection): string {

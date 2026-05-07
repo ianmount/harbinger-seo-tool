@@ -688,6 +688,8 @@ export async function rankedKeywords(
 export interface SerpRankedDomain {
   domain: string
   rankAbsolute: number
+  /** SERP result URL — empty string when DFS didn't surface one. */
+  url: string
 }
 
 /**
@@ -733,7 +735,11 @@ export async function serpRankedDomains(
     const domain = parsed.data.domain
     const rankAbsolute = parsed.data.rank_absolute
     if (!domain || rankAbsolute == null) continue
-    out.push({ domain: domain.toLowerCase(), rankAbsolute })
+    out.push({
+      domain: domain.toLowerCase(),
+      rankAbsolute,
+      url: parsed.data.url ?? "",
+    })
   }
   return out
 }
@@ -743,6 +749,7 @@ const serpItemSchema = z
     type: z.string().optional(),
     domain: z.string().nullable().optional(),
     rank_absolute: z.number().nullable().optional(),
+    url: z.string().nullable().optional(),
   })
   .passthrough()
 
@@ -902,6 +909,55 @@ export async function indexedPageCount(
 export async function referringDomainCount(domain: string): Promise<number> {
   const summary = await backlinksSummary(domain)
   return summary.referringDomains
+}
+
+const bulkBacklinksItemSchema = z
+  .object({
+    target: z.string(),
+    backlinks: z.number().nullable().optional(),
+    referring_domains: z.number().nullable().optional(),
+    referring_main_domains: z.number().nullable().optional(),
+  })
+  .passthrough()
+
+/**
+ * /v3/backlinks/bulk_backlinks/live — accepts up to 1000 targets per call.
+ * Each target can be a domain (`example.com`) or a full URL
+ * (`https://example.com/foo`); DFS returns total backlinks and referring
+ * domains per target. Used by Comp Analysis to compute per-(domain × city)
+ * referring-domain counts scoped to the URLs that rank for the seed
+ * keywords in that city.
+ */
+export async function bulkBacklinksByTarget(
+  targets: string[],
+): Promise<Map<string, { backlinks: number; referringDomains: number }>> {
+  const out = new Map<string, { backlinks: number; referringDomains: number }>()
+  if (targets.length === 0) return out
+  const unique = Array.from(new Set(targets))
+  const chunkSize = 1000
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize)
+    const envelope = await dfsRequest("/v3/backlinks/bulk_backlinks/live", [
+      { targets: chunk },
+    ])
+    const firstTask = envelope.tasks[0]
+    const result = firstTask?.result?.[0] as
+      | { items?: unknown[] }
+      | undefined
+    const items = result?.items ?? []
+    for (const raw of items) {
+      const parsed = bulkBacklinksItemSchema.safeParse(raw)
+      if (!parsed.success) continue
+      out.set(parsed.data.target, {
+        backlinks: parsed.data.backlinks ?? 0,
+        referringDomains:
+          parsed.data.referring_main_domains ??
+          parsed.data.referring_domains ??
+          0,
+      })
+    }
+  }
+  return out
 }
 
 export async function referringDomainsWithSpamScore(
