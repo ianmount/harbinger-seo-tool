@@ -1287,7 +1287,122 @@ export interface AssessmentAuditResult {
   ga4Data: AssessmentGa4Data | null
   crawlSummary: AuditCrawlSummary | null
   cannibalization: CannibalizationCluster[]
+  /**
+   * AI search visibility — whether the prospect is mentioned by major LLMs
+   * (ChatGPT, Perplexity, Gemini, Claude) and Google's AI Mode for buyer-intent
+   * queries about their service. Null when AI Optimization API is unavailable
+   * or the gather phase failed for both AI surfaces.
+   */
+   aiMentions: AIMentionsReport | null
   durationSeconds: number
+}
+
+// ── AI search mentions ────────────────────────────────────────────────────
+//
+// "Are we visible to ChatGPT/Perplexity/Gemini/Claude/Google AI Mode for
+// buyer-intent queries about our service?" Populated by `lib/audit-ai-mentions`
+// in the gather phase, rendered as a dedicated dashboard section.
+
+export type LlmProvider = "chat_gpt" | "perplexity" | "gemini" | "claude"
+
+/**
+ * "Source" of a tested prompt. The audit picks the highest-fidelity source
+ * the inputs allow:
+ *   - service_template — uses prospect's priorityServices ± targetMarket
+ *   - ranked_keyword   — falls back to non-branded ranked keywords as
+ *                        substitutes when services were not provided
+ *   - brand_discovery  — last resort when only a domain is known; asks
+ *                        LLMs directly about the company at the domain
+ */
+export type AiPromptSource =
+  | "service_template"
+  | "ranked_keyword"
+  | "brand_discovery"
+
+export interface AIPromptDefinition {
+  id: string
+  prompt: string
+  source: AiPromptSource
+  /** For ranked_keyword sources, the underlying keyword. */
+  keyword?: string
+}
+
+/**
+ * Result of querying one LLM with one prompt. `mentioned` is determined
+ * server-side via brand-name + domain regex match against `responseText`.
+ * `competitorMentions` contains any of the prospect's known competitors that
+ * appeared in the same response.
+ */
+export interface LLMResponseRow {
+  promptId: string
+  provider: LlmProvider
+  /** Free-text response from the LLM. Truncated to ~4k chars for storage. */
+  responseText: string
+  mentioned: boolean
+  /** Distinct competitor domains/brand-names mentioned. */
+  competitorMentions: string[]
+  /** Domains cited as web sources in the response, when available. */
+  citedDomains: string[]
+  /** USD spent on this single LLM call (from DFSEO envelope). */
+  costUsd: number
+  /** Set when the call failed; `responseText` will be empty. */
+  error?: string
+}
+
+/** Result of a Google AI Mode SERP probe for one keyword + location. */
+export interface AIOverviewRow {
+  keyword: string
+  /** "City, ST" — the geo we localized to. */
+  location: string
+  /** True if the SERP returned an AI Mode / AI Overview block at all. */
+  hasAiOverview: boolean
+  /** True if the prospect domain appears in the AI block's references. */
+  prospectMentioned: boolean
+  /** Distinct domains cited in the AI block (deduped, max 20). */
+  citedDomains: string[]
+  /** Subset of `citedDomains` matching the prospect's competitors list. */
+  competitorMentions: string[]
+  /** USD spent on this single SERP call (from DFSEO envelope). */
+  costUsd: number
+  /** Set when the call failed; other fields will be defaults. */
+  error?: string
+}
+
+export interface AIMentionsReport {
+  prospectDomain: string
+  prospectBrand: string
+  /** Brand tokens we used for fuzzy matching, derived from brand + domain. */
+  brandTokens: string[]
+  /** Competitor domain list provided/used for the cross-reference scan. */
+  competitorDomains: string[]
+  /** Prompts we tested, in stable order. */
+  prompts: AIPromptDefinition[]
+  /** All (provider × prompt) LLM responses. */
+  llmResponses: LLMResponseRow[]
+  /** Per-keyword Google AI Mode SERP probes. */
+  aiOverviewRows: AIOverviewRow[]
+  /** Aggregate counts so the UI doesn't have to recompute. */
+  totals: {
+    promptCount: number
+    llmCallCount: number
+    /** Number of LLM calls where prospect was mentioned. */
+    llmMentionCount: number
+    aiOverviewKeywordCount: number
+    /** Number of AI Mode SERPs that surfaced an AI Overview block at all. */
+    aiOverviewPresentCount: number
+    /** Number of those AI Overview blocks that cited the prospect. */
+    aiOverviewMentionCount: number
+    /** Per-provider mention rate {ChatGPT: 0.25, ...}. */
+    perProviderMentionRate: Record<LlmProvider, number>
+    /** Across all responses + AI overviews, the most-cited competitor domains. */
+    topCompetitorMentions: { domain: string; count: number }[]
+  }
+  /** Total USD spent on AI mentions (LLM calls + AI Mode SERP). */
+  costUsd: number
+  /** Wall-clock duration in seconds. */
+  durationSeconds: number
+  /** Skip reasons — shown in the UI when no data was collected. */
+  notes: string[]
 }
 
 /**
@@ -1329,6 +1444,8 @@ export interface AuditDataBundle {
   metaUnreliable: boolean
   /** Pre-computed for the client so it doesn't need to re-summarize. */
   crawlSummary: AuditCrawlSummary
+  /** AI search visibility report — null when both AI surfaces failed/disabled. */
+  aiMentions: AIMentionsReport | null
 }
 
 /**

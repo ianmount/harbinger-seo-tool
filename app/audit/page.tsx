@@ -93,6 +93,7 @@ export default function AuditPage() {
           title: `Audit — ${websiteUrl}`,
           input: {
             websiteUrl,
+            partnerName: state.partnerName.trim(),
             priorityServices: state.priorityServices,
             negativeKeywords: state.negativeKeywords,
             existingTargetKeywords: state.existingTargetKeywords,
@@ -122,6 +123,7 @@ export default function AuditPage() {
   }, [
     validate,
     state.websiteUrl,
+    state.partnerName,
     state.priorityServices,
     state.negativeKeywords,
     state.existingTargetKeywords,
@@ -168,6 +170,22 @@ export default function AuditPage() {
             }}
             disabled={submitting}
           />
+        </div>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="partnerName">Business name (optional)</Label>
+          <Input
+            id="partnerName"
+            placeholder="e.g. Example Landscaping"
+            value={state.partnerName}
+            onChange={(e) => setField("partnerName", e.target.value)}
+            disabled={submitting}
+          />
+          <p className="text-xs text-ink-3">
+            Used to detect when ChatGPT, Perplexity, Gemini, or Claude mention
+            this business in answers to buyer-intent prompts. Leave blank to
+            auto-derive from the domain.
+          </p>
         </div>
 
         <div className="space-y-1.5">

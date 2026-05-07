@@ -4,6 +4,7 @@ import { useMemo } from "react"
 import ReactMarkdown from "react-markdown"
 import rehypeRaw from "rehype-raw"
 import rehypeSlug from "rehype-slug"
+import { AIMentions } from "./AIMentions"
 import { Section } from "./Section"
 import { Toc } from "./Toc"
 import { SortableTable, type ColumnDef } from "./SortableTable"
@@ -50,6 +51,8 @@ export function Dashboard({
       items.push({ id: "opportunities", label: "Top Opportunities" })
     if (data.topPages) items.push({ id: "top-pages", label: "Top Pages" })
     if (data.performance) items.push({ id: "performance", label: "Site Health" })
+    if (data.aiMentions)
+      items.push({ id: "ai-mentions", label: "AI Search Visibility" })
     // In-narrative sections — anchor IDs match the rehype-slug output for the
     // matching ## headings emitted by buildSynthesisPrompt + Claude. Gated on
     // narrative.outline so we don't surface dead links if Claude renames or
@@ -92,6 +95,7 @@ export function Dashboard({
           {data.performance ? (
             <PerformanceSectionView data={data.performance} />
           ) : null}
+          {data.aiMentions ? <AIMentions data={data.aiMentions} /> : null}
           <NarrativeSection markdown={data.narrative.markdown} />
         </div>
       </div>
@@ -615,7 +619,7 @@ function NarrativeSection({ markdown }: { markdown: string }) {
   return (
     <Section
       id="narrative"
-      eyebrow="§ 10"
+      eyebrow="§ 11"
       title="Full Audit Narrative"
       meta="Claude's full synthesis — supports the structured sections above."
       defaultOpen
