@@ -551,10 +551,22 @@ function buildAiMentions(
 
 function formatAiMentionsHeadline(report: AIMentionsReport): string {
   const parts: string[] = []
+  // Brand-discovery prompts use a different "mentioned" semantic
+  // (substantive info about the brand, not "named in a recommendation"),
+  // so describe them differently in the headline.
+  const isBrandDiscovery =
+    report.prompts.length > 0 &&
+    report.prompts.every((p) => p.source === "brand_discovery")
   if (report.totals.llmCallCount > 0) {
-    parts.push(
-      `${report.totals.llmMentionCount} of ${report.totals.llmCallCount} LLM responses mentioned ${report.prospectBrand}`,
-    )
+    if (isBrandDiscovery) {
+      parts.push(
+        `${report.totals.llmMentionCount} of ${report.totals.llmCallCount} LLM responses showed substantive awareness of ${report.prospectBrand}`,
+      )
+    } else {
+      parts.push(
+        `${report.totals.llmMentionCount} of ${report.totals.llmCallCount} LLM responses mentioned ${report.prospectBrand}`,
+      )
+    }
   }
   if (report.totals.aiOverviewKeywordCount > 0) {
     const present = report.totals.aiOverviewPresentCount

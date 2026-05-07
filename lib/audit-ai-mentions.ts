@@ -6,6 +6,7 @@ import type {
   AIMentionsReport,
   AIOverviewRow,
   AIPromptDefinition,
+  AiPromptSource,
   LLMResponseRow,
   LlmProvider,
 } from "@/lib/types"
@@ -58,6 +59,57 @@ const NATIONAL_PROMPT_TEMPLATES: string[] = [
   "What {service} companies should I consider working with?",
 ]
 
+// Keyword-fallback templates — used when no priority services were provided
+// and we fell back to top non-branded ranked keywords as the prompt slot.
+// Ranked keywords can be long-tail phrases ("kitchen remodel atlanta cost")
+// rather than clean service nouns, so these templates use {keyword} in
+// grammatically forgiving positions instead of the "{service} in {city}"
+// shape. Geo qualifier is dropped — geographic relevance is already
+// implicit in the underlying keyword set.
+const KEYWORD_FALLBACK_TEMPLATES: string[] = [
+  "Who are the top providers for: {keyword}?",
+  "Recommend a reputable company for: {keyword}.",
+  "Who should I hire for: {keyword}?",
+  "What are the best companies that handle: {keyword}?",
+  "Compare top providers for: {keyword}.",
+  "Recommended providers for: {keyword}.",
+  "Top-rated services for: {keyword}.",
+  "What companies specialize in: {keyword}?",
+]
+
+// Brand-discovery templates — last-resort fallback when the audit was run
+// with literally just a domain (no services, no ranked keywords). These
+// ask the LLMs about the company at {domain} directly. Detection semantics
+// shift: "mentioned" no longer means "LLM cited the prospect among
+// recommendations" (trivially true since the prompt is about them); it
+// means "LLM provided substantive information about the brand." See
+// `llmKnowsBrandFromText` below for the heuristic.
+const BRAND_DISCOVERY_TEMPLATES: string[] = [
+  "What can you tell me about the company at {domain}?",
+  "Who runs the website {domain}?",
+  "What services does the business at {domain} offer?",
+  "Is {domain} a reputable business?",
+  "Where is the company at {domain} based?",
+  "What industry does {domain} operate in?",
+  "How long has the business at {domain} been around?",
+  "What is the company at {domain} best known for?",
+]
+
+// Phrases LLMs use when they don't recognize a brand. Used to flip the
+// "mentioned" signal to false for brand-discovery prompts even though the
+// brand string trivially appears (because we asked about it).
+const NEGATIVE_KNOWLEDGE_PATTERNS: RegExp[] = [
+  /i don'?t have (any |much |specific |reliable |detailed )?(information|details?|data|knowledge)/i,
+  /i'?m not (familiar|aware|sure|certain)/i,
+  /i don'?t (know|recognize|have a record)/i,
+  /i (?:can'?t|cannot) (find|locate|verify|confirm)/i,
+  /no (?:specific |reliable |verifiable )?information/i,
+  /unable to (find|locate|provide|verify)/i,
+  /i lack (?:specific |any )?(information|details|data|knowledge)/i,
+  /(?:i'?m )?sorry,? (?:but )?i don'?t/i,
+  /not (?:able to |something i can )?(?:find|provide|verify)/i,
+]
+
 const TARGET_PROMPT_COUNT = 8
 const TARGET_KEYWORD_COUNT = 10
 const PROVIDER_CONCURRENCY = 3
@@ -97,10 +149,39 @@ export async function runAiMentions(
   const services = parseServices(input.priorityServices)
   const primaryMarket = input.targetMarkets[0] ?? null
 
+  // ── Pull ranked keywords ───────────────────────────────────────────────
+  // Used by the AI Mode SERP half AND as a fallback for LLM prompt slots
+  // when no services were provided. We fetch eagerly (rather than only
+  // when enableAiMode is true) so the keyword-fallback prompt path can
+  // access them. State-level when we have a market (Labs rejects most
+  // cities), nationwide otherwise — both known-good DFSEO Labs locations.
+  let nonBrandedRankedKeywords: string[] = []
+  const labsLocationName = primaryMarket
+    ? `${primaryMarket.state},United States`
+    : "United States"
+  const needRankedKeywords =
+    enableAiMode || (enableLlms && services.length === 0)
+  if (needRankedKeywords) {
+    try {
+      const ranked = await rankedKeywords(
+        normalizeDomain(input.websiteUrl) ?? input.websiteUrl,
+        { name: labsLocationName },
+        { limit: 50 },
+      )
+      nonBrandedRankedKeywords = dedupe(
+        ranked.map((r) => r.keyword).filter((kw) => !isBranded(kw, brandTokens)),
+      )
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "unknown"
+      notes.push(`Could not fetch ranked keywords: ${msg}`)
+    }
+  }
+
   // ── Build prompt set (LLM half) ────────────────────────────────────────
-  // Local templates when we have a market; nationwide templates otherwise
-  // (still tests AI discoverability, just without geo targeting). Services
-  // are still required — without them there's nothing to substitute.
+  // Three branches, in priority order:
+  //   1. Services provided → service-template prompts (LOCAL or NATIONAL).
+  //   2. No services, but ranked keywords available → keyword-fallback prompts.
+  //   3. Neither → skip LLM half (no noun to substitute).
   const prompts: AIPromptDefinition[] = []
   if (services.length > 0) {
     const templates = primaryMarket
@@ -128,36 +209,50 @@ export async function runAiMentions(
       i++
       if (prompts.length >= TARGET_PROMPT_COUNT) break
     }
-  } else {
-    notes.push("Skipped LLM prompts — no priority services provided.")
-  }
-
-  // ── Pull ranked keywords (AI Mode SERP half) ───────────────────────────
-  // Use state-level when we have a market (Labs rejects most cities),
-  // nationwide otherwise. Either is a known-good DFSEO Labs location.
-  let aiModeKeywords: string[] = []
-  const labsLocationName = primaryMarket
-    ? `${primaryMarket.state},United States`
-    : "United States"
-  if (enableAiMode) {
-    try {
-      const ranked = await rankedKeywords(
-        normalizeDomain(input.websiteUrl) ?? input.websiteUrl,
-        { name: labsLocationName },
-        { limit: 50 },
-      )
-      // Filter out clearly-branded keywords (substring match on brand tokens)
-      // so we test discoverability, not loyalty.
-      const nonBranded = ranked
-        .map((r) => r.keyword)
-        .filter((kw) => !isBranded(kw, brandTokens))
-      // Prioritize by search volume (already ordered by traffic from rankedKeywords).
-      aiModeKeywords = dedupe(nonBranded).slice(0, TARGET_KEYWORD_COUNT)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "unknown"
-      notes.push(`Could not fetch ranked keywords for AI Mode SERP: ${msg}`)
+  } else if (nonBrandedRankedKeywords.length > 0) {
+    notes.push(
+      "No priority services provided — derived prompt topics from the prospect's top non-branded ranked keywords. Add explicit services for cleaner prompts.",
+    )
+    // Use the top 4 keywords to seed 8 prompts (each keyword gets 2 templates).
+    const seedKeywords = nonBrandedRankedKeywords.slice(0, 4)
+    let i = 0
+    for (const tpl of KEYWORD_FALLBACK_TEMPLATES) {
+      const keyword = seedKeywords[i % seedKeywords.length]
+      prompts.push({
+        id: `kw-${i}`,
+        prompt: tpl.replace("{keyword}", keyword),
+        source: "ranked_keyword",
+        keyword,
+      })
+      i++
+      if (prompts.length >= TARGET_PROMPT_COUNT) break
+    }
+  } else if (enableLlms) {
+    // Final fallback — domain-only audit. Brand-discovery prompts ask LLMs
+    // directly about the company at the domain. "Mentioned" detection
+    // shifts to "did the LLM provide substantive info?" (see
+    // llmResponseToRow's brand_discovery branch).
+    notes.push(
+      "No services and no ranked keywords — running brand-discovery prompts only. LLM responses were checked for whether the assistant could provide any substantive information about the prospect, not for whether the prospect was named in a recommendation.",
+    )
+    const apexDomain = normalizeDomain(input.websiteUrl) ?? input.websiteUrl
+    let i = 0
+    for (const tpl of BRAND_DISCOVERY_TEMPLATES) {
+      prompts.push({
+        id: `bd-${i}`,
+        prompt: tpl.replace("{domain}", apexDomain),
+        source: "brand_discovery",
+      })
+      i++
+      if (prompts.length >= TARGET_PROMPT_COUNT) break
     }
   }
+
+  // ── Select AI Mode SERP keyword set ────────────────────────────────────
+  // Same source as the prompt fallback — top non-branded ranked keywords.
+  const aiModeKeywords = enableAiMode
+    ? nonBrandedRankedKeywords.slice(0, TARGET_KEYWORD_COUNT)
+    : []
 
   // ── Run LLM calls (provider × prompt grid) ─────────────────────────────
   const llmResponses: LLMResponseRow[] = []
@@ -187,6 +282,7 @@ export async function runAiMentions(
             return llmResponseToRow({
               provider: t.provider as LlmProvider,
               promptId: t.prompt.id,
+              promptSource: t.prompt.source,
               text: res.text,
               citedDomains: res.citedDomains,
               costUsd: res.costUsd,
@@ -359,6 +455,7 @@ export async function runAiMentions(
 function llmResponseToRow(opts: {
   provider: LlmProvider
   promptId: string
+  promptSource: AiPromptSource
   text: string
   citedDomains: string[]
   costUsd: number
@@ -369,10 +466,18 @@ function llmResponseToRow(opts: {
 }): LLMResponseRow {
   const apex = normalizeDomain(opts.websiteUrl) ?? ""
   const haystack = opts.text.toLowerCase()
+
+  // For brand_discovery prompts, "mentioned" semantics shift: we asked
+  // about the brand by name, so a verbatim match is trivially true. The
+  // useful signal is whether the LLM produced substantive info vs. saying
+  // it doesn't recognize the brand. For service/keyword prompts, fall
+  // through to the standard discoverability check.
   const mentioned =
-    matchesBrand(haystack, opts.brand, opts.brandTokens) ||
-    (apex.length > 0 && haystack.includes(apex)) ||
-    opts.citedDomains.includes(apex)
+    opts.promptSource === "brand_discovery"
+      ? llmKnowsBrandFromText(opts.text)
+      : matchesBrand(haystack, opts.brand, opts.brandTokens) ||
+        (apex.length > 0 && haystack.includes(apex)) ||
+        opts.citedDomains.includes(apex)
 
   const competitorMentions = uniqueCompetitorMatches({
     text: haystack,
@@ -389,6 +494,21 @@ function llmResponseToRow(opts: {
     citedDomains: opts.citedDomains,
     costUsd: opts.costUsd,
   }
+}
+
+/**
+ * Heuristic check for whether an LLM response demonstrates awareness of the
+ * brand. Used for brand_discovery prompts where "did the LLM mention the
+ * brand?" is trivially true (we asked about it). True signal: does the
+ * response contain a refusal/uncertainty phrase, or is it short and empty?
+ */
+function llmKnowsBrandFromText(text: string): boolean {
+  const trimmed = text.trim()
+  if (trimmed.length < 60) return false
+  for (const re of NEGATIVE_KNOWLEDGE_PATTERNS) {
+    if (re.test(trimmed)) return false
+  }
+  return true
 }
 
 function aiModeRowFromResult(opts: {

@@ -1305,8 +1305,19 @@ export interface AssessmentAuditResult {
 
 export type LlmProvider = "chat_gpt" | "perplexity" | "gemini" | "claude"
 
-/** "Source" of a tested prompt — a service template or a real ranked keyword. */
-export type AiPromptSource = "service_template" | "ranked_keyword"
+/**
+ * "Source" of a tested prompt. The audit picks the highest-fidelity source
+ * the inputs allow:
+ *   - service_template — uses prospect's priorityServices ± targetMarket
+ *   - ranked_keyword   — falls back to non-branded ranked keywords as
+ *                        substitutes when services were not provided
+ *   - brand_discovery  — last resort when only a domain is known; asks
+ *                        LLMs directly about the company at the domain
+ */
+export type AiPromptSource =
+  | "service_template"
+  | "ranked_keyword"
+  | "brand_discovery"
 
 export interface AIPromptDefinition {
   id: string
