@@ -30,11 +30,10 @@ import type {
 
 const PROVIDERS: LlmProvider[] = ["chat_gpt", "perplexity", "gemini", "claude"]
 
-// Templates that produce buyer-intent prompts. {service} and {city}/{state}
-// are substituted from the prospect inputs. The set is hand-tuned to cover
-// the common "near me", "best", "recommend", "how do I find" intents that
-// LLMs answer with named businesses.
-const PROMPT_TEMPLATES: string[] = [
+// Local templates — used when the prospect provided a target market. These
+// are the strongest signal because LLM answers to local "best X in Y" queries
+// surface named businesses very directly.
+const LOCAL_PROMPT_TEMPLATES: string[] = [
   "What are the best {service} in {city}, {state}?",
   "Who is the top-rated {service} near {city}, {state}?",
   "Recommend a reliable {service} in {city}, {state}.",
@@ -43,6 +42,20 @@ const PROMPT_TEMPLATES: string[] = [
   "Compare the leading {service} in {city}, {state}.",
   "I'm looking for a {service} in {city}, {state} — who should I call?",
   "Who are the most well-known {service} businesses in {city}, {state}?",
+]
+
+// Nationwide fallback templates — used when the prospect didn't provide a
+// target market. Less actionable for local service businesses (LLMs will
+// surface national chains) but still tests basic AI discoverability.
+const NATIONAL_PROMPT_TEMPLATES: string[] = [
+  "What are the best {service} companies in the United States?",
+  "Who are the most reputable {service} providers nationwide?",
+  "Recommend top-rated {service} companies.",
+  "Which {service} companies have the strongest reputation?",
+  "What are the leading {service} brands right now?",
+  "Who are the most well-known {service} businesses?",
+  "Compare the top {service} companies.",
+  "What {service} companies should I consider working with?",
 ]
 
 const TARGET_PROMPT_COUNT = 8
@@ -85,38 +98,52 @@ export async function runAiMentions(
   const primaryMarket = input.targetMarkets[0] ?? null
 
   // ── Build prompt set (LLM half) ────────────────────────────────────────
+  // Local templates when we have a market; nationwide templates otherwise
+  // (still tests AI discoverability, just without geo targeting). Services
+  // are still required — without them there's nothing to substitute.
   const prompts: AIPromptDefinition[] = []
-  if (services.length > 0 && primaryMarket) {
+  if (services.length > 0) {
+    const templates = primaryMarket
+      ? LOCAL_PROMPT_TEMPLATES
+      : NATIONAL_PROMPT_TEMPLATES
+    if (!primaryMarket) {
+      notes.push(
+        "No target market provided — testing nationwide LLM queries instead. Add a target location for local-results coverage.",
+      )
+    }
     let i = 0
-    for (const tpl of PROMPT_TEMPLATES) {
+    for (const tpl of templates) {
       const service = services[i % services.length]
+      let prompt = tpl.replace("{service}", service)
+      if (primaryMarket) {
+        prompt = prompt
+          .replace("{city}", primaryMarket.city)
+          .replace("{state}", primaryMarket.state)
+      }
       prompts.push({
         id: `tpl-${i}`,
-        prompt: tpl
-          .replace("{service}", service)
-          .replace("{city}", primaryMarket.city)
-          .replace("{state}", primaryMarket.state),
+        prompt,
         source: "service_template",
       })
       i++
       if (prompts.length >= TARGET_PROMPT_COUNT) break
     }
   } else {
-    notes.push(
-      services.length === 0
-        ? "Skipped LLM prompts — no priority services provided."
-        : "Skipped LLM prompts — no target market provided.",
-    )
+    notes.push("Skipped LLM prompts — no priority services provided.")
   }
 
   // ── Pull ranked keywords (AI Mode SERP half) ───────────────────────────
+  // Use state-level when we have a market (Labs rejects most cities),
+  // nationwide otherwise. Either is a known-good DFSEO Labs location.
   let aiModeKeywords: string[] = []
-  if (enableAiMode && primaryMarket) {
+  const labsLocationName = primaryMarket
+    ? `${primaryMarket.state},United States`
+    : "United States"
+  if (enableAiMode) {
     try {
-      // State-level location for ranked_keywords (city often rejected by Labs).
       const ranked = await rankedKeywords(
         normalizeDomain(input.websiteUrl) ?? input.websiteUrl,
-        { name: `${primaryMarket.state},United States` },
+        { name: labsLocationName },
         { limit: 50 },
       )
       // Filter out clearly-branded keywords (substring match on brand tokens)
@@ -130,8 +157,6 @@ export async function runAiMentions(
       const msg = err instanceof Error ? err.message : "unknown"
       notes.push(`Could not fetch ranked keywords for AI Mode SERP: ${msg}`)
     }
-  } else if (enableAiMode && !primaryMarket) {
-    notes.push("Skipped AI Mode SERP — no target market provided.")
   }
 
   // ── Run LLM calls (provider × prompt grid) ─────────────────────────────
@@ -192,24 +217,31 @@ export async function runAiMentions(
   }
 
   // ── Run Google AI Mode SERP probes ─────────────────────────────────────
+  // Location strategy:
+  //   - With a market: try city → fall back to state on DFSEO rejection.
+  //   - Without a market: nationwide ("United States") for all probes.
   const aiOverviewRows: AIOverviewRow[] = []
-  if (enableAiMode && aiModeKeywords.length > 0 && primaryMarket) {
-    // Try city-level location first, fall back to state-level if DFSEO
-    // rejects (common for smaller cities). Decide once per-audit by
-    // probing the first keyword.
-    const cityLocation = `${primaryMarket.city},${primaryMarket.state},United States`
-    const stateLocation = `${primaryMarket.state},United States`
-    let useLocation = cityLocation
+  if (enableAiMode && aiModeKeywords.length > 0) {
+    const displayLocation = primaryMarket
+      ? locationLabel(primaryMarket)
+      : "United States"
+    const initialLocation = primaryMarket
+      ? `${primaryMarket.city},${primaryMarket.state},United States`
+      : "United States"
+    const fallbackLocation = primaryMarket
+      ? `${primaryMarket.state},United States`
+      : "United States"
+    let useLocation = initialLocation
     let probeFailed = false
     try {
       const probe = await aiModeSerpLive({
         keyword: aiModeKeywords[0],
-        locationName: cityLocation,
+        locationName: initialLocation,
       })
       aiOverviewRows.push(
         aiModeRowFromResult({
           keyword: aiModeKeywords[0],
-          location: locationLabel(primaryMarket),
+          location: displayLocation,
           result: probe,
           websiteUrl: input.websiteUrl,
           competitorDomains,
@@ -217,9 +249,8 @@ export async function runAiMentions(
       )
     } catch (err) {
       const msg = err instanceof Error ? err.message : "unknown"
-      // Fall back to state-level if the city is rejected.
-      if (/40501|location/i.test(msg)) {
-        useLocation = stateLocation
+      if (primaryMarket && /40501|location/i.test(msg)) {
+        useLocation = fallbackLocation
         notes.push(
           `Google AI Mode rejected city "${primaryMarket.city}", falling back to ${primaryMarket.state} state-level.`,
         )
@@ -239,7 +270,7 @@ export async function runAiMentions(
           })
           return aiModeRowFromResult({
             keyword: kw,
-            location: locationLabel(primaryMarket),
+            location: displayLocation,
             result: res,
             websiteUrl: input.websiteUrl,
             competitorDomains,
@@ -248,7 +279,7 @@ export async function runAiMentions(
           const msg = err instanceof Error ? err.message : "unknown"
           return {
             keyword: kw,
-            location: locationLabel(primaryMarket),
+            location: displayLocation,
             hasAiOverview: false,
             prospectMentioned: false,
             citedDomains: [],
