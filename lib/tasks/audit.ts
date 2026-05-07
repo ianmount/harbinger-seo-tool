@@ -4,6 +4,7 @@ import {
   computeFullAuditAttention,
   markJobAttention,
 } from "@/lib/attention"
+import { runAiMentions } from "@/lib/audit-ai-mentions"
 import { createCostAccumulator, withAuditCost } from "@/lib/audit-cost"
 import { detectBrokenInternalLinks } from "@/lib/audit-broken-links"
 import { crawlSite } from "@/lib/audit-crawl"
@@ -42,6 +43,7 @@ import {
 } from "@/lib/jobs"
 import { runPageSpeedAudit } from "@/lib/pagespeed"
 import type {
+  AIMentionsReport,
   AssessmentAuditResult,
   AssessmentGa4Data,
   AssessmentGscData,
@@ -108,6 +110,7 @@ const STAGE_LABELS: Record<string, string> = {
   crawl_progress: "Crawling site",
   crawl_done: "Crawl complete",
   pagespeed_done: "PageSpeed complete",
+  ai_mentions_done: "AI search visibility scan complete",
   parallel_done: "Gather phase complete",
   index_coverage_started: "Checking indexation coverage",
   index_coverage_done: "Indexation coverage complete",
@@ -444,6 +447,32 @@ async function gatherAuditData(
     return ps
   })()
 
+  // AI search visibility scan. Runs in parallel — all data it needs is in
+  // `body`, plus an internal call to ranked_keywords for the AI Mode SERP
+  // half. Failure of this whole step is non-fatal: the section just won't
+  // render in the dashboard.
+  const aiMentionsPromise: Promise<AIMentionsReport | null> = (async () => {
+    try {
+      const report = await runAiMentions({
+        websiteUrl,
+        partnerName: body.partnerName,
+        priorityServices: body.priorityServices,
+        targetMarkets: body.targetMarkets,
+      })
+      await writeProgress(
+        "ai_mentions_done",
+        `llm=${report.totals.llmCallCount} ai_overview=${report.totals.aiOverviewKeywordCount} cost=$${report.costUsd.toFixed(2)}`,
+      )
+      return report
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error"
+      warnings.push(
+        `AI search visibility scan failed; the audit will continue without that section. (${msg})`,
+      )
+      return null
+    }
+  })()
+
   crawlPromise
     .then((c) =>
       void writeProgress(
@@ -462,6 +491,7 @@ async function gatherAuditData(
     backlinkProfileRes,
     backlinkTimeseriesRes,
     pageSpeedRes,
+    aiMentionsRes,
   ] = await Promise.all([
     gscPromise,
     ga4Promise,
@@ -469,6 +499,7 @@ async function gatherAuditData(
     backlinkPromise,
     backlinkTimeseriesPromise,
     pageSpeedPromise,
+    aiMentionsPromise,
   ])
 
   const gsc = gscRes?.data ?? null
@@ -547,6 +578,7 @@ async function gatherAuditData(
     headingIssues,
     metaUnreliable: metaCheck.unreliable,
     crawlSummary: summarizeCrawl(crawl),
+    aiMentions: aiMentionsRes,
   }
 }
 
@@ -623,6 +655,7 @@ export async function runAuditPipeline(
       ga4Data: bundle.ga4,
       crawlSummary: bundle.crawlSummary,
       cannibalization: bundle.cannibalization,
+      aiMentions: bundle.aiMentions,
       durationSeconds: bundle.gatherDurationSeconds + durationSeconds,
     }
     return auditResult

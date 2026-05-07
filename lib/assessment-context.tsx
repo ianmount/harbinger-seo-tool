@@ -28,6 +28,13 @@ import type {
 export interface AssessmentState {
   // Manual inputs (Audit tab form).
   websiteUrl: string
+  /**
+   * Prospect business name. Used by the audit pipeline as the brand-token seed
+   * for branded vs non-branded GSC splits and for AI search mention detection
+   * (LLM responses are scanned for this string). Empty is OK — the pipeline
+   * falls back to deriving brand tokens from the apex domain.
+   */
+  partnerName: string
   priorityServices: string
   negativeKeywords: string
   /** Newline-separated. */
@@ -69,6 +76,7 @@ export interface AssessmentState {
 
 const INITIAL_STATE: AssessmentState = {
   websiteUrl: "",
+  partnerName: "",
   priorityServices: "",
   negativeKeywords: "",
   existingTargetKeywords: "",

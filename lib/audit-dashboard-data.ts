@@ -1,5 +1,6 @@
 import GithubSlugger from "github-slugger"
 import type {
+  AIMentionsReport,
   AssessmentAuditResult,
   AssessmentGa4Data,
   AssessmentGscData,
@@ -9,6 +10,7 @@ import type {
   GSCTopPageRow,
   GSCTopQueryRow,
   InspectedUrl,
+  LlmProvider,
 } from "@/lib/types"
 
 /**
@@ -33,7 +35,63 @@ export interface DashboardData {
   opportunities: OpportunitiesSection | null
   topPages: TopPagesSection | null
   performance: PerformanceSection | null
+  aiMentions: AIMentionsDisplaySection | null
   narrative: NarrativeSection
+}
+
+/**
+ * Display-ready shape for the "AI Search Visibility" dashboard section.
+ * Mostly a 1:1 of `AIMentionsReport` with a couple of pre-formatted strings
+ * so the renderer doesn't repeat itself.
+ */
+export interface AIMentionsDisplaySection {
+  prospectBrand: string
+  prospectDomain: string
+  /**
+   * One row per (provider, prompt) cell — sorted by provider then prompt
+   * order so the table reads predictably.
+   */
+  llmRows: AILlmDisplayRow[]
+  aiOverviewRows: AIOverviewDisplayRow[]
+  /** Per-provider summary chips at the top of the section. */
+  providerSummaries: AIProviderSummary[]
+  /** Bottom-of-section: which competitors got cited the most. */
+  topCompetitorMentions: { domain: string; count: number }[]
+  /** Aggregate text under the headline ("0 of 32 LLM responses mentioned …"). */
+  headline: string
+  costUsd: number
+  notes: string[]
+}
+
+export interface AILlmDisplayRow {
+  promptId: string
+  prompt: string
+  provider: LlmProvider
+  providerLabel: string
+  mentioned: boolean
+  competitorMentions: string[]
+  citedDomainCount: number
+  responseSnippet: string
+  error?: string
+}
+
+export interface AIOverviewDisplayRow {
+  keyword: string
+  location: string
+  hasAiOverview: boolean
+  prospectMentioned: boolean
+  competitorMentions: string[]
+  citedDomains: string[]
+  error?: string
+}
+
+export interface AIProviderSummary {
+  provider: LlmProvider
+  label: string
+  mentioned: number
+  total: number
+  /** Mention rate as a percentage 0-100. */
+  ratePct: number
 }
 
 export interface DashboardSummaryItem {
@@ -408,6 +466,114 @@ function buildTopPages(topPages: GSCTopPageRow[]): TopPagesSection | null {
   return { rows: topPages.slice(0, 25) }
 }
 
+const PROVIDER_LABELS: Record<LlmProvider, string> = {
+  chat_gpt: "ChatGPT",
+  perplexity: "Perplexity",
+  gemini: "Gemini",
+  claude: "Claude",
+}
+
+function buildAiMentions(
+  report: AIMentionsReport | null,
+): AIMentionsDisplaySection | null {
+  if (!report) return null
+  // Skip rendering entirely when neither half collected anything (typical
+  // when a prospect has no priority services AND no markets — there's
+  // nothing useful to show).
+  if (
+    report.totals.llmCallCount === 0 &&
+    report.totals.aiOverviewKeywordCount === 0
+  ) {
+    return null
+  }
+
+  const promptById = new Map(report.prompts.map((p) => [p.id, p]))
+  const llmRows: AILlmDisplayRow[] = report.llmResponses.map((r) => {
+    const prompt = promptById.get(r.promptId)
+    return {
+      promptId: r.promptId,
+      prompt: prompt?.prompt ?? r.promptId,
+      provider: r.provider,
+      providerLabel: PROVIDER_LABELS[r.provider],
+      mentioned: r.mentioned,
+      competitorMentions: r.competitorMentions,
+      citedDomainCount: r.citedDomains.length,
+      responseSnippet: snippet(r.responseText, 280),
+      error: r.error,
+    }
+  })
+
+  const providerSummaries: AIProviderSummary[] = (
+    Object.keys(PROVIDER_LABELS) as LlmProvider[]
+  )
+    .map((provider) => {
+      const calls = report.llmResponses.filter(
+        (r) => r.provider === provider && !r.error,
+      )
+      const mentioned = calls.filter((r) => r.mentioned).length
+      const ratePct = calls.length > 0 ? Math.round((mentioned / calls.length) * 100) : 0
+      return {
+        provider,
+        label: PROVIDER_LABELS[provider],
+        mentioned,
+        total: calls.length,
+        ratePct,
+      }
+    })
+    .filter((s) => s.total > 0)
+
+  const aiOverviewRows: AIOverviewDisplayRow[] = report.aiOverviewRows.map(
+    (r) => ({
+      keyword: r.keyword,
+      location: r.location,
+      hasAiOverview: r.hasAiOverview,
+      prospectMentioned: r.prospectMentioned,
+      competitorMentions: r.competitorMentions,
+      citedDomains: r.citedDomains.slice(0, 8),
+      error: r.error,
+    }),
+  )
+
+  const headline = formatAiMentionsHeadline(report)
+
+  return {
+    prospectBrand: report.prospectBrand,
+    prospectDomain: report.prospectDomain,
+    llmRows,
+    aiOverviewRows,
+    providerSummaries,
+    topCompetitorMentions: report.totals.topCompetitorMentions,
+    headline,
+    costUsd: report.costUsd,
+    notes: report.notes,
+  }
+}
+
+function formatAiMentionsHeadline(report: AIMentionsReport): string {
+  const parts: string[] = []
+  if (report.totals.llmCallCount > 0) {
+    parts.push(
+      `${report.totals.llmMentionCount} of ${report.totals.llmCallCount} LLM responses mentioned ${report.prospectBrand}`,
+    )
+  }
+  if (report.totals.aiOverviewKeywordCount > 0) {
+    const present = report.totals.aiOverviewPresentCount
+    const cited = report.totals.aiOverviewMentionCount
+    parts.push(
+      `Google AI Mode appeared on ${present} of ${report.totals.aiOverviewKeywordCount} keywords; the prospect was cited in ${cited}`,
+    )
+  }
+  if (parts.length === 0) return "No AI search data collected."
+  return parts.join(". ") + "."
+}
+
+function snippet(text: string, max: number): string {
+  if (!text) return ""
+  const compact = text.replace(/\s+/g, " ").trim()
+  if (compact.length <= max) return compact
+  return `${compact.slice(0, max - 1).trimEnd()}…`
+}
+
 function buildPerformance(
   result: AssessmentAuditResult,
 ): PerformanceSection | null {
@@ -559,6 +725,7 @@ export function buildDashboardData(
     opportunities: buildOpportunities(topQueries),
     topPages: buildTopPages(topPages),
     performance: buildPerformance(result),
+    aiMentions: buildAiMentions(result.aiMentions),
     narrative: {
       markdown: result.auditMarkdown,
       outline: buildOutline(result.auditMarkdown),
@@ -577,5 +744,6 @@ export const DASHBOARD_SECTIONS: { id: string; label: string }[] = [
   { id: "opportunities", label: "Top Opportunities" },
   { id: "top-pages", label: "Top Landing Pages" },
   { id: "performance", label: "Site Health" },
+  { id: "ai-mentions", label: "AI Search Visibility" },
   { id: "narrative", label: "Full Narrative" },
 ]

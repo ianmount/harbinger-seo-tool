@@ -1,5 +1,6 @@
 import GithubSlugger from "github-slugger"
 import type {
+  AIMentionsDisplaySection,
   CannibalizationSection,
   CompetitorsSection,
   DashboardData,
@@ -54,6 +55,7 @@ export function renderStandaloneHtml(data: DashboardData): string {
       ${data.opportunities ? renderOpportunities(data.opportunities) : ""}
       ${data.topPages ? renderTopPages(data.topPages) : ""}
       ${data.performance ? renderPerformance(data.performance) : ""}
+      ${data.aiMentions ? renderAiMentions(data.aiMentions) : ""}
       ${renderNarrative(data)}
     </div>
   </div>
@@ -78,6 +80,8 @@ function renderToc(data: DashboardData): string {
     items.push({ id: "opportunities", label: "Top Opportunities" })
   if (data.topPages) items.push({ id: "top-pages", label: "Top Pages" })
   if (data.performance) items.push({ id: "performance", label: "Site Health" })
+  if (data.aiMentions)
+    items.push({ id: "ai-mentions", label: "AI Search Visibility" })
   // In-narrative sections — anchor IDs are emitted by markdownToBasicHtml
   // using the same slug algorithm as rehype-slug (github-slugger). Gated on
   // narrative.outline so dead links don't show up when a section is omitted.
@@ -515,11 +519,70 @@ function renderPerformance(data: PerformanceSection): string {
   )
 }
 
+function renderAiMentions(data: AIMentionsDisplaySection): string {
+  const chips =
+    data.providerSummaries.length === 0
+      ? ""
+      : `<div style="margin-bottom:16px"><p class="eyebrow red">Mention rate by AI assistant</p><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px">${data.providerSummaries
+          .map(
+            (s) =>
+              `<div style="border:1px solid #e5ded2;background:rgba(250,247,242,0.6);border-radius:10px;padding:14px"><p style="font-family:'Montserrat',system-ui,sans-serif;font-size:10.5px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:rgba(3,41,58,0.62);margin:0">${escapeHtml(s.label)}</p><p style="font-family:'Montserrat',system-ui,sans-serif;font-size:24px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;margin:8px 0 0;color:${s.mentioned > 0 ? "#03293a" : "rgba(3,41,58,0.62)"}">${s.mentioned}<span style="font-size:14px;color:rgba(3,41,58,0.62)"> / ${s.total}</span></p><p style="font-family:'Lora',Georgia,serif;font-size:12.5px;font-style:italic;color:rgba(3,41,58,0.62);margin:6px 0 0">${s.ratePct}% mention rate</p></div>`,
+          )
+          .join("")}</div></div>`
+
+  const llmTable =
+    data.llmRows.length === 0
+      ? ""
+      : `<div style="margin-bottom:20px"><p class="eyebrow red">LLM responses</p><div style="overflow:hidden;border:1px solid #e5ded2;border-radius:10px"><table style="width:100%;border-collapse:collapse;font-family:'Montserrat',system-ui,sans-serif;font-size:12.5px"><thead style="background:rgba(250,247,242,0.6);text-align:left;font-size:10.5px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:rgba(3,41,58,0.62)"><tr><th style="padding:8px 12px;width:110px">Assistant</th><th style="padding:8px 12px">Prompt</th><th style="padding:8px 12px;width:120px">${escapeHtml(data.prospectBrand)} mentioned?</th><th style="padding:8px 12px;width:200px">Competitors named</th></tr></thead><tbody>${data.llmRows
+          .map(
+            (r) =>
+              `<tr style="border-top:1px solid #e5ded2;vertical-align:top"><td style="padding:8px 12px;font-weight:700;color:rgba(3,41,58,0.74)">${escapeHtml(r.providerLabel)}</td><td style="padding:8px 12px"><div style="font-family:'Lora',Georgia,serif;font-size:13px">${escapeHtml(r.prompt)}</div>${r.responseSnippet || r.error ? `<div style="margin-top:6px;border:1px solid #e5ded2;background:rgba(250,247,242,0.6);border-radius:6px;padding:8px 12px;font-family:'Lora',Georgia,serif;font-size:12.5px;font-style:italic;color:rgba(3,41,58,0.74)">${r.error ? `<span style="color:#c31b00;font-style:normal">Error: ${escapeHtml(r.error)}</span>` : escapeHtml(r.responseSnippet)}</div>` : ""}</td><td style="padding:8px 12px">${r.error ? `<span style="font-weight:700;color:rgba(3,41,58,0.62)">—</span>` : r.mentioned ? `<span style="background:#dcefe2;color:#0f5e3a;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase">Yes</span>` : `<span style="background:rgba(195,27,0,0.1);color:#c31b00;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase">No</span>`}</td><td style="padding:8px 12px;font-size:12px;color:rgba(3,41,58,0.74)">${r.competitorMentions.length === 0 ? "—" : escapeHtml(r.competitorMentions.join(", "))}</td></tr>`,
+          )
+          .join("")}</tbody></table></div></div>`
+
+  const aiOverviewTable =
+    data.aiOverviewRows.length === 0
+      ? ""
+      : `<div style="margin-bottom:20px"><p class="eyebrow red">Google AI Mode results</p><div style="overflow:hidden;border:1px solid #e5ded2;border-radius:10px"><table style="width:100%;border-collapse:collapse;font-family:'Montserrat',system-ui,sans-serif;font-size:12.5px"><thead style="background:rgba(250,247,242,0.6);text-align:left;font-size:10.5px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:rgba(3,41,58,0.62)"><tr><th style="padding:8px 12px">Keyword</th><th style="padding:8px 12px;width:140px">Location</th><th style="padding:8px 12px;width:100px">AI Overview</th><th style="padding:8px 12px;width:130px">${escapeHtml(data.prospectDomain)} cited?</th><th style="padding:8px 12px;width:200px">Competitors cited</th><th style="padding:8px 12px">Top cited sources</th></tr></thead><tbody>${data.aiOverviewRows
+          .map(
+            (r) =>
+              `<tr style="border-top:1px solid #e5ded2;vertical-align:top"><td style="padding:8px 12px">${escapeHtml(r.keyword)}</td><td style="padding:8px 12px;color:rgba(3,41,58,0.74)">${escapeHtml(r.location)}</td><td style="padding:8px 12px">${r.hasAiOverview ? `<b>Yes</b>` : `<span style="color:rgba(3,41,58,0.62)">No</span>`}</td><td style="padding:8px 12px">${r.error ? `<span style="font-weight:700;color:rgba(3,41,58,0.62)">—</span>` : r.prospectMentioned ? `<span style="background:#dcefe2;color:#0f5e3a;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase">Yes</span>` : `<span style="background:rgba(195,27,0,0.1);color:#c31b00;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase">No</span>`}</td><td style="padding:8px 12px;font-size:12px;color:rgba(3,41,58,0.74)">${r.competitorMentions.length === 0 ? "—" : escapeHtml(r.competitorMentions.join(", "))}</td><td style="padding:8px 12px;font-size:12px;color:rgba(3,41,58,0.74)">${r.citedDomains.length === 0 ? "—" : escapeHtml(r.citedDomains.join(", "))}</td></tr>`,
+          )
+          .join("")}</tbody></table></div></div>`
+
+  const competitorList =
+    data.topCompetitorMentions.length === 0
+      ? ""
+      : `<div style="margin-bottom:20px"><p class="eyebrow red">Most-cited competitors across all AI surfaces</p><ul style="list-style:none;padding:0;margin:0">${data.topCompetitorMentions
+          .map(
+            (r) =>
+              `<li style="display:grid;grid-template-columns:minmax(0,1fr) 60px;gap:12px;align-items:center;border:1px solid #e5ded2;background:rgba(250,247,242,0.4);border-radius:6px;padding:8px 12px;margin-bottom:6px"><span style="font-family:'Montserrat',system-ui,sans-serif;font-size:12.5px;font-weight:600;color:rgba(3,41,58,0.74)">${escapeHtml(r.domain)}</span><span style="text-align:right;font-family:'Montserrat',system-ui,sans-serif;font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums">${r.count}</span></li>`,
+          )
+          .join("")}</ul></div>`
+
+  const notes =
+    data.notes.length === 0
+      ? ""
+      : `<div style="border:1px solid #e5ded2;background:rgba(250,247,242,0.4);border-radius:6px;padding:10px 16px;font-family:'Lora',Georgia,serif;font-size:12.5px;font-style:italic;color:rgba(3,41,58,0.74);margin-bottom:14px"><p style="margin:0 0 4px;font-family:'Montserrat',system-ui,sans-serif;font-size:10.5px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;font-style:normal;color:rgba(3,41,58,0.62)">Notes</p><ul style="margin:0;padding-left:20px">${data.notes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")}</ul></div>`
+
+  const cost = `<p style="font-family:'Lora',Georgia,serif;font-size:12px;font-style:italic;color:rgba(3,41,58,0.62);margin-top:12px">AI Optimization API + Google AI Mode SERP probes via DataForSEO. Cost for this section: $${data.costUsd.toFixed(2)}.</p>`
+
+  const body = chips + llmTable + aiOverviewTable + competitorList + notes + cost
+
+  return renderSection(
+    "ai-mentions",
+    "§ 10",
+    "AI Search Visibility",
+    data.headline,
+    body,
+  )
+}
+
 function renderNarrative(data: DashboardData): string {
   const html = markdownToBasicHtml(data.narrative.markdown)
   return renderSection(
     "narrative",
-    "§ 10",
+    "§ 11",
     "Full Audit Narrative",
     "Claude's full synthesis — supports the structured sections above.",
     `<div class="narrative">${html}</div>`,
