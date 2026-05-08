@@ -44,14 +44,16 @@ export type CompAnalysisInput = z.infer<typeof CompAnalysisInputSchema>
 // One HTTP call per (seed × location) probe — DFS's
 // /v3/serp/google/organic/live/advanced rejects multi-task arrays with
 // "You can set only one task at a time", so live SERP can't be batched.
-// SERP_CONCURRENCY governs parallelism inside one chunk; each chunk is its
-// own Inngest step.run with its own ~800s Vercel budget. 30 stays under
-// DFS's documented 2000 calls/min cap, and dfsRequest retries 429s with
-// backoff. SERP_CHUNK_SIZE bounds both per-chunk wall-clock and the
-// step.run output size (4MiB Inngest cap) — 100 probes × ~100 organic
-// items × ~120 bytes ≈ 1.2 MB of returned JSON, well under cap.
+// SERP_CONCURRENCY governs parallelism inside one chunk; each chunk is
+// its own Inngest step.run with its own ~800s Vercel budget. 30 stays
+// under DFS's documented 2000 calls/min cap, and dfsRequest retries 429s
+// with backoff and times out hung connections at 60s/attempt.
+// SERP_CHUNK_SIZE is small (50) so the UI shows progress every minute or
+// two and a slow chunk has narrower blast radius. Step.run output stays
+// well under the 4MiB Inngest cap (50 probes × ~100 organic items × ~120
+// bytes ≈ 600 KB).
 const SERP_CONCURRENCY = 30
-const SERP_CHUNK_SIZE = 100
+const SERP_CHUNK_SIZE = 50
 const SERP_COST_USD = 0.002
 
 function cleanDomain(raw: string): string {
@@ -353,8 +355,8 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job, step }) => {
   // 2. SERP probes — chunked across multiple step.run blocks. Inngest
   // re-invokes the function across step boundaries, so cumulative SERP
   // wall-clock can exceed the 800s Vercel ceiling. Each chunk's body must
-  // still finish within 800s, but at SERP_CHUNK_SIZE=100 with concurrency
-  // 30 that's ~4 sequential rounds × ~5-15s ≈ a minute or two per chunk.
+  // still finish within 800s, but at SERP_CHUNK_SIZE=50 with concurrency
+  // 30 that's ~2 sequential rounds × ~5-15s ≈ ~20-60s per chunk.
   const serpTasks: Array<{ seed: string; locationIdx: number }> = []
   for (const seed of seeds) {
     for (let li = 0; li < locationCompetitors.length; li++) {
