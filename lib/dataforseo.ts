@@ -754,6 +754,66 @@ const serpItemSchema = z
   .passthrough()
 
 /**
+ * Multi-task variant of `serpRankedDomains`. Submits up to ~100 SERP probes
+ * in a single /v3/serp/google/organic/live/advanced call; DataForSEO returns
+ * the tasks in submission order. Used by the Comp Analysis task to keep
+ * total wall-clock under Vercel's 800s function ceiling for 200-400 keyword
+ * runs across multiple cities — single-task submission paid full HTTP RTT
+ * per probe and was timing the function out.
+ *
+ * If any task in the batch fails (DFS task status_code != 20000), the
+ * underlying `dfsRequest` throws for the whole envelope. Callers should
+ * catch and treat all entries in the batch as errored.
+ */
+export async function serpRankedDomainsBatch(
+  inputs: ReadonlyArray<{
+    keyword: string
+    location: DfsLocation
+    depth?: number
+  }>,
+  opts: { signal?: AbortSignal } = {},
+): Promise<SerpRankedDomain[][]> {
+  if (inputs.length === 0) return []
+  const body = inputs.map((i) => ({
+    keyword: i.keyword,
+    ...locationAndLanguageParams(i.location),
+    depth: i.depth ?? 100,
+  }))
+  const envelope = await dfsRequest(
+    "/v3/serp/google/organic/live/advanced",
+    body,
+    { signal: opts.signal },
+  )
+  if (envelope.tasks.length !== inputs.length) {
+    throw new DataForSEOError(
+      `serpRankedDomainsBatch: submitted ${inputs.length} tasks but envelope returned ${envelope.tasks.length}`,
+    )
+  }
+  const out: SerpRankedDomain[][] = new Array(inputs.length)
+  for (let i = 0; i < envelope.tasks.length; i++) {
+    const task = envelope.tasks[i]
+    const result = task?.result?.[0] as { items?: unknown[] } | undefined
+    const items = result?.items ?? []
+    const parsed: SerpRankedDomain[] = []
+    for (const raw of items) {
+      const p = serpItemSchema.safeParse(raw)
+      if (!p.success) continue
+      if (p.data.type !== "organic") continue
+      const domain = p.data.domain
+      const rankAbsolute = p.data.rank_absolute
+      if (!domain || rankAbsolute == null) continue
+      parsed.push({
+        domain: domain.toLowerCase(),
+        rankAbsolute,
+        url: p.data.url ?? "",
+      })
+    }
+    out[i] = parsed
+  }
+  return out
+}
+
+/**
  * /v3/serp/google/organic/live/advanced
  *
  * Runs a single SERP query and returns the top 10 organic result domains.

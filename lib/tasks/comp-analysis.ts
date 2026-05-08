@@ -5,7 +5,7 @@ import {
   DFS_LABS_COUNTRY_CODE_US,
   domainRankOverview,
   referringDomainCount,
-  serpRankedDomains,
+  serpRankedDomainsBatch,
   type SerpRankedDomain,
 } from "@/lib/dataforseo"
 import type { TaskRunner } from "@/lib/inngest/functions"
@@ -35,13 +35,18 @@ const locationCompetitorsSchema = z.object({
 
 export const CompAnalysisInputSchema = z.object({
   partnerUrl: z.string().min(3),
-  seedKeywords: z.array(z.string().min(1)).min(1).max(200),
+  seedKeywords: z.array(z.string().min(1)).min(1).max(400),
   locationCompetitors: z.array(locationCompetitorsSchema).min(1).max(10),
 })
 
 export type CompAnalysisInput = z.infer<typeof CompAnalysisInputSchema>
 
-const SERP_CONCURRENCY = 5
+// Batch-level concurrency: each in-flight request packs up to SERP_BATCH_SIZE
+// SERP tasks into a single /v3/serp/google/organic/live/advanced call. DFS
+// returns the tasks in submission order. Five concurrent batches of fifty
+// tasks lets a 400-kw × 10-loc run finish well under the Vercel 800s ceiling.
+const SERP_BATCH_SIZE = 50
+const SERP_BATCH_CONCURRENCY = 5
 const SERP_COST_USD = 0.002
 
 function cleanDomain(raw: string): string {
@@ -332,7 +337,10 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
     domainMetrics.set(uniqueDomainsList[i], dmResults[i])
   }
 
-  // 2. SERP probes.
+  // 2. SERP probes — batched. Pack up to SERP_BATCH_SIZE (seed × location)
+  // probes per HTTP request and run SERP_BATCH_CONCURRENCY batches in
+  // parallel. Single-task submission was hitting the 800s Vercel ceiling
+  // for large runs because each probe paid full HTTP round-trip latency.
   await stage(
     "Probing SERPs",
     `${seeds.length} seeds × ${locationCompetitors.length} locations`,
@@ -343,28 +351,49 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
       serpTasks.push({ seed, locationIdx: li })
     }
   }
+
+  interface BatchEntry {
+    seed: string
+    locationIdx: number
+    taskIdx: number
+  }
+  const batches: BatchEntry[][] = []
+  for (let i = 0; i < serpTasks.length; i += SERP_BATCH_SIZE) {
+    const slice = serpTasks.slice(i, i + SERP_BATCH_SIZE)
+    batches.push(slice.map((t, j) => ({ ...t, taskIdx: i + j })))
+  }
+
   interface SerpProbeResult {
     hits: SerpRankedDomain[]
     error: string | null
   }
-  const serpResults = await mapWithConcurrency(
-    serpTasks,
-    SERP_CONCURRENCY,
-    async (t): Promise<SerpProbeResult> => {
+  const serpResults: SerpProbeResult[] = new Array(serpTasks.length)
+  await mapWithConcurrency(batches, SERP_BATCH_CONCURRENCY, async (batch) => {
+    const inputs = batch.map((t) => {
       const lc = locationCompetitors[t.locationIdx]
-      try {
-        const hits = await serpRankedDomains(
-          t.seed,
-          { code: lc.locationCode },
-          { depth: 100 },
-        )
-        return { hits, error: null }
-      } catch (err) {
-        const msg = `serp("${t.seed}", loc=${lc.locationCode} ${lc.location}): ${describeError(err)}`
-        return { hits: [], error: msg }
+      return { keyword: t.seed, location: { code: lc.locationCode }, depth: 100 }
+    })
+    let hitsByIndex: SerpRankedDomain[][]
+    try {
+      hitsByIndex = await serpRankedDomainsBatch(inputs)
+    } catch (err) {
+      // Whole HTTP call failed — mark every probe in this batch as errored.
+      for (const t of batch) {
+        const lc = locationCompetitors[t.locationIdx]
+        serpResults[t.taskIdx] = {
+          hits: [],
+          error: `serp("${t.seed}", loc=${lc.locationCode} ${lc.location}): ${describeError(err)}`,
+        }
       }
-    },
-  )
+      return
+    }
+    for (let j = 0; j < batch.length; j++) {
+      serpResults[batch[j].taskIdx] = {
+        hits: hitsByIndex[j] ?? [],
+        error: null,
+      }
+    }
+  })
 
   const serpByLocation: Array<Map<string, SerpRankedDomain[]>> =
     locationCompetitors.map(() => new Map())
