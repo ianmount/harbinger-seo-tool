@@ -44,11 +44,14 @@ export type CompAnalysisInput = z.infer<typeof CompAnalysisInputSchema>
 // One HTTP call per (seed × location) probe — DFS's
 // /v3/serp/google/organic/live/advanced rejects multi-task arrays with
 // "You can set only one task at a time", so live SERP can't be batched.
-// Concurrency is set high enough to fit a 400-kw × 10-loc run under
-// Vercel's 800s function ceiling: ~4000 probes / 30 ≈ 133 sequential
-// rounds × ~5s ≈ 11 min. DFS documents 2000 calls/min ≈ 33/sec; we
-// stay under that, and dfsRequest already retries 429s with backoff.
+// SERP_CONCURRENCY governs parallelism inside one chunk; each chunk is its
+// own Inngest step.run with its own ~800s Vercel budget. 30 stays under
+// DFS's documented 2000 calls/min cap, and dfsRequest retries 429s with
+// backoff. SERP_CHUNK_SIZE bounds both per-chunk wall-clock and the
+// step.run output size (4MiB Inngest cap) — 100 probes × ~100 organic
+// items × ~120 bytes ≈ 1.2 MB of returned JSON, well under cap.
 const SERP_CONCURRENCY = 30
+const SERP_CHUNK_SIZE = 100
 const SERP_COST_USD = 0.002
 
 function cleanDomain(raw: string): string {
@@ -276,7 +279,7 @@ function bucketize(
   return { top3, top10, top20, top100 }
 }
 
-export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
+export const runCompAnalysisTask: TaskRunner = async ({ jobId, job, step }) => {
   const parsed = CompAnalysisInputSchema.safeParse(job.input)
   if (!parsed.success) {
     throw new Error(
@@ -285,9 +288,11 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
   }
   const body = parsed.data
 
-  const stage = async (label: string, detail?: string) => {
+  // Cancellation checks happen inside each step.run — outside-step.run code
+  // is replayed on every Inngest re-invocation and shouldn't have side
+  // effects that depend on remote state.
+  const checkCancel = async () => {
     if (await isCancelRequested(jobId)) throw new JobCancelledError(jobId)
-    await updateProgress(jobId, { stage: label, detail }).catch(() => {})
   }
 
   const partnerDomain = cleanDomain(body.partnerUrl)
@@ -329,21 +334,27 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
 
   const warnings: string[] = []
 
-  // 1. Domain-level metrics.
-  await stage("Pulling domain metrics", `${uniqueDomainsList.length} domains`)
+  // 1. Domain-level metrics — one step.run for the whole phase.
+  const dmResults = await step.run("domain-metrics", async () => {
+    await checkCancel()
+    await updateProgress(jobId, {
+      stage: "Pulling domain metrics",
+      detail: `${uniqueDomainsList.length} domains`,
+    }).catch(() => {})
+    return await mapWithConcurrency(uniqueDomainsList, 3, (d) =>
+      fetchDomainMetrics(d),
+    )
+  })
   const domainMetrics = new Map<string, DomainMetricsResult>()
-  const dmResults = await mapWithConcurrency(uniqueDomainsList, 3, (d) =>
-    fetchDomainMetrics(d),
-  )
   for (let i = 0; i < uniqueDomainsList.length; i++) {
     domainMetrics.set(uniqueDomainsList[i], dmResults[i])
   }
 
-  // 2. SERP probes — one HTTP call per probe at SERP_CONCURRENCY parallelism.
-  await stage(
-    "Probing SERPs",
-    `${seeds.length} seeds × ${locationCompetitors.length} locations`,
-  )
+  // 2. SERP probes — chunked across multiple step.run blocks. Inngest
+  // re-invokes the function across step boundaries, so cumulative SERP
+  // wall-clock can exceed the 800s Vercel ceiling. Each chunk's body must
+  // still finish within 800s, but at SERP_CHUNK_SIZE=100 with concurrency
+  // 30 that's ~4 sequential rounds × ~5-15s ≈ a minute or two per chunk.
   const serpTasks: Array<{ seed: string; locationIdx: number }> = []
   for (const seed of seeds) {
     for (let li = 0; li < locationCompetitors.length; li++) {
@@ -354,24 +365,43 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
     hits: SerpRankedDomain[]
     error: string | null
   }
-  const serpResults = await mapWithConcurrency(
-    serpTasks,
-    SERP_CONCURRENCY,
-    async (t): Promise<SerpProbeResult> => {
-      const lc = locationCompetitors[t.locationIdx]
-      try {
-        const hits = await serpRankedDomains(
-          t.seed,
-          { code: lc.locationCode },
-          { depth: 100 },
+  const chunkCount = Math.max(1, Math.ceil(serpTasks.length / SERP_CHUNK_SIZE))
+  const serpResults: SerpProbeResult[] = []
+  for (let ci = 0; ci < chunkCount; ci++) {
+    const chunkProbes = serpTasks.slice(
+      ci * SERP_CHUNK_SIZE,
+      (ci + 1) * SERP_CHUNK_SIZE,
+    )
+    const chunkResults = await step.run(
+      `serp-chunk-${ci}`,
+      async (): Promise<SerpProbeResult[]> => {
+        await checkCancel()
+        await updateProgress(jobId, {
+          stage: "Probing SERPs",
+          detail: `chunk ${ci + 1}/${chunkCount} (${seeds.length} seeds × ${locationCompetitors.length} locations)`,
+        }).catch(() => {})
+        return await mapWithConcurrency(
+          chunkProbes,
+          SERP_CONCURRENCY,
+          async (t): Promise<SerpProbeResult> => {
+            const lc = locationCompetitors[t.locationIdx]
+            try {
+              const hits = await serpRankedDomains(
+                t.seed,
+                { code: lc.locationCode },
+                { depth: 100 },
+              )
+              return { hits, error: null }
+            } catch (err) {
+              const msg = `serp("${t.seed}", loc=${lc.locationCode} ${lc.location}): ${describeError(err)}`
+              return { hits: [], error: msg }
+            }
+          },
         )
-        return { hits, error: null }
-      } catch (err) {
-        const msg = `serp("${t.seed}", loc=${lc.locationCode} ${lc.location}): ${describeError(err)}`
-        return { hits: [], error: msg }
-      }
-    },
-  )
+      },
+    )
+    serpResults.push(...chunkResults)
+  }
 
   const serpByLocation: Array<Map<string, SerpRankedDomain[]>> =
     locationCompetitors.map(() => new Map())
@@ -403,25 +433,37 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
   // 4. Bulk per-URL backlinks lookup. One DFS call (chunks of 1000) covers
   // every ranking URL across every cell, so cost stays in the cents range
   // even when the keyword × city matrix is large.
-  await stage(
-    "Pulling per-URL backlinks",
-    `${allRankingUrls.size} ranking URL${allRankingUrls.size === 1 ? "" : "s"}`,
+  const rankingUrlList = [...allRankingUrls]
+  const backlinksOutcome = await step.run(
+    "bulk-backlinks",
+    async (): Promise<{
+      entries: Array<[string, { referringDomains: number; backlinks: number }]>
+      warning: string | null
+    }> => {
+      await checkCancel()
+      await updateProgress(jobId, {
+        stage: "Pulling per-URL backlinks",
+        detail: `${rankingUrlList.length} ranking URL${rankingUrlList.length === 1 ? "" : "s"}`,
+      }).catch(() => {})
+      if (rankingUrlList.length === 0) return { entries: [], warning: null }
+      try {
+        const map = await bulkBacklinksByTarget(rankingUrlList)
+        return { entries: [...map.entries()], warning: null }
+      } catch (err) {
+        return {
+          entries: [],
+          warning: `bulk_backlinks lookup failed: ${describeError(err)} — falling back to global per-domain referring counts.`,
+        }
+      }
+    },
   )
-  let perUrlBacklinks = new Map<
+  const perUrlBacklinks = new Map<
     string,
     { referringDomains: number; backlinks: number }
-  >()
-  if (allRankingUrls.size > 0) {
-    try {
-      perUrlBacklinks = await bulkBacklinksByTarget([...allRankingUrls])
-    } catch (err) {
-      warnings.push(
-        `bulk_backlinks lookup failed: ${describeError(err)} — falling back to global per-domain referring counts.`,
-      )
-    }
-  }
+  >(backlinksOutcome.entries)
+  if (backlinksOutcome.warning) warnings.push(backlinksOutcome.warning)
 
-  await stage("Building rows")
+  await updateProgress(jobId, { stage: "Building rows" }).catch(() => {})
 
   // 5. Build rows.
   const rows: CompAnalysisLocationRows[] = []
