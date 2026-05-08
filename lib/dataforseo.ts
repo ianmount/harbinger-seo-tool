@@ -88,27 +88,37 @@ function locationAndLanguageParams(
 export async function dfsRequest<T = DfsEnvelope>(
   endpoint: string,
   body: unknown,
-  opts: { signal?: AbortSignal } = {},
+  opts: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<T> {
   const url = `${DFS_BASE}${endpoint}`
-  const init: RequestInit = {
+  // Per-attempt timeout. Native fetch has no body-read timeout — without
+  // this, a hung TCP connection blocks the awaiting Promise.all in
+  // mapWithConcurrency forever, eventually consuming the whole 800s
+  // function budget for a single bad probe. 60s comfortably exceeds DFS's
+  // typical 5-30s SERP latency while bounding worst-case stall.
+  const timeoutMs = opts.timeoutMs ?? 60_000
+  const buildSignal = (): AbortSignal => {
+    const t = AbortSignal.timeout(timeoutMs)
+    return opts.signal ? AbortSignal.any([t, opts.signal]) : t
+  }
+  const buildInit = (): RequestInit => ({
     method: "POST",
     headers: {
       Authorization: authHeader(),
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-    signal: opts.signal,
-  }
+    signal: buildSignal(),
+  })
 
   // Retry up to 3 times on 429 with exponential backoff + jitter so a
   // burst of parallel calls doesn't all bunch up at the same retry instant.
-  let response = await fetch(url, init)
+  let response = await fetch(url, buildInit())
   for (let attempt = 0; attempt < 3 && response.status === 429; attempt++) {
     const backoffMs =
       RATE_LIMIT_RETRY_MS * 2 ** attempt + Math.floor(Math.random() * 500)
     await new Promise((r) => setTimeout(r, backoffMs))
-    response = await fetch(url, init)
+    response = await fetch(url, buildInit())
   }
 
   if (!response.ok) {
