@@ -312,6 +312,18 @@ function buildIndexation(
   gsc: AssessmentGscData | null,
   crawlSummary: AssessmentAuditResult["crawlSummary"],
 ): IndexationSection | null {
+  // Old audit records (created before the schema gained sitemap-reconciliation
+  // fields) lack `sitemapUrlsNotCrawled` and `sitemapUrlCount`. Read both
+  // through coercion helpers so a stale record opens cleanly instead of
+  // 500-ing the dashboard route.
+  const sitemapNotCrawled = Array.isArray(crawlSummary?.sitemapUrlsNotCrawled)
+    ? crawlSummary.sitemapUrlsNotCrawled
+    : []
+  const sitemapUrlCount =
+    typeof crawlSummary?.sitemapUrlCount === "number"
+      ? crawlSummary.sitemapUrlCount
+      : 0
+
   if (gsc?.indexCoverage) {
     const cov = gsc.indexCoverage
     const samples = inspectionLookup(gsc.indexCoverage)
@@ -332,8 +344,8 @@ function buildIndexation(
       windowEnd: cov.dateRange.endDate,
       sitemapCount: cov.sitemapCount,
       indexedCount: cov.indexedUrls.length,
-      sitemapNotCrawledCount: crawlSummary?.sitemapUrlsNotCrawled.length ?? 0,
-      sitemapNotCrawled: crawlSummary?.sitemapUrlsNotCrawled ?? [],
+      sitemapNotCrawledCount: sitemapNotCrawled.length,
+      sitemapNotCrawled,
       notIndexed,
       hasInspectionData: cov.inspectedSample.some((s) => !s.error),
     }
@@ -345,26 +357,23 @@ function buildIndexation(
   // signal (no impression data, no URL Inspection coverage state) but it's
   // the only honest indexation signal we can produce without authenticated
   // access to the property.
-  if (!crawlSummary || crawlSummary.sitemapUrlCount === 0) return null
-  const notIndexed: NotIndexedRow[] = crawlSummary.sitemapUrlsNotCrawled.map(
-    (url) => ({
-      url,
-      pattern: pathPattern(url),
-      lastCrawl: null,
-      coverageState: "Not reached during crawl",
-      verdict: null,
-    }),
-  )
+  if (!crawlSummary || sitemapUrlCount === 0) return null
+  const notIndexed: NotIndexedRow[] = sitemapNotCrawled.map((url) => ({
+    url,
+    pattern: pathPattern(url),
+    lastCrawl: null,
+    coverageState: "Not reached during crawl",
+    verdict: null,
+  }))
   return {
     source: "sitemap",
     siteUrl: crawlSummary.domain,
     windowStart: "",
     windowEnd: "",
-    sitemapCount: crawlSummary.sitemapUrlCount,
-    indexedCount:
-      crawlSummary.sitemapUrlCount - crawlSummary.sitemapUrlsNotCrawled.length,
-    sitemapNotCrawledCount: crawlSummary.sitemapUrlsNotCrawled.length,
-    sitemapNotCrawled: crawlSummary.sitemapUrlsNotCrawled,
+    sitemapCount: sitemapUrlCount,
+    indexedCount: sitemapUrlCount - sitemapNotCrawled.length,
+    sitemapNotCrawledCount: sitemapNotCrawled.length,
+    sitemapNotCrawled,
     notIndexed,
     hasInspectionData: false,
   }
