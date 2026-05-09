@@ -19,9 +19,23 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { useAssessment } from "@/lib/assessment-context"
 import { useChatPageContext } from "@/lib/chat-context"
 import { parseTargetLocationLines } from "@/lib/locations"
+import {
+  DEFAULT_SERP_DEPTH,
+  estimateSerpCostPerCall,
+  isSerpDepth,
+  SERP_DEPTH_OPTIONS,
+  type SerpDepth,
+} from "@/lib/serp-pricing"
 import type {
   CompAnalysisDomainRow,
   CompAnalysisLocationRows,
@@ -31,20 +45,21 @@ import type {
 /**
  * Competitive Analysis tab — SERP-based methodology.
  *
- * For each (seed keyword × city × domain) we query DataForSEO's SERP
- * endpoint at depth=100 and aggregate Top 3/10/20/100 buckets per
- * (domain × city) from the resulting rank_absolute values. Numbers
- * genuinely vary by city because the underlying SERPs do.
+ * For each (seed keyword × city) we query DataForSEO's SERP endpoint at the
+ * user-selected depth (default 100) and aggregate Top 3/10/20/100 buckets
+ * per (domain × city) from the resulting rank_absolute values. Numbers
+ * genuinely vary by city because the underlying SERPs do. Lower depths are
+ * meaningfully cheaper but lose the Top 100 bucket.
  */
-
-const SERP_COST_USD = 0.002
 
 interface RunResponse {
   rows: CompAnalysisLocationRows[]
   csv: string
   warnings: string[]
   seedCount: number
+  serpDepth: SerpDepth
   estimatedSerpCost: number
+  dfsActualCostUsd: number
 }
 
 interface SuggestResponse {
@@ -131,6 +146,7 @@ function CompAnalysisPageInner() {
   const [csvKeywords, setCsvKeywords] = useState<string[]>([])
   const [csvFilename, setCsvFilename] = useState<string | null>(null)
   const [manualText, setManualText] = useState("")
+  const [serpDepth, setSerpDepth] = useState<SerpDepth>(DEFAULT_SERP_DEPTH)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   // CSV always wins when present; clearing it falls back to whatever the
@@ -177,7 +193,8 @@ function CompAnalysisPageInner() {
 
   const cityCount = state.compDfsLocations.length
   const seedCount = seedKeywords.length
-  const estimatedCost = seedCount * cityCount * SERP_COST_USD
+  const estimatedCost =
+    seedCount * cityCount * estimateSerpCostPerCall(serpDepth)
 
   // Run is enabled only when every location has ≥1 competitor.
   const everyLocationHasCompetitor =
@@ -409,12 +426,20 @@ function CompAnalysisPageInner() {
             compAnalysisRunAt: new Date().toISOString(),
             compAnalysisWarnings: j.result.warnings,
           })
+          const costNote =
+            typeof j.result.dfsActualCostUsd === "number"
+              ? `Actual DFS cost: $${j.result.dfsActualCostUsd.toFixed(2)} (depth ${j.result.serpDepth ?? "?"}).`
+              : undefined
           if (j.result.warnings.length > 0) {
             toast.warning("Comp analysis complete with warnings", {
-              description: j.result.warnings[0],
+              description: [j.result.warnings[0], costNote]
+                .filter(Boolean)
+                .join(" · "),
             })
           } else {
-            toast.success("Comp analysis ready")
+            toast.success("Comp analysis ready", {
+              description: costNote,
+            })
           }
           setRunning(false)
           setActiveJobId(null)
@@ -474,6 +499,7 @@ function CompAnalysisPageInner() {
             partnerUrl: partnerUrl.trim(),
             locationCompetitors,
             seedKeywords,
+            serpDepth,
           },
         }),
       })
@@ -498,6 +524,7 @@ function CompAnalysisPageInner() {
     state.compDfsLocations,
     competitorsByCode,
     seedKeywords,
+    serpDepth,
     setMany,
   ])
 
@@ -686,7 +713,38 @@ function CompAnalysisPageInner() {
           </p>
         )}
 
-        <div className="flex flex-col items-stretch gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="space-y-1.5 border-t pt-4">
+          <Label htmlFor="serpDepth">SERP depth</Label>
+          <Select
+            value={String(serpDepth)}
+            onValueChange={(v) => {
+              const n = Number(v)
+              if (isSerpDepth(n)) setSerpDepth(n)
+            }}
+            disabled={running}
+          >
+            <SelectTrigger id="serpDepth" className="w-full sm:w-[280px]">
+              <SelectValue placeholder="Select depth" />
+            </SelectTrigger>
+            <SelectContent>
+              {SERP_DEPTH_OPTIONS.map((d) => (
+                <SelectItem key={d} value={String(d)}>
+                  Top {d}
+                  {d === DEFAULT_SERP_DEPTH ? " (default)" : ""} — ~$
+                  {estimateSerpCostPerCall(d).toFixed(4)}/probe
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-ink-3">
+            Lower depths are meaningfully cheaper. Top 30 still covers the
+            Top 3 / 10 / 20 buckets — only the Top 100 column is lost. Top
+            100 is ~3× the cost of Top 20 because DataForSEO charges by
+            number of organic results returned per probe.
+          </p>
+        </div>
+
+        <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs text-ink-3">
             {seedCount > 0 && cityCount > 0 ? (
               <>
@@ -694,11 +752,11 @@ function CompAnalysisPageInner() {
                 <b className="font-sans font-extrabold not-italic text-foreground">
                   {seedCount * cityCount}
                 </b>{" "}
-                SERP queries (~
+                SERP queries at depth {serpDepth} (~
                 <b className="font-sans font-extrabold not-italic text-foreground">
                   ${estimatedCost.toFixed(2)}
                 </b>
-                ).
+                ). Actual cost reported on completion.
               </>
             ) : (
               "Add seed keywords + at least one location to enable Run."

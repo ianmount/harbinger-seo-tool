@@ -1,5 +1,6 @@
 import "server-only"
 import { z } from "zod"
+import { createCostAccumulator, withAuditCost } from "@/lib/audit-cost"
 import {
   bulkBacklinksByTarget,
   DFS_LABS_COUNTRY_CODE_US,
@@ -14,6 +15,12 @@ import {
   JobCancelledError,
   updateProgress,
 } from "@/lib/jobs"
+import {
+  DEFAULT_SERP_DEPTH,
+  estimateSerpCostPerCall,
+  SERP_DEPTH_OPTIONS,
+  type SerpDepth,
+} from "@/lib/serp-pricing"
 import type {
   CompAnalysisDomainRow,
   CompAnalysisLocationRows,
@@ -37,6 +44,21 @@ export const CompAnalysisInputSchema = z.object({
   partnerUrl: z.string().min(3),
   seedKeywords: z.array(z.string().min(1)).min(1).max(400),
   locationCompetitors: z.array(locationCompetitorsSchema).min(1).max(10),
+  // SERP depth controls how many organic results we ask DataForSEO to
+  // return per probe. Cost scales with depth: depth 100 is roughly 3× the
+  // cost of depth 20. Defaults to 100 for full Top 3/10/20/100 buckets;
+  // dropping to 30 or 20 still yields Top 3/10/20 and is meaningfully
+  // cheaper for large seed × location matrices.
+  serpDepth: z
+    .union(
+      SERP_DEPTH_OPTIONS.map((d) => z.literal(d)) as unknown as [
+        z.ZodLiteral<20>,
+        z.ZodLiteral<30>,
+        z.ZodLiteral<100>,
+      ],
+    )
+    .optional()
+    .default(DEFAULT_SERP_DEPTH),
 })
 
 export type CompAnalysisInput = z.infer<typeof CompAnalysisInputSchema>
@@ -54,7 +76,20 @@ export type CompAnalysisInput = z.infer<typeof CompAnalysisInputSchema>
 // bytes ≈ 600 KB).
 const SERP_CONCURRENCY = 30
 const SERP_CHUNK_SIZE = 50
-const SERP_COST_USD = 0.002
+
+/**
+ * Run `work` inside a fresh DataForSEO cost accumulator and return both the
+ * work's result and the accumulated USD spend. Used to checkpoint cost into
+ * each step.run's cached result so the total survives Inngest re-invocations
+ * (AsyncLocalStorage state is local to a single function invocation).
+ */
+async function withStepCost<T>(
+  work: () => Promise<T>,
+): Promise<{ value: T; costUsd: number }> {
+  const acc = createCostAccumulator()
+  const value = await withAuditCost(acc, work)
+  return { value, costUsd: acc.dataforseoUsd }
+}
 
 function cleanDomain(raw: string): string {
   return raw
@@ -336,17 +371,26 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job, step }) => {
 
   const warnings: string[] = []
 
+  // Step keys are suffixed with `-v2` because the v1 keys cached results
+  // without cost telemetry; bumping the key forces redeployed-mid-flight
+  // jobs to re-execute affected steps with the new shape rather than
+  // crashing on the legacy cached payload.
+
   // 1. Domain-level metrics — one step.run for the whole phase.
-  const dmResults = await step.run("domain-metrics", async () => {
-    await checkCancel()
-    await updateProgress(jobId, {
-      stage: "Pulling domain metrics",
-      detail: `${uniqueDomainsList.length} domains`,
-    }).catch(() => {})
-    return await mapWithConcurrency(uniqueDomainsList, 3, (d) =>
-      fetchDomainMetrics(d),
-    )
-  })
+  const dmStep = await step.run("domain-metrics-v2", async () =>
+    withStepCost(async () => {
+      await checkCancel()
+      await updateProgress(jobId, {
+        stage: "Pulling domain metrics",
+        detail: `${uniqueDomainsList.length} domains`,
+      }).catch(() => {})
+      return await mapWithConcurrency(uniqueDomainsList, 3, (d) =>
+        fetchDomainMetrics(d),
+      )
+    }),
+  )
+  const dmResults = dmStep.value
+  let dfsActualCostUsd = dmStep.costUsd
   const domainMetrics = new Map<string, DomainMetricsResult>()
   for (let i = 0; i < uniqueDomainsList.length; i++) {
     domainMetrics.set(uniqueDomainsList[i], dmResults[i])
@@ -369,40 +413,43 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job, step }) => {
   }
   const chunkCount = Math.max(1, Math.ceil(serpTasks.length / SERP_CHUNK_SIZE))
   const serpResults: SerpProbeResult[] = []
+  const serpDepth: SerpDepth = body.serpDepth
   for (let ci = 0; ci < chunkCount; ci++) {
     const chunkProbes = serpTasks.slice(
       ci * SERP_CHUNK_SIZE,
       (ci + 1) * SERP_CHUNK_SIZE,
     )
-    const chunkResults = await step.run(
-      `serp-chunk-${ci}`,
-      async (): Promise<SerpProbeResult[]> => {
-        await checkCancel()
-        await updateProgress(jobId, {
-          stage: "Probing SERPs",
-          detail: `chunk ${ci + 1}/${chunkCount} (${seeds.length} seeds × ${locationCompetitors.length} locations)`,
-        }).catch(() => {})
-        return await mapWithConcurrency(
-          chunkProbes,
-          SERP_CONCURRENCY,
-          async (t): Promise<SerpProbeResult> => {
-            const lc = locationCompetitors[t.locationIdx]
-            try {
-              const hits = await serpRankedDomains(
-                t.seed,
-                { code: lc.locationCode },
-                { depth: 100 },
-              )
-              return { hits, error: null }
-            } catch (err) {
-              const msg = `serp("${t.seed}", loc=${lc.locationCode} ${lc.location}): ${describeError(err)}`
-              return { hits: [], error: msg }
-            }
-          },
-        )
-      },
+    const chunkStep = await step.run(
+      `serp-chunk-v2-${ci}`,
+      async (): Promise<{ value: SerpProbeResult[]; costUsd: number }> =>
+        withStepCost(async () => {
+          await checkCancel()
+          await updateProgress(jobId, {
+            stage: "Probing SERPs",
+            detail: `chunk ${ci + 1}/${chunkCount} (${seeds.length} seeds × ${locationCompetitors.length} locations, depth=${serpDepth})`,
+          }).catch(() => {})
+          return await mapWithConcurrency(
+            chunkProbes,
+            SERP_CONCURRENCY,
+            async (t): Promise<SerpProbeResult> => {
+              const lc = locationCompetitors[t.locationIdx]
+              try {
+                const hits = await serpRankedDomains(
+                  t.seed,
+                  { code: lc.locationCode },
+                  { depth: serpDepth },
+                )
+                return { hits, error: null }
+              } catch (err) {
+                const msg = `serp("${t.seed}", loc=${lc.locationCode} ${lc.location}): ${describeError(err)}`
+                return { hits: [], error: msg }
+              }
+            },
+          )
+        }),
     )
-    serpResults.push(...chunkResults)
+    serpResults.push(...chunkStep.value)
+    dfsActualCostUsd += chunkStep.costUsd
   }
 
   const serpByLocation: Array<Map<string, SerpRankedDomain[]>> =
@@ -436,29 +483,37 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job, step }) => {
   // every ranking URL across every cell, so cost stays in the cents range
   // even when the keyword × city matrix is large.
   const rankingUrlList = [...allRankingUrls]
-  const backlinksOutcome = await step.run(
-    "bulk-backlinks",
+  const backlinksStep = await step.run(
+    "bulk-backlinks-v2",
     async (): Promise<{
-      entries: Array<[string, { referringDomains: number; backlinks: number }]>
-      warning: string | null
-    }> => {
-      await checkCancel()
-      await updateProgress(jobId, {
-        stage: "Pulling per-URL backlinks",
-        detail: `${rankingUrlList.length} ranking URL${rankingUrlList.length === 1 ? "" : "s"}`,
-      }).catch(() => {})
-      if (rankingUrlList.length === 0) return { entries: [], warning: null }
-      try {
-        const map = await bulkBacklinksByTarget(rankingUrlList)
-        return { entries: [...map.entries()], warning: null }
-      } catch (err) {
-        return {
-          entries: [],
-          warning: `bulk_backlinks lookup failed: ${describeError(err)} — falling back to global per-domain referring counts.`,
-        }
+      value: {
+        entries: Array<
+          [string, { referringDomains: number; backlinks: number }]
+        >
+        warning: string | null
       }
-    },
+      costUsd: number
+    }> =>
+      withStepCost(async () => {
+        await checkCancel()
+        await updateProgress(jobId, {
+          stage: "Pulling per-URL backlinks",
+          detail: `${rankingUrlList.length} ranking URL${rankingUrlList.length === 1 ? "" : "s"}`,
+        }).catch(() => {})
+        if (rankingUrlList.length === 0) return { entries: [], warning: null }
+        try {
+          const map = await bulkBacklinksByTarget(rankingUrlList)
+          return { entries: [...map.entries()], warning: null }
+        } catch (err) {
+          return {
+            entries: [],
+            warning: `bulk_backlinks lookup failed: ${describeError(err)} — falling back to global per-domain referring counts.`,
+          }
+        }
+      }),
   )
+  const backlinksOutcome = backlinksStep.value
+  dfsActualCostUsd += backlinksStep.costUsd
   const perUrlBacklinks = new Map<
     string,
     { referringDomains: number; backlinks: number }
@@ -509,14 +564,24 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job, step }) => {
 
   const csv = buildCsv(rows, seeds.length)
 
+  const estimatedSerpCost =
+    seeds.length *
+    locationCompetitors.length *
+    estimateSerpCostPerCall(serpDepth)
+
+  console.log(
+    `[comp-analysis] job=${jobId} done · seeds=${seeds.length} locations=${locationCompetitors.length} depth=${serpDepth} estimated=$${estimatedSerpCost.toFixed(4)} actual=$${dfsActualCostUsd.toFixed(4)}`,
+  )
+
   return {
     result: {
       rows,
       csv,
       warnings,
       seedCount: seeds.length,
-      estimatedSerpCost:
-        seeds.length * locationCompetitors.length * SERP_COST_USD,
+      serpDepth,
+      estimatedSerpCost,
+      dfsActualCostUsd,
     },
     resultPath: `/comp-analysis?job=${jobId}`,
   }
