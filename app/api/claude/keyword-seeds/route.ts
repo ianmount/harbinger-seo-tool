@@ -11,6 +11,7 @@ const bodySchema = z.object({
 })
 
 const responseSchema = z.object({
+  reasoning: z.string().trim().min(1),
   seeds: z.array(z.string().trim().min(1)).min(1).max(80),
 })
 
@@ -77,22 +78,47 @@ function buildPrompt(
     `Cap the total at ${MAX_SEEDS}. If locations × services × 2 would exceed that, keep the strongest service categories and drop the rest rather than duplicating.`,
   )
   lines.push("")
+  lines.push(`# Reasoning blurb`)
+  lines.push(
+    `Alongside the seeds, write a 2–4 sentence reasoning blurb explaining how you read this specific business context and how that shaped the seed list. Touch only on points that actually apply to this run — skip ones that don't:`,
+  )
+  lines.push(
+    `- What audience signal you picked up (e.g. "context skews to problem-aware homeowners in older homes — leaned into repair / emergency phrasings over informational").`,
+  )
+  lines.push(
+    `- Any scope exclusions you applied (e.g. "dropped commercial-coded seeds because the scope is residential only").`,
+  )
+  lines.push(
+    `- Any specialties you weighted up (e.g. "added dedicated tankless seeds since that was called out as a specialty; downplayed tank-style installs").`,
+  )
+  lines.push(
+    `- Brief geographic strategy ("baked Atlanta and Charlotte into most seeds in both word orders; small near-me bucket for off-location intent").`,
+  )
+  lines.push(
+    `If the context blob was thin or generic, say so honestly ("context was light on audience signal — defaulted to broad service-category seeds; richer audience info would tighten the pool"). Be concrete; quote phrases from the context where it helps. Avoid generic SEO platitudes.`,
+  )
+  lines.push("")
   lines.push(`# Output format`)
   lines.push(
-    `Output exactly one JSON object with a "seeds" array of strings. No prose, no markdown fences.`,
+    `Output exactly one JSON object with a "reasoning" string and a "seeds" array of strings. No prose outside the JSON, no markdown fences.`,
   )
   lines.push("```")
-  lines.push(`{ "seeds": [`)
+  lines.push(`{`)
   lines.push(
-    `  "plumber atlanta", "atlanta plumber", "drain cleaning atlanta", "atlanta drain cleaning", "water heater repair atlanta", "atlanta water heater repair",`,
+    `  "reasoning": "Read the context as residential plumbing for older single-family homes — leaned into repair / emergency / specific-failure phrasings over informational. Dropped commercial and new-construction seeds. Added dedicated tankless retrofit seeds since that was called out as a specialty. Geo focus: Atlanta and Charlotte in both word orders, with a small near-me bucket for off-location intent.",`,
+  )
+  lines.push(`  "seeds": [`)
+  lines.push(
+    `    "plumber atlanta", "atlanta plumber", "drain cleaning atlanta", "atlanta drain cleaning", "water heater repair atlanta", "atlanta water heater repair",`,
   )
   lines.push(
-    `  "plumber charlotte", "charlotte plumber", "drain cleaning charlotte",`,
+    `    "plumber charlotte", "charlotte plumber", "drain cleaning charlotte",`,
   )
   lines.push(
-    `  "plumber near me", "emergency plumber", "24 hour plumber", "tankless water heater installation"`,
+    `    "plumber near me", "emergency plumber", "24 hour plumber", "tankless water heater installation"`,
   )
-  lines.push(`] }`)
+  lines.push(`  ]`)
+  lines.push(`}`)
   lines.push("```")
   return lines.join("\n")
 }
@@ -138,7 +164,7 @@ export async function POST(request: Request) {
   try {
     const text = await callClaude(prompt, {
       system: SYSTEM_PROMPT,
-      maxTokens: 2048,
+      maxTokens: 3072,
     })
     let parsedJson: unknown
     try {
@@ -167,7 +193,7 @@ export async function POST(request: Request) {
     if (seeds.length === 0) {
       throw new Error("Claude returned no usable seed keywords")
     }
-    return NextResponse.json({ seeds })
+    return NextResponse.json({ seeds, reasoning: result.data.reasoning.trim() })
   } catch (error: unknown) {
     console.error("[api/claude/keyword-seeds] failed:", error)
     if (error instanceof ClaudeApiError) {
