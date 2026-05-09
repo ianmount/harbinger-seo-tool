@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
@@ -13,16 +13,18 @@ import { useAssessment } from "@/lib/assessment-context"
 import type { AssessmentAuditResult } from "@/lib/types"
 
 /**
- * Audit dashboard with three load paths, tried in order:
- *  1. sessionStorage — existing in-tab flow (legacy /audit synchronous flow
- *     wrote here too; preserved for fast in-tab navigations).
- *  2. /api/jobs/<id> — when audit_id is a background job id (the new flow).
- *     If still in flight, polls the job until terminal and renders progress
- *     in the meantime. On completion, hydrates from `job.result.audit`,
- *     mirrors into sessionStorage, and pushes into AssessmentContext so the
- *     Comp Analysis tab can pre-fill.
- *  3. AssessmentContext fallback — if a result is already in memory but
- *     storage was wiped, reuse it.
+ * Audit dashboard with two load paths, tried in order:
+ *  1. sessionStorage — fast path for an audit already viewed in this tab.
+ *  2. /api/jobs/<id> — fetch the job by id. If still in flight, polls until
+ *     terminal; on completion, mirrors into sessionStorage and pushes into
+ *     AssessmentContext so the Comp Analysis tab can pre-fill.
+ *
+ * Earlier versions also fell back to `state.auditResult` from
+ * AssessmentContext when storage missed. That fallback was unsound: the
+ * context only ever holds the most-recently-completed audit, so clicking
+ * into an older audit whose storage entry had been evicted would surface
+ * the WRONG audit's data — and worse, would write that wrong data into
+ * storage under the requested id, poisoning future loads. We removed it.
  */
 
 interface JobShape {
@@ -40,39 +42,25 @@ export function AuditDashboardClient({ auditId }: { auditId: string }) {
   const [hydrated, setHydrated] = useState(false)
   const [job, setJob] = useState<JobShape | null>(null)
   const [jobError, setJobError] = useState<string | null>(null)
-  const seededFromContext = useRef(false)
 
-  // 1. Sessionstorage / context first; falls through to job lookup if neither.
+  // 1. Sessionstorage first; falls through to job lookup if no entry exists
+  // for this id. We deliberately do NOT fall back to state.auditResult —
+  // that would surface the most-recently-completed audit's data under the
+  // wrong id (and poison storage with it).
   useEffect(() => {
     const fromStorage = loadAudit(auditId)
     if (fromStorage) {
       setStored(fromStorage)
       setHydrated(true)
-      return
-    }
-    if (state.auditResult) {
-      const fallback: StoredAudit = {
-        id: auditId,
-        result: state.auditResult,
-        compAnalysisRows: state.compAnalysisRows,
-        storedAt: new Date().toISOString(),
-      }
-      saveAudit(fallback)
-      setStored(fallback)
-      seededFromContext.current = true
-      setHydrated(true)
     }
     // No early-mark of `hydrated` here — the job poller below decides when
     // to flip it for the not-in-storage case.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auditId])
 
-  // 2. Job lookup + polling. Only runs if neither sessionStorage nor context
-  // had the audit. The poller backs off as soon as the job hits a terminal
-  // state.
+  // 2. Job lookup + polling. Only runs if sessionStorage didn't have the
+  // audit. The poller backs off as soon as the job hits a terminal state.
   useEffect(() => {
     if (stored) return
-    if (seededFromContext.current) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
 

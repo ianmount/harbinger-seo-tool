@@ -401,6 +401,28 @@ input.filter:focus { outline: 0; border-color: #ff1e00; box-shadow: 0 0 0 3px rg
 .narrative ul, .narrative ol { padding-left: 22px; }
 .narrative strong { font-family: "Montserrat", system-ui, sans-serif; }
 
+/* Internal linking section. */
+.il-stats { display: grid; grid-template-columns: 180px minmax(0,1fr); gap: 16px; margin-bottom: 18px; }
+.il-score { border: 1px solid rgba(3,41,58,0.16); border-radius: 8px; padding: 14px; text-align: center; background: #fff; }
+.il-score-value { font-family: "Montserrat", system-ui, sans-serif; font-size: 32px; font-weight: 700; margin: 6px 0 2px; color: #03293a; }
+.il-score-value span { font-size: 14px; color: rgba(3,41,58,0.5); margin-left: 2px; }
+.il-score-label { font-size: 12px; color: rgba(3,41,58,0.7); }
+.il-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.il-stat { border: 1px solid rgba(3,41,58,0.16); border-radius: 8px; padding: 10px 12px; background: #fff; }
+.il-stat .eyebrow { margin: 0 0 4px 0; }
+.il-stat p:last-child { font-family: "Montserrat", system-ui, sans-serif; font-weight: 700; font-size: 22px; color: #03293a; margin: 0; }
+.il-recs { list-style: decimal; margin: 8px 0 0 0; padding-left: 20px; }
+.il-rec { border: 1px solid rgba(3,41,58,0.16); border-radius: 8px; padding: 12px 14px; background: #fff; margin-bottom: 10px; }
+.il-rec-title { font-family: "Montserrat", system-ui, sans-serif; font-weight: 700; color: #03293a; margin: 0 0 4px 0; }
+.il-rec-detail { color: rgba(3,41,58,0.78); margin: 0 0 6px 0; font-size: 13px; }
+.il-rec-urls { margin: 6px 0 0 0; padding-left: 20px; font-size: 12px; color: rgba(3,41,58,0.62); }
+.il-rec-urls li { word-break: break-all; }
+.il-hubs { list-style: none; padding: 0; margin: 6px 0 0 0; font-size: 12.5px; }
+.il-hubs li { display: grid; grid-template-columns: 1fr 60px; gap: 12px; align-items: center; padding: 4px 0; border-bottom: 1px solid rgba(3,41,58,0.08); }
+.il-hubs li:last-child { border-bottom: none; }
+.il-hubs li a { word-break: break-all; }
+.il-hubs li span { text-align: right; color: rgba(3,41,58,0.62); }
+
 @media print {
   @page {
     margin: 0.75in;

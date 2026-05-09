@@ -1,6 +1,14 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
+import { useSearchParams } from "next/navigation"
 import { Download, Loader2, Sparkles, Upload, X } from "lucide-react"
 import { toast } from "sonner"
 import { JobsForKindCard } from "@/components/JobsForKindCard"
@@ -85,8 +93,22 @@ function dedupeKeywords(text: string): string[] {
 }
 
 export default function CompAnalysisPage() {
+  // useSearchParams must be inside a Suspense boundary in Next 16.
+  return (
+    <Suspense fallback={null}>
+      <CompAnalysisPageInner />
+    </Suspense>
+  )
+}
+
+function CompAnalysisPageInner() {
+  const searchParams = useSearchParams()
+  const urlJobId = searchParams.get("job")
   const { state, setField, setMany } = useAssessment()
   const [running, setRunning] = useState(false)
+  const [hydratingFromUrl, setHydratingFromUrl] = useState(
+    () => urlJobId !== null,
+  )
   // Auto-suggest is per-location now; track which location-code is
   // currently fetching so we can disable just that block's button.
   const [suggestingForCode, setSuggestingForCode] = useState<number | null>(
@@ -334,8 +356,21 @@ export default function CompAnalysisPage() {
   // Active job id while a comp analysis is in flight. Polled below; on
   // completion, hydrates back into AssessmentContext so the existing
   // result tables render unchanged.
-  const [activeJobId, setActiveJobId] = useState<string | null>(null)
+  const [activeJobId, setActiveJobId] = useState<string | null>(urlJobId)
   const [jobProgress, setJobProgress] = useState<string | null>(null)
+
+  // When the page is opened via the JobsTray "View" link
+  // (/comp-analysis?job=<id>), hand the id off to the polling effect so
+  // it hydrates compAnalysisRows. In-memory assessment context means a
+  // refresh or a route from another tab loses the result otherwise.
+  useEffect(() => {
+    if (urlJobId) setActiveJobId(urlJobId)
+  }, [urlJobId])
+
+  useEffect(() => {
+    if (!hydratingFromUrl) return
+    if (activeJobId === null) setHydratingFromUrl(false)
+  }, [activeJobId, hydratingFromUrl])
 
   useEffect(() => {
     if (!activeJobId) return
@@ -484,8 +519,20 @@ export default function CompAnalysisPage() {
     URL.revokeObjectURL(url)
   }, [state.compAnalysisCsv, partnerUrl])
 
+  const showHydrationBanner =
+    hydratingFromUrl && !state.compAnalysisRows && !errorMessage
+
   return (
     <div className="space-y-6">
+      {showHydrationBanner && (
+        <div className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-sm text-ink-2">
+          <Loader2 className="h-4 w-4 animate-spin text-primary" />
+          <span>
+            Loading saved comp analysis
+            {jobProgress ? ` — ${jobProgress}` : "…"}
+          </span>
+        </div>
+      )}
       <PageHeader
         eyebrow="Assessments / Competitive Analysis"
         title="Competitive Analysis"
@@ -842,10 +889,15 @@ function CompResults({
       )}
 
       <p className="text-xs text-ink-3">
-        Note: &ldquo;Pages Indexed&rdquo; uses Google&apos;s <code>site:</code>{" "}
-        operator at the city level and is approximate. &ldquo;Organic
-        Traffic&rdquo; is country-wide (Labs domain_rank_overview accepts
-        country codes only).
+        Note: &ldquo;Pages Ranking&rdquo; counts distinct URLs from the
+        domain that rank in top 100 for any seed keyword in this specific
+        city — it&apos;s derived from the same SERP probes that drive Top
+        3/10/20/100, no extra API cost. &ldquo;Referring Domains&rdquo;
+        sums per-URL referring-domain counts across those ranking URLs (so
+        it varies by city); when a domain has no ranking URLs in a city we
+        fall back to the global referring-domain count to keep the cell
+        meaningful. &ldquo;Organic Traffic&rdquo; is country-wide (Labs
+        domain_rank_overview accepts country codes only).
       </p>
 
       <div className="space-y-6">
@@ -876,7 +928,7 @@ function LocationTable({ location }: { location: CompAnalysisLocationRows }) {
               <th className="px-3 py-2 text-right font-medium">Top 20</th>
               <th className="px-3 py-2 text-right font-medium">Top 100</th>
               <th className="px-3 py-2 text-right font-medium">Ref. Domains</th>
-              <th className="px-3 py-2 text-right font-medium">Pages Indexed</th>
+              <th className="px-3 py-2 text-right font-medium">Pages Ranking</th>
               <th className="px-3 py-2 text-right font-medium">
                 Organic Traffic
               </th>

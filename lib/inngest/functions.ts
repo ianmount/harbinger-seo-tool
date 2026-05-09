@@ -1,4 +1,5 @@
 import "server-only"
+import type { GetStepTools } from "inngest"
 import { sendJobCompletionEmail } from "@/lib/email"
 import {
   cancelJob,
@@ -27,11 +28,20 @@ import { inngest } from "./client"
  * The runner (defined below) is responsible for status transitions and
  * email; the task body just needs to do the work and return its result.
  * Throwing aborts the job into `failed` with the thrown message.
+ *
+ * Tasks may use `ctx.step` to checkpoint long work across multiple Inngest
+ * step.run blocks. Each step.run gets its own ~800s Vercel function budget
+ * — Inngest re-invokes the function across step boundaries so cumulative
+ * wall-clock can exceed 800s. Tasks that don't need this can ignore `step`
+ * and their body runs inside a single outer step.run wrapper (see
+ * `CHUNKED_TASKS` below).
  */
+export type StepTools = GetStepTools<typeof inngest>
+
 export interface TaskContext {
   jobId: string
   job: JobRow
-  // Future: progress reporter, cancellation signal, etc.
+  step: StepTools
 }
 
 export type TaskRunner = (ctx: TaskContext) => Promise<{
@@ -47,6 +57,19 @@ const TASKS: Partial<Record<JobKind, TaskRunner>> = {
   initial_strategy: runInitialStrategyTask,
   technical_crawl: runTechnicalCrawlTask,
 }
+
+/**
+ * Tasks that manage their own Inngest step.run checkpoints internally. The
+ * dispatcher does NOT wrap these in an outer step.run("run-task") — that
+ * wrapper would force the entire body into one ~800s Vercel invocation,
+ * defeating the chunking. Cumulative wall-clock for these tasks can exceed
+ * 800s because Inngest re-invokes between step.run boundaries.
+ *
+ * Tasks NOT in this set get the default outer wrapper (single atomic
+ * invocation, body re-executes from scratch on Inngest re-invocation if it
+ * fails before completing).
+ */
+const CHUNKED_TASKS = new Set<JobKind>(["comp_analysis"])
 
 /**
  * The single Inngest function. One event (`jobs/run`) feeds it; it pulls the
@@ -135,28 +158,34 @@ export const runJobFunction = inngest.createFunction(
       return { ok: false, reason: "no-runner" }
     }
 
-    // The actual task runs INSIDE step.run so Inngest caches its result.
-    // Without this wrapper, the runner re-executed every time Inngest
-    // re-invoked the function for a subsequent step.run — meaning a
-    // multi-step dispatcher ran the crawl multiple times and frequently
-    // failed with "Could not find step to run; timed out" because the
-    // re-execution was hitting the Vercel function timeout.
+    // Default path (non-chunked tasks): run the entire task inside one
+    // step.run so Inngest caches its result. Without this wrapper, the
+    // runner would re-execute on every Inngest re-invocation, hitting
+    // Vercel's 800s ceiling repeatedly. We also write the heavy task
+    // result to background_jobs.result inside the step rather than
+    // returning it through Inngest's 4MiB-capped serialization layer; the
+    // step returns a small { ok, resultPath } ack for the dashboard.
     //
-    // We also write the heavy task result (audit bundles, full crawl rows,
-    // alt-tag arrays) directly to background_jobs.result inside this step
-    // rather than returning it through Inngest's serialization layer.
-    // step.run output is capped at 4MiB and serialization at that scale was
-    // flaky — Inngest reported "your server reset the connection while we
-    // were reading the reply" on responses approaching the cap. The step
-    // still returns a small ack ({ ok, resultPath }) so the run trace is
-    // legible in the Inngest dashboard.
+    // Chunked path (CHUNKED_TASKS): the runner manages its own step.run
+    // checkpoints and the dispatcher only wraps completeJob. Cumulative
+    // wall-clock can exceed 800s because Inngest re-invokes the function
+    // across the runner's step boundaries.
     let runResult: { ok: boolean; resultPath?: string } | null = null
     try {
-      runResult = await step.run("run-task", async () => {
-        const { result, resultPath } = await runner({ jobId, job })
-        await completeJob(jobId, result, resultPath)
-        return { ok: true, resultPath }
-      })
+      if (CHUNKED_TASKS.has(job.kind)) {
+        const { result, resultPath } = await runner({ jobId, job, step })
+        await step.run("complete-job", async () => {
+          await completeJob(jobId, result, resultPath)
+          return { ok: true }
+        })
+        runResult = { ok: true, resultPath }
+      } else {
+        runResult = await step.run("run-task", async () => {
+          const { result, resultPath } = await runner({ jobId, job, step })
+          await completeJob(jobId, result, resultPath)
+          return { ok: true, resultPath }
+        })
+      }
     } catch (err) {
       // step.run rethrows as the original error class is collapsed into a
       // generic StepError. Identify cancellation by the `name` so we still

@@ -1,7 +1,7 @@
 import "server-only"
 import { aiModeSerpLive, aiOptimizationLive } from "@/lib/dataforseo-ai"
 import { deriveBrandTokens } from "@/lib/branded-keywords"
-import { rankedKeywords } from "@/lib/dataforseo"
+import { DFS_LABS_COUNTRY_CODE_US, rankedKeywords } from "@/lib/dataforseo"
 import type {
   AIMentionsReport,
   AIOverviewRow,
@@ -153,19 +153,19 @@ export async function runAiMentions(
   // Used by the AI Mode SERP half AND as a fallback for LLM prompt slots
   // when no services were provided. We fetch eagerly (rather than only
   // when enableAiMode is true) so the keyword-fallback prompt path can
-  // access them. State-level when we have a market (Labs rejects most
-  // cities), nationwide otherwise — both known-good DFSEO Labs locations.
+  // access them. Labs `ranked_keywords/live` rejects state- and city-level
+  // `location_name` with status 40501 — Labs taxonomy is country-only
+  // (verified live 2026-04-24, see lib/dataforseo.ts). Country-level here
+  // still surfaces the prospect's actual top-ranking keywords, which is
+  // what both the AI Mode probe seeds and the prompt fallback need.
   let nonBrandedRankedKeywords: string[] = []
-  const labsLocationName = primaryMarket
-    ? `${primaryMarket.state},United States`
-    : "United States"
   const needRankedKeywords =
     enableAiMode || (enableLlms && services.length === 0)
   if (needRankedKeywords) {
     try {
       const ranked = await rankedKeywords(
         normalizeDomain(input.websiteUrl) ?? input.websiteUrl,
-        { name: labsLocationName },
+        { code: DFS_LABS_COUNTRY_CODE_US },
         { limit: 50 },
       )
       nonBrandedRankedKeywords = dedupe(

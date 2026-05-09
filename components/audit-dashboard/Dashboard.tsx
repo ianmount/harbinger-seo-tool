@@ -47,6 +47,8 @@ export function Dashboard({
     if (data.competitors)
       items.push({ id: "competitors", label: "Competitors" })
     if (data.schema) items.push({ id: "schema", label: "Schema Coverage" })
+    if (data.internalLinks)
+      items.push({ id: "internal-links", label: "Internal Linking" })
     if (data.opportunities)
       items.push({ id: "opportunities", label: "Top Opportunities" })
     if (data.topPages) items.push({ id: "top-pages", label: "Top Pages" })
@@ -88,6 +90,9 @@ export function Dashboard({
             <CompetitorsSectionView data={data.competitors} />
           ) : null}
           {data.schema ? <SchemaSectionView data={data.schema} /> : null}
+          {data.internalLinks ? (
+            <InternalLinksSectionView data={data.internalLinks} />
+          ) : null}
           {data.opportunities ? (
             <OpportunitiesSection data={data.opportunities} />
           ) : null}
@@ -301,12 +306,26 @@ function Indexation({
       width: "w-[180px]",
     },
   ]
+  const meta =
+    data.source === "gsc"
+      ? `${data.indexedCount.toLocaleString()} of ${data.sitemapCount.toLocaleString()} sitemap URLs received impressions in the 90-day window. ${data.notIndexed.length.toLocaleString()} URL${data.notIndexed.length === 1 ? "" : "s"} likely not indexed.`
+      : `${data.notIndexed.length.toLocaleString()} of ${data.sitemapCount.toLocaleString()} sitemap URLs were not reached during the on-page crawl — probable not-indexed candidates. Connect Search Console for an authoritative read.`
+  const caption =
+    data.source === "gsc"
+      ? data.hasInspectionData
+        ? "Inspected sample shows last-crawl + coverage state when available."
+        : "URL Inspection sample was not available for this property."
+      : "Sitemap-vs-crawl reconciliation. Pages here may exist but be excluded by robots/canonical rules; verify in Search Console."
+  const emptyMessage =
+    data.source === "gsc"
+      ? "Every sitemap URL received impressions in the window."
+      : "Every sitemap URL was reached during the crawl."
   return (
     <Section
       id="indexation"
       eyebrow="§ 02"
       title="Indexation Status"
-      meta={`${data.indexedCount} of ${data.sitemapCount} sitemap URLs received impressions in the 90-day window.`}
+      meta={meta}
     >
       <SortableTable
         rows={data.notIndexed}
@@ -315,12 +334,8 @@ function Indexation({
         initialSortDir="asc"
         filterAccessor={(r) => `${r.url} ${r.pattern} ${r.coverageState ?? ""}`}
         filterPlaceholder="Filter URLs (pattern, coverage state)…"
-        emptyMessage="Every sitemap URL received impressions in the window."
-        caption={
-          data.hasInspectionData
-            ? "Inspected sample shows last-crawl + coverage state when available."
-            : "URL Inspection sample was not available for this property."
-        }
+        emptyMessage={emptyMessage}
+        caption={caption}
       />
     </Section>
   )
@@ -426,6 +441,125 @@ function SchemaSectionView({
     >
       <SchemaMatrix data={data} />
     </Section>
+  )
+}
+
+function InternalLinksSectionView({
+  data,
+}: {
+  data: NonNullable<DashboardData["internalLinks"]>
+}) {
+  return (
+    <Section
+      id="internal-links"
+      eyebrow="§ 06b"
+      title="Internal Linking"
+      meta={`${data.pagesAnalyzed} pages analyzed · avg ${data.averageOutLinks} out-links and ${data.averageInLinks} in-links per page.`}
+    >
+      <div className="space-y-6">
+        <div className="grid gap-4 sm:grid-cols-[180px_minmax(0,1fr)]">
+          <div className="rounded-md border bg-card p-4 text-center">
+            <div className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-ink-3">
+              Score
+            </div>
+            <div className="mt-2 font-sans text-4xl font-bold tabular-nums text-foreground">
+              {data.score}
+              <span className="text-base text-ink-3">/100</span>
+            </div>
+            <div className="mt-1 text-xs text-ink-2">{data.scoreLabel}</div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Stat label="Orphan pages" value={data.orphanCount.toLocaleString()} />
+            <Stat
+              label="Link-poor pages"
+              value={data.linkPoorCount.toLocaleString()}
+            />
+            <Stat
+              label="Avg out-links / page"
+              value={data.averageOutLinks.toFixed(1)}
+            />
+            <Stat
+              label="Avg in-links / page"
+              value={data.averageInLinks.toFixed(1)}
+            />
+          </div>
+        </div>
+
+        {data.recommendations.length > 0 && (
+          <div className="space-y-3">
+            <p className="eyebrow">Recommendations</p>
+            <ol className="space-y-3">
+              {data.recommendations.map((rec) => (
+                <li
+                  key={rec.id}
+                  className="rounded-md border bg-card p-4 text-sm"
+                >
+                  <p className="font-sans font-bold text-foreground">
+                    {rec.title}
+                  </p>
+                  <p className="mt-1 text-ink-2">{rec.detail}</p>
+                  {rec.exampleUrls.length > 0 && (
+                    <ul className="mt-2 list-inside list-disc text-xs text-ink-3">
+                      {rec.exampleUrls.map((u) => (
+                        <li key={u} className="break-all">
+                          <a
+                            href={u}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="underline decoration-line decoration-1 underline-offset-2 hover:decoration-brand-red"
+                          >
+                            {u}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+
+        {data.hubPages.length > 0 && (
+          <div className="space-y-2">
+            <p className="eyebrow">Top internal-link hubs</p>
+            <ul className="space-y-1 text-xs">
+              {data.hubPages.map((h) => (
+                <li
+                  key={h.url}
+                  className="grid grid-cols-[1fr_60px] items-center gap-3"
+                >
+                  <a
+                    href={h.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="break-all underline decoration-line decoration-1 underline-offset-2 hover:decoration-brand-red"
+                  >
+                    {h.url}
+                  </a>
+                  <span className="text-right tabular-nums text-ink-2">
+                    {h.inLinks} in
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    </Section>
+  )
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border bg-card p-3">
+      <div className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-ink-3">
+        {label}
+      </div>
+      <div className="mt-1 font-sans text-2xl font-bold tabular-nums text-foreground">
+        {value}
+      </div>
+    </div>
   )
 }
 

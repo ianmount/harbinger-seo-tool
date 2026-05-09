@@ -3,10 +3,18 @@ import { z } from "zod"
 import { DataForSEOError, serpRankedDomains } from "@/lib/dataforseo"
 
 export const dynamic = "force-dynamic"
-// Per-keyword SERP probes are slow (~2-5s each from DFS). 200 keywords at
-// concurrency 8 puts us comfortably under Vercel's default 60s, but bump
-// the budget to be safe.
-export const maxDuration = 300
+// Per-keyword SERP probes are slow: DFS typically returns in 3-5s but can
+// spike to 15s+, and we layer 429 retries (2/4/8s backoffs) on top. With up
+// to 500 keywords at concurrency 8 the worst-case wall time can blow past
+// 300s, which manifested as Vercel killing the function and the front-end
+// surfacing "SERP rank probes failed for this location". 800s matches the
+// project's other long-running routes and the Pro Fluid Compute ceiling.
+export const maxDuration = 800
+
+// Hard ceiling on a single DFS SERP call. A stuck call shouldn't be allowed
+// to monopolize a worker — abort and treat the keyword as "not ranked" so
+// the rest of the batch keeps draining.
+const PER_KEYWORD_TIMEOUT_MS = 60_000
 
 /**
  * Batch endpoint that, for a given (domain, locationCode), probes
@@ -99,7 +107,10 @@ export async function POST(request: Request) {
           const items = await serpRankedDomains(
             keyword,
             { code: locationCode },
-            { depth: depth ?? 100 },
+            {
+              depth: depth ?? 100,
+              signal: AbortSignal.timeout(PER_KEYWORD_TIMEOUT_MS),
+            },
           )
           // serpRankedDomains already lowercases the domain; match exact
           // first, then a permissive suffix match for subdomains

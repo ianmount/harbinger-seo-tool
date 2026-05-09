@@ -1,9 +1,9 @@
 import "server-only"
 import { z } from "zod"
 import {
+  bulkBacklinksByTarget,
   DFS_LABS_COUNTRY_CODE_US,
   domainRankOverview,
-  indexedPageCount,
   referringDomainCount,
   serpRankedDomains,
   type SerpRankedDomain,
@@ -35,13 +35,25 @@ const locationCompetitorsSchema = z.object({
 
 export const CompAnalysisInputSchema = z.object({
   partnerUrl: z.string().min(3),
-  seedKeywords: z.array(z.string().min(1)).min(1).max(200),
+  seedKeywords: z.array(z.string().min(1)).min(1).max(400),
   locationCompetitors: z.array(locationCompetitorsSchema).min(1).max(10),
 })
 
 export type CompAnalysisInput = z.infer<typeof CompAnalysisInputSchema>
 
-const SERP_CONCURRENCY = 5
+// One HTTP call per (seed × location) probe — DFS's
+// /v3/serp/google/organic/live/advanced rejects multi-task arrays with
+// "You can set only one task at a time", so live SERP can't be batched.
+// SERP_CONCURRENCY governs parallelism inside one chunk; each chunk is
+// its own Inngest step.run with its own ~800s Vercel budget. 30 stays
+// under DFS's documented 2000 calls/min cap, and dfsRequest retries 429s
+// with backoff and times out hung connections at 60s/attempt.
+// SERP_CHUNK_SIZE is small (50) so the UI shows progress every minute or
+// two and a slow chunk has narrower blast radius. Step.run output stays
+// well under the 4MiB Inngest cap (50 probes × ~100 organic items × ~120
+// bytes ≈ 600 KB).
+const SERP_CONCURRENCY = 30
+const SERP_CHUNK_SIZE = 50
 const SERP_COST_USD = 0.002
 
 function cleanDomain(raw: string): string {
@@ -76,9 +88,15 @@ function bestRank(hits: SerpRankedDomain[], targetDomain: string): number | null
   return best
 }
 
+/**
+ * Per-domain global metrics that don't vary by city. Organic traffic is
+ * country-level (Labs domain_rank_overview only accepts country codes), and
+ * the global referring-domain count is kept as a fallback for cells where
+ * per-URL backlinks couldn't be resolved.
+ */
 interface DomainMetrics {
-  referringDomains: number
-  pagesIndexed: number
+  /** Global referring-domain count from /v3/backlinks/summary/live. */
+  referringDomainsGlobal: number
   organicTrafficRaw: number
 }
 
@@ -97,22 +115,15 @@ function describeError(err: unknown): string {
 }
 
 async function fetchDomainMetrics(domain: string): Promise<DomainMetricsResult> {
-  let referringDomains = 0
-  let pagesIndexed = 0
+  let referringDomainsGlobal = 0
   let organicTrafficRaw = 0
   let failed = false
   const errors: string[] = []
   try {
-    referringDomains = await referringDomainCount(domain)
+    referringDomainsGlobal = await referringDomainCount(domain)
   } catch (err) {
     failed = true
     errors.push(`referringDomainCount(${domain}): ${describeError(err)}`)
-  }
-  try {
-    pagesIndexed = await indexedPageCount(domain, DFS_LABS_COUNTRY_CODE_US)
-  } catch (err) {
-    failed = true
-    errors.push(`indexedPageCount(${domain}, country): ${describeError(err)}`)
   }
   try {
     const overview = await domainRankOverview(domain, {
@@ -125,7 +136,28 @@ async function fetchDomainMetrics(domain: string): Promise<DomainMetricsResult> 
       `domainRankOverview(${domain}, country): ${describeError(err)}`,
     )
   }
-  return { referringDomains, pagesIndexed, organicTrafficRaw, failed, errors }
+  return { referringDomainsGlobal, organicTrafficRaw, failed, errors }
+}
+
+/**
+ * Walk the SERP results for a given (domain × location) and collect the
+ * distinct URLs from this domain that ranked in the top 100 for any seed
+ * keyword. Numbers genuinely vary by city because SERPs do.
+ */
+function collectRankingUrls(
+  domain: string,
+  hitsBySeed: Map<string, SerpRankedDomain[]>,
+): string[] {
+  const urls = new Set<string>()
+  for (const hits of hitsBySeed.values()) {
+    for (const h of hits) {
+      if (!domainMatchesRoot(h.domain, domain)) continue
+      const u = h.url?.trim()
+      if (!u) continue
+      urls.add(u)
+    }
+  }
+  return [...urls]
 }
 
 async function mapWithConcurrency<T, U>(
@@ -162,10 +194,10 @@ function buildCsv(
 ): string {
   const lines: string[] = []
   lines.push(
-    `# Top 3/10/20/100 reflects how many of your ${seedCount} approved target keywords each domain ranks for in the specified city. Numbers vary by city because rankings are measured against city-level Google SERPs.`,
+    `# Top 3/10/20/100 reflects how many of your ${seedCount} approved target keywords each domain ranks for in the specified city. "Pages Ranking" is the count of distinct URLs from that domain ranking in top 100 for any seed in that city. "Referring Domains" sums the referring-domain count across those ranking URLs (per-URL backlink data; the same referring domain pointing to multiple ranking URLs is counted once per URL). All three columns vary by city because rankings are measured against city-level Google SERPs.`,
   )
   lines.push(
-    "Website,Top 3,Top 10,Top 20,Top 100,Referring Domains,Pages Indexed,Organic Traffic",
+    "Website,Top 3,Top 10,Top 20,Top 100,Referring Domains,Pages Ranking,Organic Traffic",
   )
   for (const loc of rows) {
     lines.push(",,,,,,,")
@@ -192,9 +224,26 @@ function buildRow(params: {
   domain: string
   isPartner: boolean
   buckets: { top3: number; top10: number; top20: number; top100: number }
+  rankingUrls: string[]
+  perPageReferring: Map<string, { referringDomains: number }>
   dm: DomainMetricsResult
 }): CompAnalysisDomainRow {
-  const { domain, isPartner, buckets, dm } = params
+  const { domain, isPartner, buckets, rankingUrls, perPageReferring, dm } =
+    params
+  // Sum referring domains across this cell's ranking URLs. Falls back to
+  // the global per-domain count when we have no ranking URLs (this domain
+  // doesn't rank in this city) so the cell still shows a meaningful number
+  // for context — flagged via `failed` if even the global call errored.
+  let referringDomains = 0
+  let resolvedAny = false
+  for (const url of rankingUrls) {
+    const m = perPageReferring.get(url)
+    if (m) {
+      referringDomains += m.referringDomains
+      resolvedAny = true
+    }
+  }
+  if (!resolvedAny) referringDomains = dm.referringDomainsGlobal
   return {
     domain,
     isPartner,
@@ -202,8 +251,8 @@ function buildRow(params: {
     top10: buckets.top10,
     top20: buckets.top20,
     top100: buckets.top100,
-    referringDomains: dm.referringDomains,
-    pagesIndexed: dm.pagesIndexed,
+    referringDomains,
+    pagesIndexed: rankingUrls.length,
     organicTraffic: compactThousands(dm.organicTrafficRaw),
     organicTrafficRaw: dm.organicTrafficRaw,
     failed: dm.failed,
@@ -232,7 +281,7 @@ function bucketize(
   return { top3, top10, top20, top100 }
 }
 
-export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
+export const runCompAnalysisTask: TaskRunner = async ({ jobId, job, step }) => {
   const parsed = CompAnalysisInputSchema.safeParse(job.input)
   if (!parsed.success) {
     throw new Error(
@@ -241,9 +290,11 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
   }
   const body = parsed.data
 
-  const stage = async (label: string, detail?: string) => {
+  // Cancellation checks happen inside each step.run — outside-step.run code
+  // is replayed on every Inngest re-invocation and shouldn't have side
+  // effects that depend on remote state.
+  const checkCancel = async () => {
     if (await isCancelRequested(jobId)) throw new JobCancelledError(jobId)
-    await updateProgress(jobId, { stage: label, detail }).catch(() => {})
   }
 
   const partnerDomain = cleanDomain(body.partnerUrl)
@@ -285,21 +336,27 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
 
   const warnings: string[] = []
 
-  // 1. Domain-level metrics.
-  await stage("Pulling domain metrics", `${uniqueDomainsList.length} domains`)
+  // 1. Domain-level metrics — one step.run for the whole phase.
+  const dmResults = await step.run("domain-metrics", async () => {
+    await checkCancel()
+    await updateProgress(jobId, {
+      stage: "Pulling domain metrics",
+      detail: `${uniqueDomainsList.length} domains`,
+    }).catch(() => {})
+    return await mapWithConcurrency(uniqueDomainsList, 3, (d) =>
+      fetchDomainMetrics(d),
+    )
+  })
   const domainMetrics = new Map<string, DomainMetricsResult>()
-  const dmResults = await mapWithConcurrency(uniqueDomainsList, 3, (d) =>
-    fetchDomainMetrics(d),
-  )
   for (let i = 0; i < uniqueDomainsList.length; i++) {
     domainMetrics.set(uniqueDomainsList[i], dmResults[i])
   }
 
-  // 2. SERP probes.
-  await stage(
-    "Probing SERPs",
-    `${seeds.length} seeds × ${locationCompetitors.length} locations`,
-  )
+  // 2. SERP probes — chunked across multiple step.run blocks. Inngest
+  // re-invokes the function across step boundaries, so cumulative SERP
+  // wall-clock can exceed the 800s Vercel ceiling. Each chunk's body must
+  // still finish within 800s, but at SERP_CHUNK_SIZE=50 with concurrency
+  // 30 that's ~2 sequential rounds × ~5-15s ≈ ~20-60s per chunk.
   const serpTasks: Array<{ seed: string; locationIdx: number }> = []
   for (const seed of seeds) {
     for (let li = 0; li < locationCompetitors.length; li++) {
@@ -310,24 +367,43 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
     hits: SerpRankedDomain[]
     error: string | null
   }
-  const serpResults = await mapWithConcurrency(
-    serpTasks,
-    SERP_CONCURRENCY,
-    async (t): Promise<SerpProbeResult> => {
-      const lc = locationCompetitors[t.locationIdx]
-      try {
-        const hits = await serpRankedDomains(
-          t.seed,
-          { code: lc.locationCode },
-          { depth: 100 },
+  const chunkCount = Math.max(1, Math.ceil(serpTasks.length / SERP_CHUNK_SIZE))
+  const serpResults: SerpProbeResult[] = []
+  for (let ci = 0; ci < chunkCount; ci++) {
+    const chunkProbes = serpTasks.slice(
+      ci * SERP_CHUNK_SIZE,
+      (ci + 1) * SERP_CHUNK_SIZE,
+    )
+    const chunkResults = await step.run(
+      `serp-chunk-${ci}`,
+      async (): Promise<SerpProbeResult[]> => {
+        await checkCancel()
+        await updateProgress(jobId, {
+          stage: "Probing SERPs",
+          detail: `chunk ${ci + 1}/${chunkCount} (${seeds.length} seeds × ${locationCompetitors.length} locations)`,
+        }).catch(() => {})
+        return await mapWithConcurrency(
+          chunkProbes,
+          SERP_CONCURRENCY,
+          async (t): Promise<SerpProbeResult> => {
+            const lc = locationCompetitors[t.locationIdx]
+            try {
+              const hits = await serpRankedDomains(
+                t.seed,
+                { code: lc.locationCode },
+                { depth: 100 },
+              )
+              return { hits, error: null }
+            } catch (err) {
+              const msg = `serp("${t.seed}", loc=${lc.locationCode} ${lc.location}): ${describeError(err)}`
+              return { hits: [], error: msg }
+            }
+          },
         )
-        return { hits, error: null }
-      } catch (err) {
-        const msg = `serp("${t.seed}", loc=${lc.locationCode} ${lc.location}): ${describeError(err)}`
-        return { hits: [], error: msg }
-      }
-    },
-  )
+      },
+    )
+    serpResults.push(...chunkResults)
+  }
 
   const serpByLocation: Array<Map<string, SerpRankedDomain[]>> =
     locationCompetitors.map(() => new Map())
@@ -339,9 +415,59 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
     if (r.error) serpErrors[locationIdx].push(r.error)
   }
 
-  await stage("Building rows")
+  // 3. Per-(domain × location) ranking URL collection. Falls out of the
+  // SERP probes for free — every organic SERP item carries a `url`, so we
+  // already have the data we need to compute "pages on this domain that
+  // rank in this city" without paying for additional API calls.
+  const rankingUrlsByCell = new Map<string, string[]>()
+  const allRankingUrls = new Set<string>()
+  const cellKey = (li: number, d: string): string => `${li}::${d}`
+  for (let li = 0; li < locationCompetitors.length; li++) {
+    const lc = locationCompetitors[li]
+    const cellDomains = [partnerDomain, ...lc.competitors]
+    for (const d of cellDomains) {
+      const urls = collectRankingUrls(d, serpByLocation[li])
+      rankingUrlsByCell.set(cellKey(li, d), urls)
+      for (const u of urls) allRankingUrls.add(u)
+    }
+  }
 
-  // 3. Build rows.
+  // 4. Bulk per-URL backlinks lookup. One DFS call (chunks of 1000) covers
+  // every ranking URL across every cell, so cost stays in the cents range
+  // even when the keyword × city matrix is large.
+  const rankingUrlList = [...allRankingUrls]
+  const backlinksOutcome = await step.run(
+    "bulk-backlinks",
+    async (): Promise<{
+      entries: Array<[string, { referringDomains: number; backlinks: number }]>
+      warning: string | null
+    }> => {
+      await checkCancel()
+      await updateProgress(jobId, {
+        stage: "Pulling per-URL backlinks",
+        detail: `${rankingUrlList.length} ranking URL${rankingUrlList.length === 1 ? "" : "s"}`,
+      }).catch(() => {})
+      if (rankingUrlList.length === 0) return { entries: [], warning: null }
+      try {
+        const map = await bulkBacklinksByTarget(rankingUrlList)
+        return { entries: [...map.entries()], warning: null }
+      } catch (err) {
+        return {
+          entries: [],
+          warning: `bulk_backlinks lookup failed: ${describeError(err)} — falling back to global per-domain referring counts.`,
+        }
+      }
+    },
+  )
+  const perUrlBacklinks = new Map<
+    string,
+    { referringDomains: number; backlinks: number }
+  >(backlinksOutcome.entries)
+  if (backlinksOutcome.warning) warnings.push(backlinksOutcome.warning)
+
+  await updateProgress(jobId, { stage: "Building rows" }).catch(() => {})
+
+  // 5. Build rows.
   const rows: CompAnalysisLocationRows[] = []
   for (let li = 0; li < locationCompetitors.length; li++) {
     const lc = locationCompetitors[li]
@@ -349,6 +475,8 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
       domain: partnerDomain,
       isPartner: true,
       buckets: bucketize(partnerDomain, seeds, serpByLocation[li]),
+      rankingUrls: rankingUrlsByCell.get(cellKey(li, partnerDomain)) ?? [],
+      perPageReferring: perUrlBacklinks,
       dm: domainMetrics.get(partnerDomain)!,
     })
     const competitorRows: CompAnalysisDomainRow[] = lc.competitors.map((d) =>
@@ -356,6 +484,8 @@ export const runCompAnalysisTask: TaskRunner = async ({ jobId, job }) => {
         domain: d,
         isPartner: false,
         buckets: bucketize(d, seeds, serpByLocation[li]),
+        rankingUrls: rankingUrlsByCell.get(cellKey(li, d)) ?? [],
+        perPageReferring: perUrlBacklinks,
         dm: domainMetrics.get(d)!,
       }),
     )
