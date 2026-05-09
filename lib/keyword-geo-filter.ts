@@ -115,3 +115,87 @@ export function filterOutOfAreaKeywords(
   }
   return { kept, dropped }
 }
+
+/**
+ * Drop "near me" candidates whose geo-bound twin is already in the pool.
+ *
+ * `keyword_suggestions` runs at country level, where `<service> near me`
+ * variants carry national volume that swamps city-bound twins like
+ * `<service> <city>`. After volume enrichment a near-me term still beats its
+ * local twin on raw volume, so the per-location top-N cap surfaces nothing
+ * but near-me. This helper preserves a near-me candidate only when no local
+ * alternative exists, i.e. the near-me phrase is the only way the user can
+ * see this intent for the selected location.
+ *
+ * "Twin" definition: a non-near-me keyword in the same pool that contains
+ *   1. every word of the near-me phrase's core (the phrase minus "near me"), and
+ *   2. at least one phrase from the selected location (city or state name).
+ */
+const NEAR_ME_PATTERN = /\bnear me\b/i
+
+function normalizePadded(s: string): string {
+  return ` ${s.toLowerCase().trim().replace(/\s+/g, " ")} `
+}
+
+function extractLocationPhrases(
+  locations: ReadonlyArray<DfsLabsLocation>,
+): string[] {
+  const out = new Set<string>()
+  for (const loc of locations) {
+    for (const part of loc.location_name.split(",")) {
+      const cleaned = part.trim().toLowerCase()
+      if (!cleaned || cleaned === "united states") continue
+      out.add(cleaned)
+    }
+  }
+  return Array.from(out)
+}
+
+export function dedupeNearMeAgainstGeoTwins(
+  keywords: ReadonlyArray<KeywordResult>,
+  locations: ReadonlyArray<DfsLabsLocation>,
+): { kept: KeywordResult[]; dropped: number } {
+  const locPhrases = extractLocationPhrases(locations)
+  if (locPhrases.length === 0) {
+    return { kept: keywords.slice(), dropped: 0 }
+  }
+
+  const nonNearMePadded: string[] = []
+  for (const kw of keywords) {
+    if (!NEAR_ME_PATTERN.test(kw.keyword)) {
+      nonNearMePadded.push(normalizePadded(kw.keyword))
+    }
+  }
+
+  const kept: KeywordResult[] = []
+  let dropped = 0
+  for (const kw of keywords) {
+    if (!NEAR_ME_PATTERN.test(kw.keyword)) {
+      kept.push(kw)
+      continue
+    }
+    const core = kw.keyword
+      .toLowerCase()
+      .replace(NEAR_ME_PATTERN, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+    const coreTokens = core.split(" ").filter(Boolean)
+    if (coreTokens.length === 0) {
+      // Bare "near me" with no service prefix — nothing to find a twin for.
+      kept.push(kw)
+      continue
+    }
+    const hasTwin = nonNearMePadded.some((padded) => {
+      for (const token of coreTokens) {
+        if (!padded.includes(` ${token} `)) return false
+      }
+      return locPhrases.some((phrase) => padded.includes(phrase))
+    })
+    if (hasTwin) {
+      dropped++
+    } else {
+      kept.push(kw)
+    }
+  }
+  return { kept, dropped }
+}

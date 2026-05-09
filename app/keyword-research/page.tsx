@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/tabs"
 import { useChatPageContext } from "@/lib/chat-context"
 import {
+  dedupeNearMeAgainstGeoTwins,
   extractAllowedStates,
   filterOutOfAreaKeywords,
 } from "@/lib/keyword-geo-filter"
@@ -58,6 +59,7 @@ type Phase =
       seeds: string[]
       reasoning: string
       geoFilteredOut: number
+      nearMeDeduped: number
     }
   | { status: "error"; message: string }
 
@@ -484,16 +486,22 @@ export default function KeywordResearchPage() {
       }),
     )
 
-    // Per-location surfacing: sort by volume desc and take top maxKeywords.
+    // Per-location surfacing: dedupe near-me variants against their geo twin
+    // (e.g. drop "plumber near me" when "plumber atlanta" is in the pool for
+    // the Atlanta tab), then sort by volume desc and take top maxKeywords.
     // The remaining keywords are dropped — we don't want to pay for SERP rank
-    // probes against zero-volume long-tail noise. Track the drop count so the
-    // UI can disclose it.
+    // probes against zero-volume long-tail noise. Track the drop counts so
+    // the UI can disclose them.
     type SurfacedOut = { rows: KeywordResult[]; truncated: number }
     const surfacedByLoc = new Map<string, SurfacedOut>()
+    let nearMeDeduped = 0
     for (const loc of selectedLocations) {
       const key = locationKeyOf(loc)
       const enriched = enrichedByLoc.get(key) ?? filtered
-      const sorted = enriched
+      const { kept: deduped, dropped: nearMeDroppedHere } =
+        dedupeNearMeAgainstGeoTwins(enriched, [loc])
+      nearMeDeduped += nearMeDroppedHere
+      const sorted = deduped
         .slice()
         .sort(
           (a, b) =>
@@ -502,6 +510,15 @@ export default function KeywordResearchPage() {
       const surfaced = sorted.slice(0, maxKeywords)
       const truncated = Math.max(0, sorted.length - surfaced.length)
       surfacedByLoc.set(key, { rows: surfaced, truncated })
+    }
+    if (nearMeDeduped > 0) {
+      console.log(
+        `[keyword-research] near-me dedupe dropped ${nearMeDeduped} candidate${
+          nearMeDeduped === 1 ? "" : "s"
+        } across ${selectedLocations.length} location${
+          selectedLocations.length === 1 ? "" : "s"
+        }`,
+      )
     }
 
     // ── Stage 4: per-location SERP rank probes (parallel) ────────────────
@@ -581,6 +598,7 @@ export default function KeywordResearchPage() {
       seeds,
       reasoning,
       geoFilteredOut,
+      nearMeDeduped,
     })
     setActiveLocationKey(locationKeyOf(selectedLocations[0]))
   }, [
@@ -787,6 +805,7 @@ Scope nuances: Residential only — no commercial, new construction, or septic. 
           <SeedSummary
             seeds={phase.seeds}
             geoFilteredOut={phase.geoFilteredOut}
+            nearMeDeduped={phase.nearMeDeduped}
           />
           <ColumnLegend />
           <Tabs
@@ -861,9 +880,11 @@ function ReasoningBlurb({ reasoning }: { reasoning: string }) {
 function SeedSummary({
   seeds,
   geoFilteredOut,
+  nearMeDeduped,
 }: {
   seeds: string[]
   geoFilteredOut: number
+  nearMeDeduped: number
 }) {
   if (seeds.length === 0) return null
   return (
@@ -882,6 +903,16 @@ function SeedSummary({
           </span>{" "}
           candidate{geoFilteredOut === 1 ? "" : "s"} that mentioned an
           out-of-area state.
+        </div>
+      ) : null}
+      {nearMeDeduped > 0 ? (
+        <div>
+          Near-me dedupe dropped{" "}
+          <span className="font-medium text-foreground">
+            {nearMeDeduped}
+          </span>{" "}
+          candidate{nearMeDeduped === 1 ? "" : "s"} whose geo-bound twin
+          (e.g. "plumber atlanta") was already in the pool.
         </div>
       ) : null}
     </div>
