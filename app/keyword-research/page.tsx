@@ -56,6 +56,7 @@ type Phase =
       results: LocationResult[]
       domain: string
       seeds: string[]
+      reasoning: string
       geoFilteredOut: number
     }
   | { status: "error"; message: string }
@@ -291,6 +292,7 @@ export default function KeywordResearchPage() {
       results:
         phase.status === "done"
           ? {
+              reasoning: phase.reasoning,
               seeds: phase.seeds,
               perLocation: phase.results.map((r) => ({
                 location: r.location.location_name,
@@ -322,8 +324,9 @@ export default function KeywordResearchPage() {
     // ── Stage 1: Claude generates location-aware seed phrases ────────────
     setPhase({ status: "running", stage: "claude-seeds" })
     let seeds: string[]
+    let reasoning = ""
     try {
-      const body = await fetchJson<{ seeds: string[] }>(
+      const body = await fetchJson<{ seeds: string[]; reasoning?: string }>(
         "/api/claude/keyword-seeds",
         {
           method: "POST",
@@ -337,6 +340,7 @@ export default function KeywordResearchPage() {
         "Claude seed generation",
       )
       seeds = body.seeds ?? []
+      reasoning = body.reasoning?.trim() ?? ""
       if (seeds.length === 0) {
         throw new Error("Claude returned no seed keywords.")
       }
@@ -575,6 +579,7 @@ export default function KeywordResearchPage() {
       results,
       domain: normalizedDomain,
       seeds,
+      reasoning,
       geoFilteredOut,
     })
     setActiveLocationKey(locationKeyOf(selectedLocations[0]))
@@ -778,6 +783,7 @@ Scope nuances: Residential only — no commercial, new construction, or septic. 
 
       {phase.status === "done" && results.length > 0 ? (
         <section className="space-y-3">
+          <ReasoningBlurb reasoning={phase.reasoning} />
           <SeedSummary
             seeds={phase.seeds}
             geoFilteredOut={phase.geoFilteredOut}
@@ -834,6 +840,20 @@ Scope nuances: Residential only — no commercial, new construction, or septic. 
           </Tabs>
         </section>
       ) : null}
+    </div>
+  )
+}
+
+function ReasoningBlurb({ reasoning }: { reasoning: string }) {
+  if (!reasoning) return null
+  return (
+    <div className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
+      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        How Claude read your context
+      </div>
+      <p className="whitespace-pre-wrap leading-relaxed text-foreground">
+        {reasoning}
+      </p>
     </div>
   )
 }
