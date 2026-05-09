@@ -467,12 +467,18 @@ export default function KeywordResearchPage() {
           const byKw = new Map(
             (volBody.results ?? []).map((r) => [r.keyword.toLowerCase(), r]),
           )
+          // City-volume "no entry" means DFS's Google Ads keyword planner has
+          // no search activity for this keyword in this city — set the volume
+          // to 0 so it sinks in the volume sort. Do NOT fall back to the
+          // national volume from suggestions: that's how out-of-area cities
+          // ("plumber dallas" with 5k national volume) surfaced into a
+          // single-city run's top results.
           const enriched = filtered.map((r) => {
             const v = byKw.get(r.keyword.toLowerCase())
-            if (!v) return r
+            if (!v) return { ...r, search_volume: 0 }
             return {
               ...r,
-              search_volume: v.search_volume ?? r.search_volume,
+              search_volume: v.search_volume ?? 0,
               cpc: v.cpc ?? r.cpc,
               competition: v.competition ?? r.competition,
               competition_level: v.competition_level ?? r.competition_level,
