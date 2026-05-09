@@ -137,7 +137,7 @@ function csvEscape(value: unknown): string {
 function buildCsv(rows: RankedKeyword[]): string {
   const headers = [
     "Keyword",
-    "Volume (city)",
+    "Volume",
     "CPC",
     "Competition",
     "Current Ranking",
@@ -467,18 +467,23 @@ export default function KeywordResearchPage() {
           const byKw = new Map(
             (volBody.results ?? []).map((r) => [r.keyword.toLowerCase(), r]),
           )
-          // City-volume "no entry" means DFS's Google Ads keyword planner has
-          // no search activity for this keyword in this city — set the volume
-          // to 0 so it sinks in the volume sort. Do NOT fall back to the
-          // national volume from suggestions: that's how out-of-area cities
-          // ("plumber dallas" with 5k national volume) surfaced into a
-          // single-city run's top results.
+          // Volume merge:
+          //   - If DFS returns a city-level entry, use it (real city signal).
+          //   - If not, KEEP the national volume from suggestions as the
+          //     fallback. DFS Google-Ads keyword-planner suppresses
+          //     keywords below ~10 monthly searches per city, so a missing
+          //     entry usually means "low local volume" not "irrelevant".
+          //     Falling back to national keeps the keyword on the list with
+          //     a real signal instead of zeroing it out.
+          //   - Out-of-area cities can no longer leak into the pool here
+          //     because every seed is pinned to a target city upstream
+          //     (api/claude/keyword-seeds enforces this).
           const enriched = filtered.map((r) => {
             const v = byKw.get(r.keyword.toLowerCase())
-            if (!v) return { ...r, search_volume: 0 }
+            if (!v) return r
             return {
               ...r,
-              search_volume: v.search_volume ?? 0,
+              search_volume: v.search_volume ?? r.search_volume,
               cpc: v.cpc ?? r.cpc,
               competition: v.competition ?? r.competition,
               competition_level: v.competition_level ?? r.competition_level,
@@ -517,7 +522,8 @@ export default function KeywordResearchPage() {
       const { kept: deduped, dropped: nearMeDroppedHere } =
         dedupeNearMeAgainstGeoTwins(forThisLocation, [loc])
       nearMeDeduped += nearMeDroppedHere
-      const sorted = deduped
+      const withVolume = deduped.filter((r) => (r.search_volume ?? 0) > 0)
+      const sorted = withVolume
         .slice()
         .sort(
           (a, b) =>
@@ -1034,7 +1040,7 @@ function LocationResultPanel({
                 onToggle={onToggleSort}
                 numeric
               >
-                Volume (city)
+                Volume
               </SortableHead>
               <SortableHead
                 sortKey="cpc"
@@ -1123,14 +1129,16 @@ function ColumnLegend() {
           </dd>
         </div>
         <div>
-          <dt className="font-medium text-foreground">Volume (city)</dt>
+          <dt className="font-medium text-foreground">Volume</dt>
           <dd className="text-muted-foreground">
-            Monthly search volume from DataForSEO&apos;s{" "}
+            Monthly search volume. We try DataForSEO&apos;s{" "}
             <code className="font-mono">google_ads/search_volume</code>{" "}
-            endpoint, scoped to <strong>this tab&apos;s location</strong>{" "}
-            (the only DataForSEO endpoint that supports city-level location
-            codes). Different tabs show different numbers for the same
-            keyword.
+            endpoint at <strong>this tab&apos;s location</strong> first; if
+            DFS has no city-level entry for a keyword (which it suppresses
+            below ~10 searches/mo per city), we fall back to the national
+            volume from <code className="font-mono">keyword_suggestions</code>{" "}
+            so the keyword still surfaces with a real signal. Keywords with
+            zero volume in both are dropped from the results.
           </dd>
         </div>
         <div>
