@@ -661,9 +661,13 @@ export interface RankedKeyword {
 export async function rankedKeywords(
   domain: string,
   location: DfsLocation,
-  opts: { limit?: number } = {},
+  opts: { limit?: number; minVolume?: number } = {},
 ): Promise<RankedKeyword[]> {
   const target = stripDomain(domain)
+  const filters =
+    opts.minVolume != null
+      ? [["keyword_data.keyword_info.search_volume", ">", opts.minVolume]]
+      : undefined
   const envelope = await dfsRequest(
     "/v3/dataforseo_labs/google/ranked_keywords/live",
     [
@@ -672,6 +676,7 @@ export async function rankedKeywords(
         ...locationAndLanguageParams(location),
         limit: opts.limit ?? 100,
         order_by: ["ranked_serp_element.serp_item.etv,desc"],
+        ...(filters ? { filters } : {}),
       },
     ],
   )
@@ -1265,4 +1270,426 @@ export async function backlinksTimeseriesSummary(
   // Sort ascending by date so chart + delta math don't have to.
   out.sort((a, b) => a.date.localeCompare(b.date))
   return out
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Keyword Research workflow — additional wrappers added for the rewritten
+// pipeline (see lib/tasks/keyword-research.ts).
+
+/**
+ * /v3/dataforseo_labs/google/competitors_domain/live
+ *
+ * Returns the top N domains that compete with the target on organic SERPs
+ * (ranked by intersecting keywords). We only need the domain strings for
+ * downstream calls.
+ */
+export interface CompetitorDomain {
+  domain: string
+  intersections: number
+  organicKeywords: number
+  organicTraffic: number
+}
+
+const competitorDomainItemSchema = z
+  .object({
+    domain: z.string(),
+    intersections: z.number().nullable().optional(),
+    full_domain_metrics: z
+      .object({
+        organic: z
+          .object({
+            count: z.number().nullable().optional(),
+            etv: z.number().nullable().optional(),
+          })
+          .passthrough()
+          .nullable()
+          .optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+  })
+  .passthrough()
+
+export async function competitorsDomain(
+  domain: string,
+  location: DfsLocation,
+  opts: { limit?: number } = {},
+): Promise<CompetitorDomain[]> {
+  const target = stripDomain(domain)
+  const envelope = await dfsRequest(
+    "/v3/dataforseo_labs/google/competitors_domain/live",
+    [
+      {
+        target,
+        ...locationAndLanguageParams(location),
+        limit: opts.limit ?? 5,
+      },
+    ],
+  )
+  const out: CompetitorDomain[] = []
+  for (const raw of extractLabsItems(envelope)) {
+    const parsed = competitorDomainItemSchema.safeParse(raw)
+    if (!parsed.success) continue
+    const item = parsed.data
+    if (!item.domain || stripDomain(item.domain) === target) continue
+    out.push({
+      domain: item.domain,
+      intersections: item.intersections ?? 0,
+      organicKeywords: item.full_domain_metrics?.organic?.count ?? 0,
+      organicTraffic: item.full_domain_metrics?.organic?.etv ?? 0,
+    })
+  }
+  return out
+}
+
+/**
+ * /v3/dataforseo_labs/google/keyword_ideas/live (multi-seed variant)
+ *
+ * The existing `keywordIdeas` wrapper takes a single seed; this variant
+ * accepts the full service list in one call as the new keyword research
+ * pipeline does.
+ */
+export async function keywordIdeasMulti(
+  keywords: string[],
+  location: DfsLocation,
+  opts: { limit?: number } = {},
+): Promise<KeywordResult[]> {
+  if (keywords.length === 0) return []
+  const envelope = await dfsRequest(
+    "/v3/dataforseo_labs/google/keyword_ideas/live",
+    [
+      {
+        keywords,
+        ...locationAndLanguageParams(location),
+        limit: opts.limit ?? DEFAULT_LIMIT,
+      },
+    ],
+  )
+  return extractLabsItems(envelope).map(normalizeLabsItem)
+}
+
+/**
+ * /v3/dataforseo_labs/google/related_keywords/live
+ *
+ * Returns related-search expansions for a single seed. Response items are
+ * nested as { keyword_data, related_keywords[] }; we flatten back to a
+ * KeywordResult list using the seed's `keyword_data.keyword_info` for
+ * volume/CPC/etc. (each related keyword shows up as its own item in the
+ * flat result).
+ */
+const relatedKeywordItemSchema = z
+  .object({
+    keyword_data: z
+      .object({
+        keyword: z.string(),
+        keyword_info: z
+          .object({
+            search_volume: z.number().nullable().optional(),
+            cpc: z.number().nullable().optional(),
+            competition: z.number().nullable().optional(),
+            competition_level: z.string().nullable().optional(),
+          })
+          .passthrough()
+          .nullable()
+          .optional(),
+        keyword_properties: z
+          .object({
+            keyword_difficulty: z.number().nullable().optional(),
+          })
+          .passthrough()
+          .nullable()
+          .optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough()
+
+export async function relatedKeywords(
+  seed: string,
+  location: DfsLocation,
+  opts: { limit?: number } = {},
+): Promise<KeywordResult[]> {
+  const envelope = await dfsRequest(
+    "/v3/dataforseo_labs/google/related_keywords/live",
+    [
+      {
+        keyword: seed,
+        ...locationAndLanguageParams(location),
+        limit: opts.limit ?? 100,
+      },
+    ],
+  )
+  const out: KeywordResult[] = []
+  for (const raw of extractLabsItems(envelope)) {
+    const parsed = relatedKeywordItemSchema.safeParse(raw)
+    if (!parsed.success) continue
+    const kd = parsed.data.keyword_data
+    out.push({
+      keyword: kd.keyword,
+      search_volume: kd.keyword_info?.search_volume ?? undefined,
+      cpc: kd.keyword_info?.cpc ?? undefined,
+      competition: kd.keyword_info?.competition ?? undefined,
+      competition_level: toCompetitionLevel(kd.keyword_info?.competition_level),
+      keyword_difficulty: kd.keyword_properties?.keyword_difficulty ?? undefined,
+    })
+  }
+  return out
+}
+
+/**
+ * /v3/dataforseo_labs/google/search_intent/live
+ *
+ * Classifies each keyword's primary intent (informational / navigational /
+ * commercial / transactional). DFS returns the label under
+ * `keyword_intent.label`.
+ */
+export type SearchIntent =
+  | "informational"
+  | "navigational"
+  | "commercial"
+  | "transactional"
+
+const searchIntentItemSchema = z
+  .object({
+    keyword: z.string(),
+    keyword_intent: z
+      .object({
+        label: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+  })
+  .passthrough()
+
+function toIntent(raw: string | null | undefined): SearchIntent | undefined {
+  if (!raw) return undefined
+  const v = raw.toLowerCase()
+  if (
+    v === "informational" ||
+    v === "navigational" ||
+    v === "commercial" ||
+    v === "transactional"
+  ) {
+    return v
+  }
+  return undefined
+}
+
+export async function searchIntent(
+  keywords: string[],
+  location: DfsLocation,
+): Promise<Map<string, SearchIntent>> {
+  const out = new Map<string, SearchIntent>()
+  if (keywords.length === 0) return out
+  // The endpoint accepts up to 1000 keywords per call.
+  const CHUNK = 1000
+  for (let i = 0; i < keywords.length; i += CHUNK) {
+    const chunk = keywords.slice(i, i + CHUNK)
+    const envelope = await dfsRequest(
+      "/v3/dataforseo_labs/google/search_intent/live",
+      [
+        {
+          keywords: chunk,
+          ...locationAndLanguageParams(location),
+        },
+      ],
+    )
+    for (const raw of extractLabsItems(envelope)) {
+      const parsed = searchIntentItemSchema.safeParse(raw)
+      if (!parsed.success) continue
+      const intent = toIntent(parsed.data.keyword_intent?.label)
+      if (intent) out.set(parsed.data.keyword.toLowerCase(), intent)
+    }
+  }
+  return out
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SERP standard-queue task lifecycle.
+//
+// Standard queue (vs. /live/advanced) is much cheaper per task but async:
+// you POST a batch of tasks, poll `tasks_ready` until they finish, then
+// GET each by id. Used by Phase 3 of keyword-research to probe city-level
+// rankings for ~50–200 (keyword × city) pairs without paying live-mode
+// rates.
+
+export interface SerpTaskHandle {
+  id: string
+  keyword: string
+  locationName: string
+}
+
+const taskPostItemSchema = z
+  .object({
+    id: z.string(),
+    status_code: z.number(),
+    status_message: z.string(),
+    data: z
+      .object({
+        keyword: z.string().optional(),
+        location_name: z.string().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+  })
+  .passthrough()
+
+export interface SerpTaskRequest {
+  keyword: string
+  locationName: string
+  depth?: number
+}
+
+/**
+ * /v3/serp/google/organic/task_post
+ *
+ * Submits up to 100 SERP tasks per call. Returns one handle per submitted
+ * task (with the DFS-issued task id) so the caller can correlate poll
+ * results back to (keyword, city). Failed-on-submit tasks are skipped with
+ * a warning; the returned array is shorter than the input in that case.
+ */
+export async function serpTaskPost(
+  tasks: SerpTaskRequest[],
+): Promise<SerpTaskHandle[]> {
+  if (tasks.length === 0) return []
+  const handles: SerpTaskHandle[] = []
+  // DFS accepts up to 100 tasks per task_post call.
+  const CHUNK = 100
+  for (let i = 0; i < tasks.length; i += CHUNK) {
+    const chunk = tasks.slice(i, i + CHUNK)
+    const body = chunk.map((t) => ({
+      keyword: t.keyword,
+      location_name: t.locationName,
+      language_code: DEFAULT_LANGUAGE_CODE,
+      depth: t.depth ?? 20,
+    }))
+    const envelope = await dfsRequest("/v3/serp/google/organic/task_post", body)
+    for (let j = 0; j < envelope.tasks.length; j++) {
+      const taskRaw = envelope.tasks[j]
+      const parsed = taskPostItemSchema.safeParse(taskRaw)
+      if (!parsed.success) continue
+      // Per-task posting status: 20100 = task created; anything else means
+      // the submission itself failed for that single keyword. Skip silently
+      // and let the caller treat missing results as "not probed".
+      if (parsed.data.status_code !== 20100) {
+        console.warn(
+          `[dataforseo] task_post item failed status=${parsed.data.status_code} message=${parsed.data.status_message}`,
+        )
+        continue
+      }
+      const original = chunk[j]
+      handles.push({
+        id: parsed.data.id,
+        keyword: parsed.data.data?.keyword ?? original?.keyword ?? "",
+        locationName:
+          parsed.data.data?.location_name ?? original?.locationName ?? "",
+      })
+    }
+  }
+  return handles
+}
+
+const tasksReadyItemSchema = z
+  .object({ id: z.string() })
+  .passthrough()
+
+/**
+ * /v3/serp/google/organic/tasks_ready
+ *
+ * Returns ids of every task that's finished and is awaiting a GET. This is
+ * a global queue scoped to the DFS account — the caller must intersect
+ * with the handles it submitted.
+ */
+export async function serpTasksReady(): Promise<string[]> {
+  const envelope = await dfsRequest(
+    "/v3/serp/google/organic/tasks_ready",
+    [],
+  )
+  const ids: string[] = []
+  for (const taskRaw of envelope.tasks) {
+    const result = (taskRaw as { result?: unknown[] }).result ?? []
+    for (const item of result) {
+      const parsed = tasksReadyItemSchema.safeParse(item)
+      if (parsed.success) ids.push(parsed.data.id)
+    }
+  }
+  return ids
+}
+
+const serpTaskItemSchema = z
+  .object({
+    type: z.string().optional(),
+    rank_group: z.number().nullable().optional(),
+    rank_absolute: z.number().nullable().optional(),
+    domain: z.string().nullable().optional(),
+    url: z.string().nullable().optional(),
+    title: z.string().nullable().optional(),
+  })
+  .passthrough()
+
+export interface SerpOrganicResult {
+  position: number
+  domain: string
+  url: string
+  title: string
+}
+
+export interface SerpTaskResult {
+  taskId: string
+  keyword: string
+  locationName: string
+  itemTypes: string[]
+  organic: SerpOrganicResult[]
+}
+
+/**
+ * /v3/serp/google/organic/task_get/advanced/{id}
+ *
+ * Fetches the SERP for a single completed task. We pull every item but
+ * keep only the organic results (with rank + domain + url) and a flat list
+ * of every item-type seen (useful for surfacing SERP features like
+ * `local_pack`, `featured_snippet`, `people_also_ask`).
+ */
+export async function serpTaskGet(taskId: string): Promise<SerpTaskResult> {
+  const envelope = await dfsRequest<DfsEnvelope>(
+    `/v3/serp/google/organic/task_get/advanced/${encodeURIComponent(taskId)}`,
+    {},
+  )
+  const firstTask = envelope.tasks[0]
+  const result = (firstTask?.result ?? [])[0] as
+    | {
+        keyword?: string
+        location_name?: string
+        items?: unknown[]
+      }
+    | undefined
+  const items = result?.items ?? []
+  const itemTypes = new Set<string>()
+  const organic: SerpOrganicResult[] = []
+  for (const raw of items) {
+    const parsed = serpTaskItemSchema.safeParse(raw)
+    if (!parsed.success) continue
+    const it = parsed.data
+    if (it.type) itemTypes.add(it.type)
+    if (it.type === "organic") {
+      const position = it.rank_absolute ?? it.rank_group ?? 0
+      if (!position) continue
+      organic.push({
+        position,
+        domain: it.domain ?? "",
+        url: it.url ?? "",
+        title: it.title ?? "",
+      })
+    }
+  }
+  return {
+    taskId,
+    keyword: result?.keyword ?? "",
+    locationName: result?.location_name ?? "",
+    itemTypes: Array.from(itemTypes),
+    organic: organic.sort((a, b) => a.position - b.position),
+  }
 }

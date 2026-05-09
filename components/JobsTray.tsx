@@ -38,6 +38,7 @@ type JobKind =
   | "technical_crawl"
   | "alt_tags"
   | "full_audit"
+  | "keyword_research"
 
 interface Job {
   id: string
@@ -58,6 +59,7 @@ const KIND_LABELS: Record<JobKind, string> = {
   technical_crawl: "Technical Crawl",
   alt_tags: "Alt Tags",
   full_audit: "Full Audit",
+  keyword_research: "Keyword Research",
 }
 
 const ACTIVE_POLL_MS = 3000

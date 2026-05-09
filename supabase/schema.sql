@@ -128,7 +128,8 @@ create table if not exists public.background_jobs (
     'initial_strategy',
     'technical_crawl',
     'alt_tags',
-    'full_audit'
+    'full_audit',
+    'keyword_research'
   )),
   status            text not null check (status in ('queued', 'running', 'completed', 'failed', 'cancelled')),
   title             text not null,

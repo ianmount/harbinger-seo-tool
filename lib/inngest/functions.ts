@@ -17,6 +17,7 @@ import { runAuditTask } from "@/lib/tasks/audit"
 import { runCompAnalysisTask } from "@/lib/tasks/comp-analysis"
 import { runFullAuditTask } from "@/lib/tasks/full-audit"
 import { runInitialStrategyTask } from "@/lib/tasks/initial-strategy"
+import { runKeywordResearchTask } from "@/lib/tasks/keyword-research"
 import { runTechnicalCrawlTask } from "@/lib/tasks/technical-crawl"
 import { inngest } from "./client"
 
@@ -55,6 +56,7 @@ const TASKS: Partial<Record<JobKind, TaskRunner>> = {
   comp_analysis: runCompAnalysisTask,
   full_audit: runFullAuditTask,
   initial_strategy: runInitialStrategyTask,
+  keyword_research: runKeywordResearchTask,
   technical_crawl: runTechnicalCrawlTask,
 }
 
