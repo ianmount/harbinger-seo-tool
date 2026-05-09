@@ -137,7 +137,7 @@ function normalizePadded(s: string): string {
   return ` ${s.toLowerCase().trim().replace(/\s+/g, " ")} `
 }
 
-function extractLocationPhrases(
+export function extractLocationPhrases(
   locations: ReadonlyArray<DfsLabsLocation>,
 ): string[] {
   const out = new Set<string>()
@@ -149,6 +149,40 @@ function extractLocationPhrases(
     }
   }
   return Array.from(out)
+}
+
+/**
+ * Partition a candidate pool for a specific location tab in a multi-location
+ * run. Drops keywords that mention any OTHER selected location (e.g. "plumber
+ * boston" should not appear in the Atlanta tab). Keywords that mention this
+ * location, or no selected location at all (location-agnostic head terms),
+ * pass through.
+ *
+ * Single-location runs are a no-op since there are no "other" locations.
+ */
+export function partitionForLocation(
+  candidates: ReadonlyArray<KeywordResult>,
+  loc: DfsLabsLocation,
+  allLocations: ReadonlyArray<DfsLabsLocation>,
+): { kept: KeywordResult[]; dropped: number } {
+  const otherLocations = allLocations.filter(
+    (l) => l.location_code !== loc.location_code,
+  )
+  const otherPhrases = extractLocationPhrases(otherLocations)
+  if (otherPhrases.length === 0) {
+    return { kept: candidates.slice(), dropped: 0 }
+  }
+  const kept: KeywordResult[] = []
+  let dropped = 0
+  for (const kw of candidates) {
+    const text = kw.keyword.toLowerCase()
+    if (otherPhrases.some((p) => text.includes(p))) {
+      dropped++
+    } else {
+      kept.push(kw)
+    }
+  }
+  return { kept, dropped }
 }
 
 export function dedupeNearMeAgainstGeoTwins(

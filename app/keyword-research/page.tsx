@@ -28,12 +28,14 @@ import {
   dedupeNearMeAgainstGeoTwins,
   extractAllowedStates,
   filterOutOfAreaKeywords,
+  partitionForLocation,
 } from "@/lib/keyword-geo-filter"
 import { cn } from "@/lib/utils"
 import type { DfsLabsLocation, KeywordResult } from "@/lib/types"
 
 type Stage =
   | "claude-seeds"
+  | "dfs-suggestions"
   | "dfs-volume"
   | "dfs-serp-rank"
   | "done"
@@ -59,6 +61,7 @@ type Phase =
       reasoning: string
       geoFilteredOut: number
       nearMeDeduped: number
+      crossLocationFilteredOut: number
     }
   | { status: "error"; message: string }
 
@@ -100,7 +103,9 @@ function dedupeByKeyword(rows: KeywordResult[]): KeywordResult[] {
 function stageLabel(stage: Stage): string {
   switch (stage) {
     case "claude-seeds":
-      return "Asking Claude for location-aware keyword candidates from the business context…"
+      return "Asking Claude for location-aware seed phrases from the business context…"
+    case "dfs-suggestions":
+      return "Expanding seeds via DataForSEO keyword_suggestions…"
     case "dfs-volume":
       return "Fetching city-level search volume per location…"
     case "dfs-serp-rank":
@@ -113,6 +118,7 @@ function stageLabel(stage: Stage): string {
 function stageIndex(stage: Stage): number {
   return [
     "claude-seeds",
+    "dfs-suggestions",
     "dfs-volume",
     "dfs-serp-rank",
     "done",
@@ -317,13 +323,9 @@ export default function KeywordResearchPage() {
         ? Math.min(parsedMax, MAX_KEYWORDS_CEILING)
         : DEFAULT_MAX_KEYWORDS
 
-    // ── Stage 1: Claude generates location-aware keyword candidates ──────
-    // Claude's list is the FINAL keyword set — there is no DFS expansion
-    // step downstream. We tried keyword_suggestions earlier and it pulled
-    // in high-volume "near me" national variants that swamped the
-    // city-bound terms after the per-location volume sort, so we now lean
-    // on Claude to cover the city × service × qualifier × word-order grid
-    // directly.
+    const primaryLocationCode = selectedLocations[0].location_code
+
+    // ── Stage 1: Claude generates location-aware seed phrases ────────────
     setPhase({ status: "running", stage: "claude-seeds" })
     let seeds: string[]
     let reasoning = ""
@@ -339,31 +341,86 @@ export default function KeywordResearchPage() {
             locations: selectedLocations.map((l) => l.location_name),
           }),
         },
-        "Claude keyword candidates",
+        "Claude seed generation",
       )
       seeds = body.seeds ?? []
       reasoning = body.reasoning?.trim() ?? ""
       if (seeds.length === 0) {
-        throw new Error("Claude returned no keyword candidates.")
+        throw new Error("Claude returned no seed keywords.")
       }
     } catch (err) {
       setPhase({
         status: "error",
         message:
-          err instanceof Error
-            ? err.message
-            : "Keyword candidate generation failed",
+          err instanceof Error ? err.message : "Seed generation failed",
       })
       return
     }
 
-    // Convert seeds → KeywordResult[]. Volume etc. fill in during Stage 2.
-    const candidatePool: KeywordResult[] = seeds.map((s) => ({ keyword: s }))
-    const deduped = dedupeByKeyword(candidatePool)
+    // ── Stage 2: keyword_suggestions per seed ────────────────────────────
+    // Substring expansion over DFS's database. Seeds are now 100% geo-bound
+    // OR bare-service ("plumber") — no near-me seeds, since those expand
+    // into a national near-me flood that swamps the city-volume sort. Bare
+    // service seeds DO surface near-me variants from DFS's database
+    // (e.g. seed "plumber" returns "plumber near me"); the near-me dedupe
+    // downstream catches those when their geo twin is in the same pool.
+    setPhase({
+      status: "running",
+      stage: "dfs-suggestions",
+      note: `${seeds.length} seed${seeds.length === 1 ? "" : "s"}`,
+    })
+    const dfsCombined: KeywordResult[] = []
+    try {
+      const calls: Promise<{ results: KeywordResult[] }>[] = []
+      for (const seed of seeds) {
+        calls.push(
+          fetchJson<{ results: KeywordResult[] }>(
+            "/api/dataforseo/keywords",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                mode: "suggestions",
+                seed,
+                locationCode: primaryLocationCode,
+                limit: 100,
+              }),
+            },
+            `DataForSEO suggestions for "${seed}"`,
+          ),
+        )
+      }
+      const settled = await Promise.allSettled(calls)
+      const failures: string[] = []
+      for (const s of settled) {
+        if (s.status === "fulfilled") {
+          dfsCombined.push(...(s.value.results ?? []))
+        } else {
+          failures.push(
+            s.reason instanceof Error ? s.reason.message : String(s.reason),
+          )
+        }
+      }
+      if (dfsCombined.length === 0) {
+        throw new Error(
+          failures.length > 0
+            ? `All DataForSEO calls failed. First error: ${failures[0]}`
+            : "DataForSEO returned no keyword suggestions. Add more detail to the business context and try again.",
+        )
+      }
+    } catch (err) {
+      setPhase({
+        status: "error",
+        message:
+          err instanceof Error ? err.message : "DataForSEO request failed",
+      })
+      return
+    }
+    const deduped = dedupeByKeyword(dfsCombined)
 
     // Backstop: drop candidates that mention a US state name not in the
-    // selected locations. Claude is told not to do this, so this should
-    // rarely fire — defense-in-depth.
+    // selected locations. Catches stragglers like "plumber dallas texas"
+    // surfaced from the bare-service seed bucket.
     const allowedStates = extractAllowedStates(selectedLocations)
     const { kept: filtered, dropped: geoFilteredOut } = filterOutOfAreaKeywords(
       deduped,
@@ -375,7 +432,7 @@ export default function KeywordResearchPage() {
       )
     }
 
-    // ── Stage 2: per-location volume (parallel) ──────────────────────────
+    // ── Stage 3: per-location volume (parallel) ──────────────────────────
     setPhase({
       status: "running",
       stage: "dfs-volume",
@@ -388,6 +445,10 @@ export default function KeywordResearchPage() {
     await Promise.all(
       selectedLocations.map(async (loc) => {
         const key = locationKeyOf(loc)
+        if (loc.location_type === "Country") {
+          enrichedByLoc.set(key, filtered)
+          return
+        }
         try {
           const keywordList = filtered.map((r) => r.keyword).slice(0, 1000)
           const volBody = await fetchJson<{ results: KeywordResult[] }>(
@@ -428,20 +489,27 @@ export default function KeywordResearchPage() {
       }),
     )
 
-    // Per-location surfacing: dedupe near-me variants against their geo twin
-    // (e.g. drop "plumber near me" when "plumber atlanta" is in the pool for
-    // the Atlanta tab), then sort by volume desc and take top maxKeywords.
-    // The remaining keywords are dropped — we don't want to pay for SERP rank
-    // probes against zero-volume long-tail noise. Track the drop counts so
-    // the UI can disclose them.
+    // Per-location surfacing:
+    //   1. Partition the pool to this location only — drop keywords that
+    //      mention any other selected location ("plumber boston" out of the
+    //      Atlanta tab). Single-location runs are a no-op.
+    //   2. Dedupe near-me variants against their geo twin in the same pool
+    //      ("plumber near me" out when "plumber atlanta" is present).
+    //   3. Sort by volume desc, take top maxKeywords. The rest are dropped
+    //      — we don't want to pay for SERP rank probes against zero-volume
+    //      long-tail noise. Track drop counts so the UI can disclose them.
     type SurfacedOut = { rows: KeywordResult[]; truncated: number }
     const surfacedByLoc = new Map<string, SurfacedOut>()
     let nearMeDeduped = 0
+    let crossLocationFilteredOut = 0
     for (const loc of selectedLocations) {
       const key = locationKeyOf(loc)
       const enriched = enrichedByLoc.get(key) ?? filtered
+      const { kept: forThisLocation, dropped: crossDropped } =
+        partitionForLocation(enriched, loc, selectedLocations)
+      crossLocationFilteredOut += crossDropped
       const { kept: deduped, dropped: nearMeDroppedHere } =
-        dedupeNearMeAgainstGeoTwins(enriched, [loc])
+        dedupeNearMeAgainstGeoTwins(forThisLocation, [loc])
       nearMeDeduped += nearMeDroppedHere
       const sorted = deduped
         .slice()
@@ -453,6 +521,15 @@ export default function KeywordResearchPage() {
       const truncated = Math.max(0, sorted.length - surfaced.length)
       surfacedByLoc.set(key, { rows: surfaced, truncated })
     }
+    if (crossLocationFilteredOut > 0) {
+      console.log(
+        `[keyword-research] cross-location filter dropped ${crossLocationFilteredOut} candidate${
+          crossLocationFilteredOut === 1 ? "" : "s"
+        } across ${selectedLocations.length} location${
+          selectedLocations.length === 1 ? "" : "s"
+        }`,
+      )
+    }
     if (nearMeDeduped > 0) {
       console.log(
         `[keyword-research] near-me dedupe dropped ${nearMeDeduped} candidate${
@@ -463,7 +540,7 @@ export default function KeywordResearchPage() {
       )
     }
 
-    // ── Stage 3: per-location SERP rank probes (parallel) ────────────────
+    // ── Stage 4: per-location SERP rank probes (parallel) ────────────────
     setPhase({
       status: "running",
       stage: "dfs-serp-rank",
@@ -541,6 +618,7 @@ export default function KeywordResearchPage() {
       reasoning,
       geoFilteredOut,
       nearMeDeduped,
+      crossLocationFilteredOut,
     })
     setActiveLocationKey(locationKeyOf(selectedLocations[0]))
   }, [
@@ -748,6 +826,7 @@ Scope nuances: Residential only — no commercial, new construction, or septic. 
             seeds={phase.seeds}
             geoFilteredOut={phase.geoFilteredOut}
             nearMeDeduped={phase.nearMeDeduped}
+            crossLocationFilteredOut={phase.crossLocationFilteredOut}
           />
           <ColumnLegend />
           <Tabs
@@ -823,17 +902,19 @@ function SeedSummary({
   seeds,
   geoFilteredOut,
   nearMeDeduped,
+  crossLocationFilteredOut,
 }: {
   seeds: string[]
   geoFilteredOut: number
   nearMeDeduped: number
+  crossLocationFilteredOut: number
 }) {
   if (seeds.length === 0) return null
   return (
     <div className="space-y-1 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
       <div>
         <span className="font-medium text-foreground">
-          Claude keyword candidates ({seeds.length}):
+          Claude seed phrases ({seeds.length}):
         </span>{" "}
         {seeds.join(", ")}
       </div>
@@ -845,6 +926,16 @@ function SeedSummary({
           </span>{" "}
           candidate{geoFilteredOut === 1 ? "" : "s"} that mentioned an
           out-of-area state.
+        </div>
+      ) : null}
+      {crossLocationFilteredOut > 0 ? (
+        <div>
+          Cross-location filter dropped{" "}
+          <span className="font-medium text-foreground">
+            {crossLocationFilteredOut}
+          </span>{" "}
+          candidate{crossLocationFilteredOut === 1 ? "" : "s"} that mentioned
+          another selected location (counted across all location tabs).
         </div>
       ) : null}
       {nearMeDeduped > 0 ? (
@@ -1071,6 +1162,7 @@ function StageProgress({ phase }: { phase: Phase }) {
   if (phase.status !== "running") return null
   const stages: Stage[] = [
     "claude-seeds",
+    "dfs-suggestions",
     "dfs-volume",
     "dfs-serp-rank",
   ]
