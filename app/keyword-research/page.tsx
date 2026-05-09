@@ -34,7 +34,6 @@ import type { DfsLabsLocation, KeywordResult } from "@/lib/types"
 
 type Stage =
   | "claude-seeds"
-  | "dfs-suggestions"
   | "dfs-volume"
   | "dfs-serp-rank"
   | "done"
@@ -101,9 +100,7 @@ function dedupeByKeyword(rows: KeywordResult[]): KeywordResult[] {
 function stageLabel(stage: Stage): string {
   switch (stage) {
     case "claude-seeds":
-      return "Asking Claude for location-aware seed phrases from the business context…"
-    case "dfs-suggestions":
-      return "Expanding seeds via DataForSEO keyword_suggestions…"
+      return "Asking Claude for location-aware keyword candidates from the business context…"
     case "dfs-volume":
       return "Fetching city-level search volume per location…"
     case "dfs-serp-rank":
@@ -116,7 +113,6 @@ function stageLabel(stage: Stage): string {
 function stageIndex(stage: Stage): number {
   return [
     "claude-seeds",
-    "dfs-suggestions",
     "dfs-volume",
     "dfs-serp-rank",
     "done",
@@ -321,9 +317,13 @@ export default function KeywordResearchPage() {
         ? Math.min(parsedMax, MAX_KEYWORDS_CEILING)
         : DEFAULT_MAX_KEYWORDS
 
-    const primaryLocationCode = selectedLocations[0].location_code
-
-    // ── Stage 1: Claude generates location-aware seed phrases ────────────
+    // ── Stage 1: Claude generates location-aware keyword candidates ──────
+    // Claude's list is the FINAL keyword set — there is no DFS expansion
+    // step downstream. We tried keyword_suggestions earlier and it pulled
+    // in high-volume "near me" national variants that swamped the
+    // city-bound terms after the per-location volume sort, so we now lean
+    // on Claude to cover the city × service × qualifier × word-order grid
+    // directly.
     setPhase({ status: "running", stage: "claude-seeds" })
     let seeds: string[]
     let reasoning = ""
@@ -339,85 +339,31 @@ export default function KeywordResearchPage() {
             locations: selectedLocations.map((l) => l.location_name),
           }),
         },
-        "Claude seed generation",
+        "Claude keyword candidates",
       )
       seeds = body.seeds ?? []
       reasoning = body.reasoning?.trim() ?? ""
       if (seeds.length === 0) {
-        throw new Error("Claude returned no seed keywords.")
+        throw new Error("Claude returned no keyword candidates.")
       }
     } catch (err) {
       setPhase({
         status: "error",
         message:
-          err instanceof Error ? err.message : "Seed generation failed",
+          err instanceof Error
+            ? err.message
+            : "Keyword candidate generation failed",
       })
       return
     }
 
-    // ── Stage 2: keyword_suggestions per seed ────────────────────────────
-    // We dropped keyword_ideas because its semantic-relatedness expansion is
-    // the main source of out-of-area geo bleed-over. Suggestions stays
-    // on-phrase: each seed expands to keywords containing it as a substring.
-    // Combined with location-aware seeds above, this keeps the candidate
-    // pool tight to the partner's footprint.
-    setPhase({
-      status: "running",
-      stage: "dfs-suggestions",
-      note: `${seeds.length} seed${seeds.length === 1 ? "" : "s"}`,
-    })
-    const dfsCombined: KeywordResult[] = []
-    try {
-      const calls: Promise<{ results: KeywordResult[] }>[] = []
-      for (const seed of seeds) {
-        calls.push(
-          fetchJson<{ results: KeywordResult[] }>(
-            "/api/dataforseo/keywords",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                mode: "suggestions",
-                seed,
-                locationCode: primaryLocationCode,
-                limit: 100,
-              }),
-            },
-            `DataForSEO suggestions for "${seed}"`,
-          ),
-        )
-      }
-      const settled = await Promise.allSettled(calls)
-      const failures: string[] = []
-      for (const s of settled) {
-        if (s.status === "fulfilled") {
-          dfsCombined.push(...(s.value.results ?? []))
-        } else {
-          failures.push(
-            s.reason instanceof Error ? s.reason.message : String(s.reason),
-          )
-        }
-      }
-      if (dfsCombined.length === 0) {
-        throw new Error(
-          failures.length > 0
-            ? `All DataForSEO calls failed. First error: ${failures[0]}`
-            : "DataForSEO returned no keyword suggestions. Add more detail to the business context and try again.",
-        )
-      }
-    } catch (err) {
-      setPhase({
-        status: "error",
-        message:
-          err instanceof Error ? err.message : "DataForSEO request failed",
-      })
-      return
-    }
-    const deduped = dedupeByKeyword(dfsCombined)
+    // Convert seeds → KeywordResult[]. Volume etc. fill in during Stage 2.
+    const candidatePool: KeywordResult[] = seeds.map((s) => ({ keyword: s }))
+    const deduped = dedupeByKeyword(candidatePool)
 
     // Backstop: drop candidates that mention a US state name not in the
-    // selected locations. Catches stragglers like "plumber dallas texas"
-    // surfaced from the location-agnostic seed bucket.
+    // selected locations. Claude is told not to do this, so this should
+    // rarely fire — defense-in-depth.
     const allowedStates = extractAllowedStates(selectedLocations)
     const { kept: filtered, dropped: geoFilteredOut } = filterOutOfAreaKeywords(
       deduped,
@@ -429,7 +375,7 @@ export default function KeywordResearchPage() {
       )
     }
 
-    // ── Stage 3: per-location volume (parallel) ──────────────────────────
+    // ── Stage 2: per-location volume (parallel) ──────────────────────────
     setPhase({
       status: "running",
       stage: "dfs-volume",
@@ -442,10 +388,6 @@ export default function KeywordResearchPage() {
     await Promise.all(
       selectedLocations.map(async (loc) => {
         const key = locationKeyOf(loc)
-        if (loc.location_type === "Country") {
-          enrichedByLoc.set(key, filtered)
-          return
-        }
         try {
           const keywordList = filtered.map((r) => r.keyword).slice(0, 1000)
           const volBody = await fetchJson<{ results: KeywordResult[] }>(
@@ -521,7 +463,7 @@ export default function KeywordResearchPage() {
       )
     }
 
-    // ── Stage 4: per-location SERP rank probes (parallel) ────────────────
+    // ── Stage 3: per-location SERP rank probes (parallel) ────────────────
     setPhase({
       status: "running",
       stage: "dfs-serp-rank",
@@ -891,7 +833,7 @@ function SeedSummary({
     <div className="space-y-1 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
       <div>
         <span className="font-medium text-foreground">
-          Claude seed phrases ({seeds.length}):
+          Claude keyword candidates ({seeds.length}):
         </span>{" "}
         {seeds.join(", ")}
       </div>
@@ -1129,7 +1071,6 @@ function StageProgress({ phase }: { phase: Phase }) {
   if (phase.status !== "running") return null
   const stages: Stage[] = [
     "claude-seeds",
-    "dfs-suggestions",
     "dfs-volume",
     "dfs-serp-rank",
   ]

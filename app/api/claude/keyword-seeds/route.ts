@@ -12,13 +12,13 @@ const bodySchema = z.object({
 
 const responseSchema = z.object({
   reasoning: z.string().trim().min(1),
-  seeds: z.array(z.string().trim().min(1)).min(1).max(80),
+  seeds: z.array(z.string().trim().min(1)).min(1).max(200),
 })
 
-const MAX_SEEDS = 60
+const MAX_SEEDS = 120
 
 const SYSTEM_PROMPT =
-  "You are an SEO strategist for local service businesses. You read a richly written business-context blob (services, ideal customers, audience nuances, scope exclusions) and a list of selected target locations, and you produce a list of seed phrases that DataForSEO's keyword_suggestions endpoint will expand into a candidate keyword pool. Reply with a single JSON object — no markdown fences, no commentary."
+  "You are an SEO strategist for local service businesses. You read a richly written business-context blob (services, ideal customers, audience nuances, scope exclusions) and a list of selected target locations, and you produce a focused list of keyword candidates. Your list is the FINAL keyword set evaluated for the user — there is no expansion step downstream — so coverage and phrasing matter. Reply with a single JSON object — no markdown fences, no commentary."
 
 function buildPrompt(
   context: string,
@@ -39,43 +39,54 @@ function buildPrompt(
   lines.push("")
   lines.push(`# Task`)
   lines.push(
-    `Produce up to ${MAX_SEEDS} seed phrases. These will be fed into DataForSEO's keyword_suggestions endpoint, which returns every keyword in DFS's database that contains the seed as a substring. So every seed you write becomes a substring filter — phrasing matters.`,
+    `Produce up to ${MAX_SEEDS} keyword candidates for this business. There is NO downstream expansion step — DataForSEO will look up city-level search volume for each, then probe live SERPs to see where the domain currently ranks. What you write is what the user evaluates. Cover the search space yourself by combining each city × each major service × multiple qualifier variants × both word orders.`,
   )
   lines.push("")
   lines.push(`## Hard rules`)
   lines.push(
-    `1. **Use the context blob to bias selection.** If the blob names ideal customers (e.g. "luxury homeowners", "first-time homebuyers", "small businesses"), prefer phrasings that customer would actually type. If it lists scope exclusions (e.g. "no commercial work", "residential only"), drop seeds that imply the excluded scope. If it calls out nuances ("we specialize in tankless water heaters"), include seeds for those specialties.`,
+    `1. **Use the context blob to bias selection.** If the blob names ideal customers (e.g. "luxury homeowners", "first-time homebuyers", "small businesses"), prefer phrasings that customer would actually type. If it lists scope exclusions (e.g. "no commercial work", "residential only"), drop candidates that imply the excluded scope. If it calls out specialties ("we specialize in tankless water heaters"), include dedicated candidates for those specialties.`,
   )
   lines.push(
-    `2. **Geo-bound seeds dominate.** For each target location, generate seeds combining the city name with each major service category named in the context. Use both word orders ("plumber atlanta" AND "atlanta plumber") since real searches go either way. Use the city name only — don't add the state in seeds; DFS suggestions for "plumber atlanta" already covers "plumber atlanta ga".`,
+    `2. **Geo-bound dominates.** For each target city, generate candidates combining the city name with each major service category. Produce ALL of:`,
   )
   lines.push(
-    `3. **Small location-agnostic bucket.** Include 4–8 seeds that don't carry geography — "<service> near me", pure category heads ("emergency plumber", "24 hour plumber", "tankless water heater installation"). These pick up high-volume non-local intent.`,
+    `   - Both word orders ("plumber atlanta" AND "atlanta plumber") — real searches go both ways`,
   )
   lines.push(
-    `4. **Do NOT include cities or states the business doesn't serve.** If the location list has only Atlanta and Charlotte, never write a seed mentioning Dallas, Austin, Las Vegas, or any other city.`,
+    `   - Qualifier variants for each service ("best plumber atlanta", "emergency plumber atlanta", "24 hour plumber atlanta", "affordable plumber atlanta", "licensed plumber atlanta") — pick 3-5 qualifiers per service that match the business's positioning from the context`,
+  )
+  lines.push(
+    `   - Service-specific variants ("drain cleaning atlanta", "water heater repair atlanta", "tankless water heater installation atlanta") covering each named service`,
+  )
+  lines.push(
+    `   - Prep variants where natural ("plumber in atlanta", "plumbers in atlanta", "atlanta area plumber")`,
+  )
+  lines.push(
+    `3. **Small near-me bucket: 3-6 candidates total.** Generic "<service> near me" or "emergency <service> near me". These pick up off-location intent. Bigger bucket isn't useful — they get deduped against geo-bound twins downstream.`,
+  )
+  lines.push(
+    `4. **Do NOT include cities or states the business doesn't serve.** If the location list has only Atlanta and Charlotte, never write a candidate mentioning Dallas, Austin, Las Vegas, or any other city.`,
   )
   lines.push(
     `5. **Do NOT include the brand or domain name.** We want category demand, not branded search.`,
   )
   lines.push(
-    `6. **Do NOT include state names or two-letter state abbreviations** in the seeds. ("plumber atlanta" is good, "plumber atlanta ga" is bad — DFS will surface the GA variants from the unsuffixed seed.)`,
+    `6. **Lowercase. No punctuation other than internal spaces. No quotes.**`,
   )
   lines.push(
-    `7. **Keep each seed to 1–4 words.** Suggestions endpoint matches substrings; longer seeds dramatically narrow the result set. "tankless water heater" expands well; "tankless water heater installation cost" barely expands at all.`,
-  )
-  lines.push(
-    `8. **Lowercase. No punctuation other than internal spaces. No quotes.**`,
+    `7. **Length: 2–7 words.** Tail terms like "tankless water heater installation atlanta" are valuable. Single-word queries are too generic.`,
   )
   lines.push("")
   lines.push(`## Composition guidance`)
   lines.push(
     `For a typical run with 1–3 locations and 3–6 service categories, aim for roughly:`,
   )
-  lines.push(`- 60–75% geo-bound (locations × services × 2 word orders)`)
-  lines.push(`- 15–25% category-only / "near me" generic bucket`)
   lines.push(
-    `Cap the total at ${MAX_SEEDS}. If locations × services × 2 would exceed that, keep the strongest service categories and drop the rest rather than duplicating.`,
+    `- 85–95% geo-bound (city × service × qualifier × word order combinations)`,
+  )
+  lines.push(`- 5–15% near-me / pure-category generic bucket`)
+  lines.push(
+    `Cap the total at ${MAX_SEEDS}. If your full city × service × qualifier × word-order grid exceeds the cap, prioritize: (a) primary services first, (b) qualifiers that best match the business's positioning, (c) both word orders for top services, (d) drop secondary qualifiers and lower-priority services.`,
   )
   lines.push("")
   lines.push(`# Reasoning blurb`)
@@ -92,10 +103,10 @@ function buildPrompt(
     `- Any specialties you weighted up (e.g. "added dedicated tankless seeds since that was called out as a specialty; downplayed tank-style installs").`,
   )
   lines.push(
-    `- Brief geographic strategy ("baked Atlanta and Charlotte into most seeds in both word orders; small near-me bucket for off-location intent").`,
+    `- Brief geographic strategy ("covered Atlanta and Charlotte in both word orders for each primary service, with qualifier variants like best/emergency/24-hour; small near-me bucket for off-location intent").`,
   )
   lines.push(
-    `If the context blob was thin or generic, say so honestly ("context was light on audience signal — defaulted to broad service-category seeds; richer audience info would tighten the pool"). Be concrete; quote phrases from the context where it helps. Avoid generic SEO platitudes.`,
+    `If the context blob was thin or generic, say so honestly ("context was light on audience signal — defaulted to broad service-category candidates; richer audience info would tighten the pool"). Be concrete; quote phrases from the context where it helps. Avoid generic SEO platitudes.`,
   )
   lines.push("")
   lines.push(`# Output format`)
@@ -105,17 +116,23 @@ function buildPrompt(
   lines.push("```")
   lines.push(`{`)
   lines.push(
-    `  "reasoning": "Read the context as residential plumbing for older single-family homes — leaned into repair / emergency / specific-failure phrasings over informational. Dropped commercial and new-construction seeds. Added dedicated tankless retrofit seeds since that was called out as a specialty. Geo focus: Atlanta and Charlotte in both word orders, with a small near-me bucket for off-location intent.",`,
+    `  "reasoning": "Read the context as residential plumbing for older single-family homes — leaned into repair / emergency / specific-failure phrasings over informational. Dropped commercial and new-construction candidates. Added dedicated tankless retrofit candidates since that was called out as a specialty. Geo focus: Atlanta and Charlotte in both word orders for each service, with best/emergency/24-hour qualifier variants; small near-me bucket for off-location intent.",`,
   )
   lines.push(`  "seeds": [`)
   lines.push(
-    `    "plumber atlanta", "atlanta plumber", "drain cleaning atlanta", "atlanta drain cleaning", "water heater repair atlanta", "atlanta water heater repair",`,
+    `    "plumber atlanta", "atlanta plumber", "best plumber atlanta", "emergency plumber atlanta", "24 hour plumber atlanta", "licensed plumber atlanta", "plumber in atlanta", "plumbers in atlanta",`,
   )
   lines.push(
-    `    "plumber charlotte", "charlotte plumber", "drain cleaning charlotte",`,
+    `    "drain cleaning atlanta", "atlanta drain cleaning", "emergency drain cleaning atlanta",`,
   )
   lines.push(
-    `    "plumber near me", "emergency plumber", "24 hour plumber", "tankless water heater installation"`,
+    `    "water heater repair atlanta", "atlanta water heater repair", "tankless water heater installation atlanta", "tankless water heater repair atlanta",`,
+  )
+  lines.push(
+    `    "plumber charlotte", "charlotte plumber", "best plumber charlotte", "emergency plumber charlotte", "drain cleaning charlotte",`,
+  )
+  lines.push(
+    `    "plumber near me", "emergency plumber near me", "24 hour plumber"`,
   )
   lines.push(`  ]`)
   lines.push(`}`)
@@ -164,7 +181,7 @@ export async function POST(request: Request) {
   try {
     const text = await callClaude(prompt, {
       system: SYSTEM_PROMPT,
-      maxTokens: 3072,
+      maxTokens: 6144,
     })
     let parsedJson: unknown
     try {
