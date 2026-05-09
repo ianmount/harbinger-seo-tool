@@ -24,12 +24,16 @@ import {
   TabsTrigger,
 } from "@/components/ui/tabs"
 import { useChatPageContext } from "@/lib/chat-context"
+import {
+  extractAllowedStates,
+  filterOutOfAreaKeywords,
+} from "@/lib/keyword-geo-filter"
 import { cn } from "@/lib/utils"
 import type { DfsLabsLocation, KeywordResult } from "@/lib/types"
 
 type Stage =
   | "claude-seeds"
-  | "dfs-ideas"
+  | "dfs-suggestions"
   | "dfs-volume"
   | "dfs-serp-rank"
   | "done"
@@ -52,6 +56,7 @@ type Phase =
       results: LocationResult[]
       domain: string
       seeds: string[]
+      geoFilteredOut: number
     }
   | { status: "error"; message: string }
 
@@ -93,9 +98,9 @@ function dedupeByKeyword(rows: KeywordResult[]): KeywordResult[] {
 function stageLabel(stage: Stage): string {
   switch (stage) {
     case "claude-seeds":
-      return "Asking Claude for seed keywords from the services context…"
-    case "dfs-ideas":
-      return "Fetching keyword ideas & suggestions from DataForSEO…"
+      return "Asking Claude for location-aware seed phrases from the business context…"
+    case "dfs-suggestions":
+      return "Expanding seeds via DataForSEO keyword_suggestions…"
     case "dfs-volume":
       return "Fetching city-level search volume per location…"
     case "dfs-serp-rank":
@@ -108,7 +113,7 @@ function stageLabel(stage: Stage): string {
 function stageIndex(stage: Stage): number {
   return [
     "claude-seeds",
-    "dfs-ideas",
+    "dfs-suggestions",
     "dfs-volume",
     "dfs-serp-rank",
     "done",
@@ -214,7 +219,7 @@ async function fetchJson<T>(
 
 export default function KeywordResearchPage() {
   const [domainInput, setDomainInput] = useState("")
-  const [services, setServices] = useState("")
+  const [context, setContext] = useState("")
   const [selectedLocations, setSelectedLocations] = useState<
     DfsLabsLocation[]
   >([])
@@ -252,9 +257,9 @@ export default function KeywordResearchPage() {
     () => DOMAIN_REGEX.test(normalizedDomain),
     [normalizedDomain],
   )
-  const servicesValid = services.trim().length > 0
+  const contextValid = context.trim().length > 0
   const ready =
-    domainValid && servicesValid && selectedLocations.length > 0
+    domainValid && contextValid && selectedLocations.length > 0
 
   const running = phase.status === "running"
 
@@ -264,9 +269,9 @@ export default function KeywordResearchPage() {
       normalizedDomain
         ? `Domain: ${normalizedDomain}.`
         : "No domain entered.",
-      services.trim().length > 0
-        ? `${services.trim().length} chars of services context.`
-        : "No services context.",
+      context.trim().length > 0
+        ? `${context.trim().length} chars of business context.`
+        : "No business context.",
       selectedLocations.length > 0
         ? `${selectedLocations.length} location(s) selected.`
         : "No locations selected.",
@@ -314,7 +319,7 @@ export default function KeywordResearchPage() {
 
     const primaryLocationCode = selectedLocations[0].location_code
 
-    // ── Stage 1: Claude generates seed keywords ──────────────────────────
+    // ── Stage 1: Claude generates location-aware seed phrases ────────────
     setPhase({ status: "running", stage: "claude-seeds" })
     let seeds: string[]
     try {
@@ -324,7 +329,7 @@ export default function KeywordResearchPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            services,
+            context,
             domain: normalizedDomain,
             locations: selectedLocations.map((l) => l.location_name),
           }),
@@ -344,10 +349,15 @@ export default function KeywordResearchPage() {
       return
     }
 
-    // ── Stage 2: ideas + suggestions per seed ────────────────────────────
+    // ── Stage 2: keyword_suggestions per seed ────────────────────────────
+    // We dropped keyword_ideas because its semantic-relatedness expansion is
+    // the main source of out-of-area geo bleed-over. Suggestions stays
+    // on-phrase: each seed expands to keywords containing it as a substring.
+    // Combined with location-aware seeds above, this keeps the candidate
+    // pool tight to the partner's footprint.
     setPhase({
       status: "running",
-      stage: "dfs-ideas",
+      stage: "dfs-suggestions",
       note: `${seeds.length} seed${seeds.length === 1 ? "" : "s"}`,
     })
     const dfsCombined: KeywordResult[] = []
@@ -361,26 +371,10 @@ export default function KeywordResearchPage() {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                mode: "ideas",
-                seed,
-                locationCode: primaryLocationCode,
-                limit: 50,
-              }),
-            },
-            `DataForSEO ideas for "${seed}"`,
-          ),
-        )
-        calls.push(
-          fetchJson<{ results: KeywordResult[] }>(
-            "/api/dataforseo/keywords",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
                 mode: "suggestions",
                 seed,
                 locationCode: primaryLocationCode,
-                limit: 50,
+                limit: 100,
               }),
             },
             `DataForSEO suggestions for "${seed}"`,
@@ -402,7 +396,7 @@ export default function KeywordResearchPage() {
         throw new Error(
           failures.length > 0
             ? `All DataForSEO calls failed. First error: ${failures[0]}`
-            : "DataForSEO returned no keyword ideas. Refine the services context and try again.",
+            : "DataForSEO returned no keyword suggestions. Add more detail to the business context and try again.",
         )
       }
     } catch (err) {
@@ -414,6 +408,20 @@ export default function KeywordResearchPage() {
       return
     }
     const deduped = dedupeByKeyword(dfsCombined)
+
+    // Backstop: drop candidates that mention a US state name not in the
+    // selected locations. Catches stragglers like "plumber dallas texas"
+    // surfaced from the location-agnostic seed bucket.
+    const allowedStates = extractAllowedStates(selectedLocations)
+    const { kept: filtered, dropped: geoFilteredOut } = filterOutOfAreaKeywords(
+      deduped,
+      allowedStates,
+    )
+    if (geoFilteredOut > 0) {
+      console.log(
+        `[keyword-research] geo filter dropped ${geoFilteredOut} of ${deduped.length} candidates`,
+      )
+    }
 
     // ── Stage 3: per-location volume (parallel) ──────────────────────────
     setPhase({
@@ -429,11 +437,11 @@ export default function KeywordResearchPage() {
       selectedLocations.map(async (loc) => {
         const key = locationKeyOf(loc)
         if (loc.location_type === "Country") {
-          enrichedByLoc.set(key, deduped)
+          enrichedByLoc.set(key, filtered)
           return
         }
         try {
-          const keywordList = deduped.map((r) => r.keyword).slice(0, 1000)
+          const keywordList = filtered.map((r) => r.keyword).slice(0, 1000)
           const volBody = await fetchJson<{ results: KeywordResult[] }>(
             "/api/dataforseo/keywords",
             {
@@ -450,7 +458,7 @@ export default function KeywordResearchPage() {
           const byKw = new Map(
             (volBody.results ?? []).map((r) => [r.keyword.toLowerCase(), r]),
           )
-          const enriched = deduped.map((r) => {
+          const enriched = filtered.map((r) => {
             const v = byKw.get(r.keyword.toLowerCase())
             if (!v) return r
             return {
@@ -467,7 +475,7 @@ export default function KeywordResearchPage() {
             `[keyword-research] volume fetch failed for ${loc.location_name}:`,
             err,
           )
-          enrichedByLoc.set(key, deduped)
+          enrichedByLoc.set(key, filtered)
         }
       }),
     )
@@ -480,7 +488,7 @@ export default function KeywordResearchPage() {
     const surfacedByLoc = new Map<string, SurfacedOut>()
     for (const loc of selectedLocations) {
       const key = locationKeyOf(loc)
-      const enriched = enrichedByLoc.get(key) ?? deduped
+      const enriched = enrichedByLoc.get(key) ?? filtered
       const sorted = enriched
         .slice()
         .sort(
@@ -567,11 +575,12 @@ export default function KeywordResearchPage() {
       results,
       domain: normalizedDomain,
       seeds,
+      geoFilteredOut,
     })
     setActiveLocationKey(locationKeyOf(selectedLocations[0]))
   }, [
     ready,
-    services,
+    context,
     normalizedDomain,
     selectedLocations,
     maxKeywordsInput,
@@ -651,12 +660,13 @@ export default function KeywordResearchPage() {
             <b className="font-sans font-extrabold not-italic text-foreground">
               Claude
             </b>{" "}
-            generate seed keywords from a services description, then pull{" "}
+            generate location-aware seed phrases from the business context,
+            expand them via{" "}
             <b className="font-sans font-extrabold not-italic text-foreground">
               DataForSEO
             </b>{" "}
-            keyword ideas, suggestions, and city-level search volume per
-            location, with live SERP rank probes against the target domain.
+            keyword_suggestions, then layer in city-level search volume and
+            live SERP rank probes against the target domain.
           </>
         }
       />
@@ -680,22 +690,30 @@ export default function KeywordResearchPage() {
           </p>
         </div>
         <div className="flex flex-col gap-2">
-          <Label htmlFor="services">
-            Services / context{" "}
-            <span className="text-destructive">*</span>
+          <Label htmlFor="context">
+            Business context <span className="text-destructive">*</span>
           </Label>
           <Textarea
-            id="services"
-            placeholder="e.g. Residential plumbing — water heaters, drain cleaning, emergency repair, sewer line replacement."
-            value={services}
-            onChange={(e) => setServices(e.target.value)}
+            id="context"
+            placeholder={`Anything that should bias keyword selection. Example:
+
+Services: Residential plumbing — water heaters (with a tankless specialty), drain cleaning, sewer line replacement, 24/7 emergency repair.
+
+Ideal customer: Homeowners in single-family homes (~$400k–$1.5M). Often older homes with cast iron or galvanized supply lines. Skews toward problem-aware buyers — they already have a leak / no hot water / clogged main.
+
+Scope nuances: Residential only — no commercial, new construction, or septic. Strong on tankless retrofits; we'd rather not surface tank-style water heater installs.`}
+            value={context}
+            onChange={(e) => setContext(e.target.value)}
             disabled={running}
-            className="min-h-[100px]"
+            className="min-h-[220px]"
           />
           <p className="text-xs text-muted-foreground">
-            Claude reads this to produce seed keywords that drive the
-            DataForSEO expansion. Be specific — one or two sentences naming
-            the actual services beats a generic blurb.
+            Claude reads this to produce location-aware seed phrases that
+            drive the DataForSEO expansion. Include whatever shapes the right
+            keyword set: services, ideal-customer profile, audience nuances,
+            and scope exclusions (e.g. &ldquo;residential only&rdquo;,
+            &ldquo;no commercial&rdquo;, &ldquo;tankless specialist&rdquo;).
+            More signal here = a tighter, more relevant candidate pool.
           </p>
         </div>
       </section>
@@ -760,7 +778,10 @@ export default function KeywordResearchPage() {
 
       {phase.status === "done" && results.length > 0 ? (
         <section className="space-y-3">
-          <SeedSummary seeds={phase.seeds} />
+          <SeedSummary
+            seeds={phase.seeds}
+            geoFilteredOut={phase.geoFilteredOut}
+          />
           <ColumnLegend />
           <Tabs
             value={
@@ -817,14 +838,32 @@ export default function KeywordResearchPage() {
   )
 }
 
-function SeedSummary({ seeds }: { seeds: string[] }) {
+function SeedSummary({
+  seeds,
+  geoFilteredOut,
+}: {
+  seeds: string[]
+  geoFilteredOut: number
+}) {
   if (seeds.length === 0) return null
   return (
-    <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-      <span className="font-medium text-foreground">
-        Claude seed keywords ({seeds.length}):
-      </span>{" "}
-      {seeds.join(", ")}
+    <div className="space-y-1 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+      <div>
+        <span className="font-medium text-foreground">
+          Claude seed phrases ({seeds.length}):
+        </span>{" "}
+        {seeds.join(", ")}
+      </div>
+      {geoFilteredOut > 0 ? (
+        <div>
+          Geo backstop dropped{" "}
+          <span className="font-medium text-foreground">
+            {geoFilteredOut}
+          </span>{" "}
+          candidate{geoFilteredOut === 1 ? "" : "s"} that mentioned an
+          out-of-area state.
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -984,12 +1023,13 @@ function ColumnLegend() {
           <dt className="font-medium text-foreground">Keyword</dt>
           <dd className="text-muted-foreground">
             Candidate keyword from DataForSEO&apos;s{" "}
-            <code className="font-mono">keyword_ideas</code> +{" "}
-            <code className="font-mono">keyword_suggestions</code> endpoints,
-            seeded by Claude from the services context. The candidate pool is
-            shared across location tabs because those endpoints are
-            country-level only; locations differentiate downstream on volume
-            and current rank.
+            <code className="font-mono">keyword_suggestions</code> endpoint,
+            seeded by Claude from the business context (with each selected
+            city baked into most seeds, so out-of-area variants don&apos;t
+            enter the pool). The candidate pool is shared across location
+            tabs because <code className="font-mono">keyword_suggestions</code>{" "}
+            is country-level only; locations differentiate downstream on
+            volume and current rank.
           </dd>
         </div>
         <div>
@@ -1038,7 +1078,7 @@ function StageProgress({ phase }: { phase: Phase }) {
   if (phase.status !== "running") return null
   const stages: Stage[] = [
     "claude-seeds",
-    "dfs-ideas",
+    "dfs-suggestions",
     "dfs-volume",
     "dfs-serp-rank",
   ]
