@@ -72,6 +72,13 @@ export const KeywordResearchInputSchema = z.object({
   services: z.array(z.string().min(1).max(120)).min(1).max(20),
   cities: z.array(dfsLocationSchema).min(1).max(10),
   maxKeywords: z.number().int().min(10).max(100),
+  /**
+   * Optional manual competitor list (bare domains). When provided, we skip
+   * DFS's `competitors_domain` discovery — it returns domains with
+   * country-level keyword overlap which often pulls in irrelevant national
+   * sites (Home Depot, WikiHow) for a local-service business.
+   */
+  competitors: z.array(z.string().min(3).max(200)).max(10).optional(),
 })
 
 export type KeywordResearchInput = z.infer<typeof KeywordResearchInputSchema>
@@ -116,7 +123,7 @@ export interface KeywordResearchResult {
 const MODEL = "claude-sonnet-4-6"
 const SERP_DEPTH = 20
 const SERP_POLL_INTERVAL_MS = 15_000
-const SERP_POLL_TIMEOUT_MS = 10 * 60_000 // 10 minutes
+const SERP_POLL_TIMEOUT_MS = 15 * 60_000 // 15 minutes — DFS standard queue can drag past 10
 const MIN_RANKED_KEYWORDS_VOLUME = 50
 const RANKED_KEYWORDS_LIMIT = 500
 const KEYWORD_IDEAS_LIMIT = 200
@@ -344,7 +351,7 @@ function extractJsonObject(text: string): string {
 async function callClaudeShortlist(
   rows: StatRow[],
   maxKeywords: number,
-): Promise<{ rationale: string; keywords: string[] }> {
+): Promise<{ rationale: string; keywords: string[]; hallucinated: number }> {
   const { system, prompt } = buildShortlistPrompt(rows, maxKeywords)
   let text: string
   try {
@@ -371,17 +378,40 @@ async function callClaudeShortlist(
   if (!result.success) {
     throw new Error(`Claude response shape invalid: ${result.error.message}`)
   }
-  // Dedupe (case-insensitive) and truncate to max.
+  // Filter to keywords that actually exist in the input pool. Claude
+  // sometimes paraphrases or invents keyword strings; those would land in
+  // the result table without volume/cpc/intent because the downstream
+  // lookup misses them. We require exact (lowercase-trimmed) match.
+  const poolByKw = new Map(rows.map((r) => [r.keyword.toLowerCase(), r.keyword]))
   const seen = new Set<string>()
   const dedup: string[] = []
+  let hallucinated = 0
   for (const kw of result.data.keywords) {
     const k = kw.trim().toLowerCase()
     if (!k || seen.has(k)) continue
     seen.add(k)
-    dedup.push(k)
+    const poolForm = poolByKw.get(k)
+    if (!poolForm) {
+      hallucinated++
+      continue
+    }
+    dedup.push(poolForm)
     if (dedup.length >= maxKeywords) break
   }
-  return { rationale: result.data.rationale, keywords: dedup }
+  // If Claude under-delivered (hallucinated several or just returned fewer
+  // than requested), backfill from the highest-volume remaining pool
+  // keywords so the user still gets the full shortlist size.
+  if (dedup.length < maxKeywords) {
+    const used = new Set(dedup.map((k) => k.toLowerCase()))
+    const remaining = rows
+      .filter((r) => !used.has(r.keyword.toLowerCase()))
+      .sort((a, b) => (b.search_volume ?? 0) - (a.search_volume ?? 0))
+    for (const r of remaining) {
+      dedup.push(r.keyword)
+      if (dedup.length >= maxKeywords) break
+    }
+  }
+  return { rationale: result.data.rationale, keywords: dedup, hallucinated }
 }
 
 // ── Phase 3: SERP probes ──────────────────────────────────────────────────
@@ -413,7 +443,8 @@ async function probeCitySerps(
     handles = await serpTaskPost(
       shortlist.map((kw) => ({
         keyword: kw,
-        locationName: city.location_name,
+        locationCode: city.location_code,
+        locationLabel: city.location_name,
         depth: SERP_DEPTH,
       })),
     )
@@ -523,10 +554,32 @@ async function runKeywordResearchPipeline(
   const result = await withAuditCost(cost, async () => {
     const partnerDomain = stripDomain(input.domain)
 
-    // ── Phase 1.0: discover competitors first (cheap, low-latency,
-    // gates the parallel ranked_keywords fan-out below). ────────────
-    await stage("Discovering competitors", `domain=${partnerDomain}`)
-    const competitors = await loadCompetitors(partnerDomain, warnings)
+    // ── Phase 1.0: resolve competitors. If the user provided a manual
+    // list on the form, use it as-is — DFS's competitors_domain returns
+    // domains with country-level keyword overlap, which for local-service
+    // businesses pulls in irrelevant national sites (Home Depot, WikiHow)
+    // alongside the actual local competitors. The manual list is almost
+    // always more accurate. We only fall back to discovery when the user
+    // doesn't provide one.
+    const manualCompetitors = (input.competitors ?? [])
+      .map(stripDomain)
+      .filter((d) => d.length > 0 && d !== partnerDomain)
+    let competitors: string[]
+    if (manualCompetitors.length > 0) {
+      await stage(
+        "Using provided competitors",
+        `${manualCompetitors.length} domain${manualCompetitors.length === 1 ? "" : "s"}`,
+      )
+      competitors = manualCompetitors
+    } else {
+      await stage("Discovering competitors", `domain=${partnerDomain}`)
+      competitors = await loadCompetitors(partnerDomain, warnings)
+      if (competitors.length > 0) {
+        warnings.push(
+          `Competitors auto-discovered via DataForSEO's competitors_domain endpoint. These are domains with country-level keyword overlap — for local-service businesses the list can include irrelevant national sites. Paste a manual competitor list on the form for sharper results.`,
+        )
+      }
+    }
 
     // ── Phase 1.1: parallel data sweep. ─────────────────────────────
     await stage(

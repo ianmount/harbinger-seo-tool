@@ -1539,7 +1539,10 @@ const taskPostItemSchema = z
 
 export interface SerpTaskRequest {
   keyword: string
-  locationName: string
+  /** DFS numeric location code (e.g. 2840 for US, 1015254 for Atlanta). */
+  locationCode: number
+  /** Human-readable label echoed back on the handle for UI use. Not sent to DFS. */
+  locationLabel?: string
   depth?: number
 }
 
@@ -1550,6 +1553,12 @@ export interface SerpTaskRequest {
  * task (with the DFS-issued task id) so the caller can correlate poll
  * results back to (keyword, city). Failed-on-submit tasks are skipped with
  * a warning; the returned array is shorter than the input in that case.
+ *
+ * Uses `location_code` (numeric) rather than `location_name` (string) —
+ * SERP task_post is finicky about the comma/space format in
+ * `location_name` strings that come back from Labs endpoints, and silently
+ * fails to schedule tasks when they don't match its expectation. Numeric
+ * codes have no such ambiguity.
  */
 export async function serpTaskPost(
   tasks: SerpTaskRequest[],
@@ -1562,7 +1571,7 @@ export async function serpTaskPost(
     const chunk = tasks.slice(i, i + CHUNK)
     const body = chunk.map((t) => ({
       keyword: t.keyword,
-      location_name: t.locationName,
+      location_code: t.locationCode,
       language_code: DEFAULT_LANGUAGE_CODE,
       depth: t.depth ?? 20,
     }))
@@ -1585,7 +1594,7 @@ export async function serpTaskPost(
         id: parsed.data.id,
         keyword: parsed.data.data?.keyword ?? original?.keyword ?? "",
         locationName:
-          parsed.data.data?.location_name ?? original?.locationName ?? "",
+          parsed.data.data?.location_name ?? original?.locationLabel ?? "",
       })
     }
   }

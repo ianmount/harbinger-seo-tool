@@ -44,10 +44,20 @@ function parseServices(raw: string): string[] {
     .slice(0, 20)
 }
 
+/** Parse competitor domains, normalizing each. Empty if user didn't fill the field. */
+function parseCompetitors(raw: string): string[] {
+  return raw
+    .split(/[\n,\s]+/)
+    .map((d) => normalizeDomain(d))
+    .filter((d) => d.length > 0 && DOMAIN_REGEX.test(d))
+    .slice(0, 10)
+}
+
 export default function KeywordResearchPage() {
   const router = useRouter()
   const [domainInput, setDomainInput] = useState("")
   const [servicesInput, setServicesInput] = useState("")
+  const [competitorsInput, setCompetitorsInput] = useState("")
   const [cities, setCities] = useState<DfsLabsLocation[]>([])
   const [preset, setPreset] = useState<PresetId>("standard")
   const [customCount, setCustomCount] = useState<string>("50")
@@ -59,6 +69,10 @@ export default function KeywordResearchPage() {
     [domainInput],
   )
   const services = useMemo(() => parseServices(servicesInput), [servicesInput])
+  const competitors = useMemo(
+    () => parseCompetitors(competitorsInput),
+    [competitorsInput],
+  )
 
   const maxKeywords = useMemo(() => {
     if (preset === "custom") {
@@ -128,6 +142,7 @@ export default function KeywordResearchPage() {
             services,
             cities,
             maxKeywords,
+            competitors: competitors.length > 0 ? competitors : undefined,
           },
         }),
       })
@@ -148,7 +163,16 @@ export default function KeywordResearchPage() {
       toast.error("Keyword research failed to start", { description: msg })
       setSubmitting(false)
     }
-  }, [ready, submitting, normalizedDomain, services, cities, maxKeywords, router])
+  }, [
+    ready,
+    submitting,
+    normalizedDomain,
+    services,
+    cities,
+    maxKeywords,
+    competitors,
+    router,
+  ])
 
   return (
     <div className="space-y-6">
@@ -195,6 +219,29 @@ export default function KeywordResearchPage() {
           />
           <p className="text-xs text-muted-foreground">
             Comma- or newline-separated. {services.length}/20 entries parsed.
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="competitors">
+            Competitors{" "}
+            <span className="font-normal text-muted-foreground">
+              (optional, recommended)
+            </span>
+          </Label>
+          <Textarea
+            id="competitors"
+            rows={2}
+            placeholder="acmeplumbing.com&#10;atlantaplumbingco.com"
+            value={competitorsInput}
+            onChange={(e) => setCompetitorsInput(e.target.value)}
+            disabled={submitting}
+          />
+          <p className="text-xs text-muted-foreground">
+            Comma- or newline-separated bare domains.{" "}
+            {competitors.length > 0
+              ? `${competitors.length}/10 valid domain${competitors.length === 1 ? "" : "s"} parsed.`
+              : "Leave blank to auto-discover via DataForSEO — but manual entry produces sharper results, since auto-discovery surfaces national sites (Home Depot, etc.) by keyword overlap."}
           </p>
         </div>
 
