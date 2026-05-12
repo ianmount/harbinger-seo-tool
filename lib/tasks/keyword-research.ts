@@ -11,9 +11,7 @@ import {
   relatedKeywords,
   searchIntent,
   searchVolume,
-  serpTaskGet,
-  serpTaskPost,
-  serpTasksReady,
+  serpRankedDomains,
   type SearchIntent,
 } from "@/lib/dataforseo"
 import type { TaskRunner } from "@/lib/inngest/functions"
@@ -122,8 +120,7 @@ export interface KeywordResearchResult {
 
 const MODEL = "claude-sonnet-4-6"
 const SERP_DEPTH = 20
-const SERP_POLL_INTERVAL_MS = 15_000
-const SERP_POLL_TIMEOUT_MS = 15 * 60_000 // 15 minutes — DFS standard queue can drag past 10
+const SERP_PROBE_CONCURRENCY = 8
 const MIN_RANKED_KEYWORDS_VOLUME = 50
 const RANKED_KEYWORDS_LIMIT = 500
 const KEYWORD_IDEAS_LIMIT = 200
@@ -414,15 +411,41 @@ async function callClaudeShortlist(
   return { rationale: result.data.rationale, keywords: dedup, hallucinated }
 }
 
-// ── Phase 3: SERP probes ──────────────────────────────────────────────────
+// ── Phase 3: SERP probes (synchronous, live/advanced) ─────────────────────
+//
+// We tried DFS's standard queue + tasks_ready polling first per the user's
+// spec — it failed silently in production (tasks submitted but never came
+// back ready, even at 15-min timeouts). Switched to live/advanced which
+// the Audit and Comp Analysis tabs already use successfully. Per-probe
+// cost is ~3× higher (~$0.002 vs ~$0.0006) but for a 50-keyword × 1-city
+// Standard run that's $0.10 vs $0.03 — negligible vs the value of actual
+// results.
 
 interface ProbeResult {
-  /** Map keyword.toLowerCase() → partner SERP position (1-indexed). Missing = not in top 20 OR not probed. */
+  /** Map keyword.toLowerCase() → partner SERP position (1-indexed). Missing = not in top SERP_DEPTH. */
   positions: Map<string, number>
-  /** Keywords whose task never came back ready before the poll timeout. */
+  /** Keywords where the SERP probe threw (network error, rate limit, etc.). */
   unprobedKeywords: string[]
-  /** True iff all probes for this city failed/timed-out. */
+  /** True iff every probe for this city errored. */
   failed: boolean
+}
+
+async function mapWithConcurrency<T, R>(
+  items: ReadonlyArray<T>,
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = cursor++
+      if (i >= items.length) return
+      results[i] = await fn(items[i], i)
+    }
+  })
+  await Promise.all(workers)
+  return results
 }
 
 async function probeCitySerps(
@@ -436,95 +459,61 @@ async function probeCitySerps(
     return { positions: new Map(), unprobedKeywords: [], failed: true }
   }
   const target = stripDomain(partnerDomain)
-
-  // Submit tasks (batched at 100/POST inside serpTaskPost).
-  let handles: Awaited<ReturnType<typeof serpTaskPost>>
-  try {
-    handles = await serpTaskPost(
-      shortlist.map((kw) => ({
-        keyword: kw,
-        locationCode: city.location_code,
-        locationLabel: city.location_name,
-        depth: SERP_DEPTH,
-      })),
-    )
-  } catch (err) {
-    warnings.push(
-      `SERP task_post failed for ${city.location_name}: ${
-        err instanceof Error ? err.message : "unknown"
-      }`,
-    )
-    return {
-      positions: new Map(),
-      unprobedKeywords: shortlist.slice(),
-      failed: true,
-    }
-  }
-  const handlesById = new Map(handles.map((h) => [h.id, h]))
-
-  // Poll tasks_ready until our submitted ids appear (or timeout).
-  const collected = new Map<string, number>() // keyword → partner_position
-  const fetchedIds = new Set<string>()
-  const startedAt = Date.now()
-  while (
-    fetchedIds.size < handles.length &&
-    Date.now() - startedAt < SERP_POLL_TIMEOUT_MS
-  ) {
-    if (await isCancelRequested(jobId)) {
-      throw new JobCancelledError(jobId)
-    }
-    await new Promise((r) => setTimeout(r, SERP_POLL_INTERVAL_MS))
-    let readyIds: string[] = []
-    try {
-      readyIds = await serpTasksReady()
-    } catch (err) {
-      warnings.push(
-        `SERP tasks_ready poll failed for ${city.location_name}: ${
-          err instanceof Error ? err.message : "unknown"
-        } (will retry)`,
-      )
-      continue
-    }
-    const newlyReady = readyIds.filter(
-      (id) => handlesById.has(id) && !fetchedIds.has(id),
-    )
-    // Fetch each newly-ready task. Done sequentially — DFS rate limits per
-    // account, and the polling interval already paces things out.
-    for (const id of newlyReady) {
-      fetchedIds.add(id)
-      try {
-        const result = await serpTaskGet(id)
-        const handle = handlesById.get(id)
-        const kw = (handle?.keyword ?? result.keyword ?? "").toLowerCase()
-        if (!kw) continue
-        const partnerHit = result.organic.find(
-          (o) => stripDomain(o.domain) === target,
-        )
-        if (partnerHit) collected.set(kw, partnerHit.position)
-      } catch (err) {
-        warnings.push(
-          `SERP task_get failed (id=${id}): ${
-            err instanceof Error ? err.message : "unknown"
-          }`,
-        )
-      }
-    }
-  }
-
-  // Anything not fetched by deadline → unprobed.
+  const cityLoc: DfsLocation = { code: city.location_code }
+  const positions = new Map<string, number>()
   const unprobed: string[] = []
-  for (const h of handles) {
-    if (!fetchedIds.has(h.id)) unprobed.push(h.keyword)
+  let successes = 0
+
+  type ProbeOutcome =
+    | { kind: "ok"; keyword: string; partnerPos: number | null }
+    | { kind: "err"; keyword: string; message: string }
+
+  const outcomes = await mapWithConcurrency<string, ProbeOutcome>(
+    shortlist,
+    SERP_PROBE_CONCURRENCY,
+    async (kw) => {
+      if (await isCancelRequested(jobId)) {
+        throw new JobCancelledError(jobId)
+      }
+      try {
+        const results = await serpRankedDomains(kw, cityLoc, {
+          depth: SERP_DEPTH,
+        })
+        const hit = results.find((r) => stripDomain(r.domain) === target)
+        return {
+          kind: "ok",
+          keyword: kw,
+          partnerPos: hit ? hit.rankAbsolute : null,
+        }
+      } catch (err) {
+        return {
+          kind: "err",
+          keyword: kw,
+          message: err instanceof Error ? err.message : "unknown",
+        }
+      }
+    },
+  )
+
+  for (const o of outcomes) {
+    if (o.kind === "ok") {
+      successes++
+      if (o.partnerPos != null) positions.set(o.keyword.toLowerCase(), o.partnerPos)
+    } else {
+      unprobed.push(o.keyword)
+    }
   }
+
   if (unprobed.length > 0) {
     warnings.push(
-      `${city.location_name}: ${unprobed.length}/${handles.length} SERP probes did not return before the 10-minute timeout. Partial results shown.`,
+      `${city.location_name}: ${unprobed.length}/${shortlist.length} SERP probes errored (rate limit, network, or DFS-side). Partial results shown.`,
     )
   }
+
   return {
-    positions: collected,
+    positions,
     unprobedKeywords: unprobed,
-    failed: handles.length === 0 || fetchedIds.size === 0,
+    failed: successes === 0,
   }
 }
 

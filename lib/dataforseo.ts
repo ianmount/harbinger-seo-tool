@@ -151,11 +151,18 @@ export async function dfsRequest<T = DfsEnvelope>(
     )
   }
 
-  // Per-task success check — decision 6A from planning: task-level failures
-  // should throw so routes surface the underlying error. A task with
-  // result_count=0 is NOT a failure (status_code will still be 20000).
+  // Per-task success check — task-level failures should throw so callers
+  // surface the underlying error. A task with result_count=0 is NOT a
+  // failure (status_code is still 20000).
+  //
+  // Accept both:
+  //   20000 → "Ok" (synchronous endpoints: live/advanced, search_volume, etc.)
+  //   20100 → "Task Created" (standard-queue task_post — the async
+  //           submission completed; result will be available via
+  //           tasks_ready + task_get later).
+  // Everything else is a genuine per-task error.
   for (const task of envelope.tasks) {
-    if (task.status_code !== 20000) {
+    if (task.status_code !== 20000 && task.status_code !== 20100) {
       throw new DataForSEOError(
         `DataForSEO task failed with status ${task.status_code}: ${task.status_message}`,
         { dfsStatus: task.status_code },
@@ -300,16 +307,25 @@ export async function bulkKeywordDifficulty(
   location: DfsLocation,
 ): Promise<KeywordResult[]> {
   if (keywords.length === 0) return []
-  const envelope = await dfsRequest(
-    "/v3/dataforseo_labs/google/bulk_keyword_difficulty/live",
-    [
-      {
-        keywords,
-        ...locationAndLanguageParams(location),
-      },
-    ],
-  )
-  return extractLabsItems(envelope).map(normalizeLabsItem)
+  // DFS caps this endpoint at 1000 keywords per call. Chunk transparently.
+  const CHUNK = 1000
+  const all: KeywordResult[] = []
+  for (let i = 0; i < keywords.length; i += CHUNK) {
+    const slice = keywords.slice(i, i + CHUNK)
+    const envelope = await dfsRequest(
+      "/v3/dataforseo_labs/google/bulk_keyword_difficulty/live",
+      [
+        {
+          keywords: slice,
+          ...locationAndLanguageParams(location),
+        },
+      ],
+    )
+    for (const item of extractLabsItems(envelope)) {
+      all.push(normalizeLabsItem(item))
+    }
+  }
+  return all
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -397,16 +413,25 @@ export async function searchVolume(
   location: DfsLocation,
 ): Promise<KeywordResult[]> {
   if (keywords.length === 0) return []
-  const envelope = await dfsRequest(
-    "/v3/keywords_data/google_ads/search_volume/live",
-    [
-      {
-        keywords,
-        ...locationAndLanguageParams(location),
-      },
-    ],
-  )
-  return extractGoogleAdsItems(envelope).map(normalizeGoogleAdsItem)
+  // DFS caps this endpoint at 1000 keywords per call. Chunk transparently.
+  const CHUNK = 1000
+  const all: KeywordResult[] = []
+  for (let i = 0; i < keywords.length; i += CHUNK) {
+    const slice = keywords.slice(i, i + CHUNK)
+    const envelope = await dfsRequest(
+      "/v3/keywords_data/google_ads/search_volume/live",
+      [
+        {
+          keywords: slice,
+          ...locationAndLanguageParams(location),
+        },
+      ],
+    )
+    for (const item of extractGoogleAdsItems(envelope)) {
+      all.push(normalizeGoogleAdsItem(item))
+    }
+  }
+  return all
 }
 
 // ────────────────────────────────────────────────────────────────────────────
