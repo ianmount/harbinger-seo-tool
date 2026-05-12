@@ -215,23 +215,15 @@ alter table public.background_jobs
   add constraint background_jobs_status_check
   check (status in ('queued', 'running', 'completed', 'failed', 'cancelled'));
 
--- 2026-05-01: add 'full_audit' to background_jobs.kind enum. The Scheduled
--- Tasks tab introduces a second schedulable task kind that wraps the
--- existing audit pipeline. Existing projects need this constraint widened
--- before /api/jobs/start will accept the new kind.
+-- 2026-05-12: drop background_jobs.kind check constraint. The TypeScript
+-- JobKind union + z.enum(KINDS) at /api/jobs/start already enforce valid
+-- kinds before the insert reaches Postgres; the dispatcher rejects
+-- unmapped kinds with a clear "No task implementation registered" error.
+-- Keeping the DB check meant every new kind required a coordinated
+-- migration — too brittle. Dropping idempotently; safe to re-run.
 
 alter table public.background_jobs
   drop constraint if exists background_jobs_kind_check;
-alter table public.background_jobs
-  add constraint background_jobs_kind_check
-  check (kind in (
-    'audit',
-    'comp_analysis',
-    'initial_strategy',
-    'technical_crawl',
-    'alt_tags',
-    'full_audit'
-  ));
 
 -- 2026-05-01: needs_attention + attention_summary columns on background_jobs.
 -- Drives the "Needs Attention" dashboard on the new Scheduled Tasks page.
