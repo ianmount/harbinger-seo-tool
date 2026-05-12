@@ -122,15 +122,16 @@ create index if not exists task_schedules_kind_idx
 
 create table if not exists public.background_jobs (
   id                uuid primary key default gen_random_uuid(),
-  kind              text not null check (kind in (
-    'audit',
-    'comp_analysis',
-    'initial_strategy',
-    'technical_crawl',
-    'alt_tags',
-    'full_audit',
-    'keyword_research'
-  )),
+  -- `kind` is a free-form text column. Each task implementation lives in
+  -- lib/tasks/<kind>.ts and is registered in the TASKS map in
+  -- lib/inngest/functions.ts. The `JobKind` TypeScript union + the
+  -- z.enum(KINDS) in app/api/jobs/start enforce valid kinds before any
+  -- insert reaches the DB. We deliberately do NOT enforce a check
+  -- constraint here — adding a new kind would otherwise require a
+  -- coordinated DB migration on every deploy, and there's no harm in
+  -- an unknown-kind row beyond the dispatcher failing it with a clear
+  -- "No task implementation registered" message.
+  kind              text not null,
   status            text not null check (status in ('queued', 'running', 'completed', 'failed', 'cancelled')),
   title             text not null,
   -- Free-form params blob; shape is task-specific. Validated by the task
