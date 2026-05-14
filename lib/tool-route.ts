@@ -111,6 +111,26 @@ export function dfsItems<T = unknown>(envelope: unknown): T[] {
 }
 
 /**
+ * Flatten a DFSEO envelope where each row lives directly in
+ * `tasks[*].result[*]` (no `items` nesting). This is the shape used by
+ * Google Ads endpoints — search_volume, ad_traffic_by_keywords — where
+ * the `result` array IS the row list, not a wrapper containing one.
+ * Using `dfsItems()` on this shape silently yields zero rows.
+ */
+export function dfsResultItems<T = unknown>(envelope: unknown): T[] {
+  const env = envelope as {
+    tasks?: { result?: unknown[] | null }[]
+  }
+  const out: T[] = []
+  for (const task of env.tasks ?? []) {
+    for (const r of task.result ?? []) {
+      if (r != null) out.push(r as T)
+    }
+  }
+  return out
+}
+
+/**
  * Sum the per-call `cost` fields across one or more DFSEO envelopes.
  * Use after `Promise.all([...])` to report total run cost in `costUsd`.
  */

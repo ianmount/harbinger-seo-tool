@@ -1,5 +1,11 @@
 import { z } from "zod"
-import { dfsCost, dfsItems, locationFields, runTool } from "@/lib/tool-route"
+import {
+  dfsCost,
+  dfsItems,
+  dfsResultItems,
+  locationFields,
+  runTool,
+} from "@/lib/tool-route"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 300
@@ -341,7 +347,11 @@ export async function POST(request: Request) {
         const env = results[i]
         adsEnvelopes.push(env)
         let coverage = 0
-        for (const raw of dfsItems<{
+        // google_ads/search_volume returns rows DIRECTLY in
+        // tasks[0].result (no `.items` wrapper, unlike Labs endpoints).
+        // Using dfsItems() here silently yields nothing — that's what
+        // had the coverage chips reading 0 on every market.
+        for (const raw of dfsResultItems<{
           keyword?: string
           search_volume?: number | null
           cpc?: number | null
