@@ -1,82 +1,5 @@
 import Link from "next/link"
-import {
-  BarChart2,
-  Clock,
-  Code2,
-  FileSearch,
-  ImageIcon,
-  Search,
-  Users,
-} from "lucide-react"
-import type { ComponentType } from "react"
-
-type TileItem = {
-  href: string
-  label: string
-  description: string
-  icon: ComponentType<{ className?: string }>
-  accent: string
-  iconBg: string
-}
-
-const TILES: TileItem[] = [
-  {
-    href: "/partners",
-    label: "Partner Dashboard",
-    description: "View and manage active partner accounts, GSC and GA4 connections, and onboarding status.",
-    icon: Users,
-    accent: "from-sky-500/10 to-sky-500/5",
-    iconBg: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
-  },
-  {
-    href: "/audit",
-    label: "Audit",
-    description: "Run a pre-sales SEO audit for a prospect domain and generate a polished PDF report.",
-    icon: FileSearch,
-    accent: "from-brand-red/10 to-brand-red/5",
-    iconBg: "bg-brand-red/15 text-brand-red",
-  },
-  {
-    href: "/comp-analysis",
-    label: "Comp Analysis",
-    description: "Map the competitive landscape, surface keyword gaps, and benchmark domain authority.",
-    icon: BarChart2,
-    accent: "from-violet-500/10 to-violet-500/5",
-    iconBg: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
-  },
-  {
-    href: "/keyword-research",
-    label: "Keyword Research",
-    description: "Pull GSC queries alongside DataForSEO volume and difficulty to build a scored keyword list.",
-    icon: Search,
-    accent: "from-emerald-500/10 to-emerald-500/5",
-    iconBg: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
-  },
-  {
-    href: "/tools/alt-tags",
-    label: "Alt Tag Generation",
-    description: "Batch-generate SEO-optimised alt text for images across a partner's site.",
-    icon: ImageIcon,
-    accent: "from-amber-500/10 to-amber-500/5",
-    iconBg: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-  },
-  {
-    href: "/tools/dataforseo",
-    label: "DataForSEO APIs",
-    description: "Direct access to DataForSEO endpoints for ad-hoc keyword, SERP, and backlink lookups.",
-    icon: Code2,
-    accent: "from-slate-500/10 to-slate-500/5",
-    iconBg: "bg-slate-500/15 text-slate-600 dark:text-slate-400",
-  },
-  {
-    href: "/scheduled-tasks",
-    label: "Scheduled Tasks",
-    description: "Manage recurring SEO automation jobs and review their run history.",
-    icon: Clock,
-    accent: "from-rose-500/10 to-rose-500/5",
-    iconBg: "bg-rose-500/15 text-rose-600 dark:text-rose-400",
-  },
-]
+import { TOOL_CATEGORIES } from "@/lib/tool-config"
 
 export default function Home() {
   return (
@@ -94,28 +17,48 @@ export default function Home() {
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {TILES.map((tile) => {
-          const Icon = tile.icon
+        {TOOL_CATEGORIES.map((cat) => {
+          const Icon = cat.icon
+          const firstHref = cat.tools[0]?.href ?? "/"
+          const subtitle =
+            cat.slug === "other"
+              ? "Partner workflows and one-off jobs."
+              : `${cat.tools.length} DataForSEO-powered tool${cat.tools.length === 1 ? "" : "s"}`
           return (
             <Link
-              key={tile.href}
-              href={tile.href}
+              key={cat.slug}
+              href={firstHref}
               className={cn(
                 "group relative flex flex-col gap-5 overflow-hidden rounded-xl border border-line bg-gradient-to-br p-6 shadow-sm",
+                "from-slate-500/10 to-slate-500/5",
                 "transition-all duration-200 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-lg",
-                tile.accent,
               )}
             >
-              <div className={`inline-flex w-fit rounded-lg p-3 ${tile.iconBg}`}>
+              <div className="inline-flex w-fit rounded-lg bg-foreground/5 p-3 text-foreground/80">
                 <Icon className="h-6 w-6" />
               </div>
               <div className="flex flex-1 flex-col gap-2">
                 <p className="font-sans text-[15px] font-extrabold tracking-[-0.01em] text-foreground">
-                  {tile.label}
+                  {cat.label}
                 </p>
                 <p className="font-serif text-[13px] leading-relaxed text-foreground/60">
-                  {tile.description}
+                  {subtitle}
                 </p>
+                <ul className="mt-2 flex flex-wrap gap-1">
+                  {cat.tools.slice(0, 4).map((tool) => (
+                    <li
+                      key={tool.slug}
+                      className="rounded-full bg-foreground/5 px-2 py-0.5 font-mono text-[10px] text-foreground/60"
+                    >
+                      {tool.label}
+                    </li>
+                  ))}
+                  {cat.tools.length > 4 ? (
+                    <li className="rounded-full bg-foreground/5 px-2 py-0.5 font-mono text-[10px] text-foreground/60">
+                      +{cat.tools.length - 4} more
+                    </li>
+                  ) : null}
+                </ul>
               </div>
               <div className="flex items-center gap-1 font-sans text-[11px] font-bold uppercase tracking-[0.12em] text-foreground/40 transition-colors group-hover:text-foreground/60">
                 Open

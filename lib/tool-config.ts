@@ -1,0 +1,423 @@
+/**
+ * Single source of truth for the SEMRush-style tool surface.
+ *
+ * Drives:
+ *   - SideNav (primary categories, secondary tool lists)
+ *   - Tool page metadata (heading, description shown on each page)
+ *   - Type-safe route generation
+ *
+ * Each `Tool` declares the primary DataForSEO endpoint it hits, plus
+ * optional secondary endpoints from the original spec that aren't wired
+ * up yet — those serve as a hand-off list for the next iteration.
+ */
+
+import type { ComponentType } from "react"
+import {
+  Bot,
+  FolderOpen,
+  Globe,
+  Link2,
+  MapPin,
+  Search,
+  TrendingUp,
+  type LucideProps,
+} from "lucide-react"
+
+export type ToolCategorySlug =
+  | "keywords"
+  | "backlinks"
+  | "technical"
+  | "competitive"
+  | "local"
+  | "ai"
+  | "other"
+
+export type Tool = {
+  slug: string
+  category: ToolCategorySlug
+  label: string
+  description: string
+  /** Absolute path inside the app. Includes the category prefix. */
+  href: string
+  /** Endpoints in spec (first = primary, rest = deferred). */
+  endpoints: readonly string[]
+}
+
+export type ToolCategory = {
+  slug: ToolCategorySlug
+  label: string
+  icon: ComponentType<LucideProps>
+  tools: readonly Tool[]
+}
+
+export const TOOL_CATEGORIES: readonly ToolCategory[] = [
+  {
+    slug: "keywords",
+    label: "Keywords",
+    icon: Search,
+    tools: [
+      {
+        slug: "overview",
+        category: "keywords",
+        label: "Keyword Overview",
+        description:
+          "Volume, difficulty, CPC, and intent for a list of keywords.",
+        href: "/keywords/overview",
+        endpoints: [
+          "/v3/dataforseo_labs/google/keyword_overview/live",
+          "/v3/dataforseo_labs/google/historical_keyword_data/live",
+          "/v3/dataforseo_labs/google/search_intent/live",
+          "/v3/serp/google/organic/live/advanced",
+          "/v3/keywords_data/google_ads/search_volume/live",
+        ],
+      },
+      {
+        slug: "magic",
+        category: "keywords",
+        label: "Keyword Magic Tool",
+        description:
+          "Discover keyword ideas, suggestions, and related terms from a seed keyword.",
+        href: "/keywords/magic",
+        endpoints: [
+          "/v3/dataforseo_labs/google/keyword_suggestions/live",
+          "/v3/dataforseo_labs/google/keyword_ideas/live",
+          "/v3/dataforseo_labs/google/related_keywords/live",
+          "/v3/keywords_data/google_ads/search_volume/live",
+        ],
+      },
+    ],
+  },
+  {
+    slug: "backlinks",
+    label: "Backlinks",
+    icon: Link2,
+    tools: [
+      {
+        slug: "overview",
+        category: "backlinks",
+        label: "Backlinks",
+        description:
+          "Inbound links pointing at a domain or URL with anchor text and link type.",
+        href: "/backlinks/overview",
+        endpoints: [
+          "/v3/backlinks/backlinks/live",
+          "/v3/backlinks/anchors/live",
+        ],
+      },
+      {
+        slug: "referring-domains",
+        category: "backlinks",
+        label: "Referring Domains",
+        description:
+          "Domains and networks that link to the target, with rank and link counts.",
+        href: "/backlinks/referring-domains",
+        endpoints: [
+          "/v3/backlinks/referring_domains/live",
+          "/v3/backlinks/referring_networks/live",
+        ],
+      },
+      {
+        slug: "link-building",
+        category: "backlinks",
+        label: "Link Building",
+        description:
+          "Find domains linking to competitors but not you, and pages with intersecting backlinks.",
+        href: "/backlinks/link-building",
+        endpoints: [
+          "/v3/backlinks/competitors/live",
+          "/v3/backlinks/domain_intersection/live",
+          "/v3/backlinks/page_intersection/live",
+        ],
+      },
+      {
+        slug: "spam-scoring",
+        category: "backlinks",
+        label: "Backlink Spam Scoring",
+        description:
+          "Bulk spam score lookup for a list of referring domains or target URLs.",
+        href: "/backlinks/spam-scoring",
+        endpoints: ["/v3/backlinks/bulk_spam_score/live"],
+      },
+      {
+        slug: "trends",
+        category: "backlinks",
+        label: "Backlink Trend Data",
+        description:
+          "Backlink history and new/lost link velocity over time.",
+        href: "/backlinks/trends",
+        endpoints: [
+          "/v3/backlinks/history/live",
+          "/v3/backlinks/timeseries_summary/live",
+          "/v3/backlinks/timeseries_new_lost_summary/live",
+        ],
+      },
+    ],
+  },
+  {
+    slug: "technical",
+    label: "Technical",
+    icon: Globe,
+    tools: [
+      {
+        slug: "domain-analytics",
+        category: "technical",
+        label: "Domain Analytics",
+        description:
+          "Tech stack fingerprint and WHOIS overview for a domain.",
+        href: "/technical/domain-analytics",
+        endpoints: [
+          "/v3/domain_analytics/technologies/domain_technologies/live",
+          "/v3/domain_analytics/whois/overview/live",
+        ],
+      },
+      {
+        slug: "onpage",
+        category: "technical",
+        label: "OnPage SEO Checker",
+        description:
+          "Crawl a site for on-page SEO issues, duplicate tags, broken resources, and link graph.",
+        href: "/technical/onpage",
+        endpoints: [
+          "/v3/on_page/task_post",
+          "/v3/on_page/summary",
+          "/v3/on_page/pages",
+          "/v3/on_page/resources",
+          "/v3/on_page/links",
+          "/v3/on_page/duplicate_tags",
+        ],
+      },
+      {
+        slug: "lighthouse",
+        category: "technical",
+        label: "Core Web Vitals + Lighthouse",
+        description:
+          "Lighthouse audit (performance, accessibility, best practices, SEO) for a URL.",
+        href: "/technical/lighthouse",
+        endpoints: [
+          "/v3/on_page/lighthouse/live/json",
+          "/v3/on_page/lighthouse/task_post",
+        ],
+      },
+      {
+        slug: "content-analysis",
+        category: "technical",
+        label: "Content Analysis",
+        description:
+          "Citation count, sentiment, and rating distribution for a keyword across the open web.",
+        href: "/technical/content-analysis",
+        endpoints: [
+          "/v3/content_analysis/search/live",
+          "/v3/content_analysis/summary/live",
+          "/v3/content_analysis/sentiment_analysis/live",
+          "/v3/content_analysis/rating_distribution/live",
+          "/v3/content_analysis/phrase_trends/live",
+          "/v3/content_analysis/category_trends/live",
+        ],
+      },
+      {
+        slug: "entity-mentions",
+        category: "technical",
+        label: "Entity / Brand Mentions",
+        description:
+          "Surface mentions of an entity across the open web and LLM responses.",
+        href: "/technical/entity-mentions",
+        endpoints: [
+          "/v3/content_analysis/search/live",
+          "/v3/ai_optimization/llm_mentions/search/live",
+          "/v3/ai_optimization/llm_mentions/aggregated_metrics/live",
+        ],
+      },
+    ],
+  },
+  {
+    slug: "competitive",
+    label: "Competitive Analysis",
+    icon: TrendingUp,
+    tools: [
+      {
+        slug: "domain-overview",
+        category: "competitive",
+        label: "Domain Overview",
+        description:
+          "Organic + backlink snapshot and top organic competitors for a domain.",
+        href: "/competitive/domain-overview",
+        endpoints: [
+          "/v3/dataforseo_labs/google/domain_rank_overview/live",
+          "/v3/backlinks/summary/live",
+          "/v3/dataforseo_labs/google/competitors_domain/live",
+          "/v3/serp/google/organic/live/advanced",
+        ],
+      },
+      {
+        slug: "organic-rankings",
+        category: "competitive",
+        label: "Organic Rankings",
+        description:
+          "Keywords a domain ranks for, with position, search volume, and ranking URL.",
+        href: "/competitive/organic-rankings",
+        endpoints: [
+          "/v3/dataforseo_labs/google/ranked_keywords/live",
+          "/v3/dataforseo_labs/google/historical_rank_overview/live",
+          "/v3/dataforseo_labs/google/relevant_pages/live",
+          "/v3/serp/google/organic/live/advanced",
+        ],
+      },
+    ],
+  },
+  {
+    slug: "local",
+    label: "Local",
+    icon: MapPin,
+    tools: [
+      {
+        slug: "gbp",
+        category: "local",
+        label: "GBP Coverage",
+        description:
+          "Google Business Profile info, listings, and Q&A for a business.",
+        href: "/local/gbp",
+        endpoints: [
+          "/v3/business_data/google/my_business_info/live",
+          "/v3/business_data/google/reviews/task_post",
+          "/v3/business_data/google/extended_reviews/task_post",
+          "/v3/business_data/google/questions_and_answers/live",
+          "/v3/business_data/business_listings/search/live",
+        ],
+      },
+      {
+        slug: "reviews",
+        category: "local",
+        label: "Review Velocity + Sentiment",
+        description:
+          "Sentiment, rating distribution, and phrase trends across reviews for a keyword.",
+        href: "/local/reviews",
+        endpoints: [
+          "/v3/content_analysis/sentiment_analysis/live",
+          "/v3/content_analysis/rating_distribution/live",
+          "/v3/content_analysis/phrase_trends/live",
+        ],
+      },
+    ],
+  },
+  {
+    slug: "ai",
+    label: "AI",
+    icon: Bot,
+    tools: [
+      {
+        slug: "visibility",
+        category: "ai",
+        label: "Visibility Overview",
+        description:
+          "Aggregated LLM mention metrics and top domains / pages for a keyword.",
+        href: "/ai/visibility",
+        endpoints: [
+          "/v3/ai_optimization/llm_mentions/aggregated_metrics/live",
+          "/v3/ai_optimization/llm_mentions/top_domains/live",
+          "/v3/ai_optimization/llm_mentions/top_pages/live",
+        ],
+      },
+      {
+        slug: "competitor-research",
+        category: "ai",
+        label: "Competitor Research",
+        description:
+          "Compare LLM mention metrics across multiple brands.",
+        href: "/ai/competitor-research",
+        endpoints: [
+          "/v3/ai_optimization/llm_mentions/cross_aggregated_metrics/live",
+          "/v3/ai_optimization/llm_mentions/aggregated_metrics/live",
+        ],
+      },
+      {
+        slug: "prompt-research",
+        category: "ai",
+        label: "Prompt Research",
+        description:
+          "AI search volume for a prompt plus actual responses from ChatGPT / Claude / Gemini / Perplexity.",
+        href: "/ai/prompt-research",
+        endpoints: [
+          "/v3/ai_optimization/ai_keyword_data/keywords_search_volume/live",
+          "/v3/ai_optimization/llm_mentions/search/live",
+          "/v3/ai_optimization/chat_gpt/llm_responses/live",
+          "/v3/ai_optimization/claude/llm_responses/live",
+          "/v3/ai_optimization/gemini/llm_responses/live",
+          "/v3/ai_optimization/perplexity/llm_responses/live",
+        ],
+      },
+      {
+        slug: "brand-performance",
+        category: "ai",
+        label: "Brand Performance",
+        description:
+          "Aggregate LLM mention metrics for a brand, plus raw mention rows.",
+        href: "/ai/brand-performance",
+        endpoints: [
+          "/v3/ai_optimization/llm_mentions/aggregated_metrics/live",
+          "/v3/ai_optimization/llm_mentions/search/live",
+        ],
+      },
+    ],
+  },
+  {
+    slug: "other",
+    label: "Other",
+    icon: FolderOpen,
+    tools: [
+      {
+        slug: "partners",
+        category: "other",
+        label: "Partner Dashboard",
+        description: "Active partners and their integrations.",
+        href: "/partners",
+        endpoints: [],
+      },
+      {
+        slug: "audit",
+        category: "other",
+        label: "Audit",
+        description: "Pre-sales SEO audit PDF for a prospect domain.",
+        href: "/audit",
+        endpoints: [],
+      },
+      {
+        slug: "scheduled-tasks",
+        category: "other",
+        label: "Scheduled Tasks",
+        description: "Recurring SEO automation jobs and their run history.",
+        href: "/scheduled-tasks",
+        endpoints: [],
+      },
+    ],
+  },
+]
+
+export const ALL_TOOLS: readonly Tool[] = TOOL_CATEGORIES.flatMap(
+  (c) => c.tools,
+)
+
+export function findCategoryByPathname(
+  pathname: string | null,
+): ToolCategory | null {
+  if (!pathname) return null
+  for (const cat of TOOL_CATEGORIES) {
+    for (const tool of cat.tools) {
+      if (pathname === tool.href || pathname.startsWith(`${tool.href}/`)) {
+        return cat
+      }
+    }
+  }
+  return null
+}
+
+export function findToolByPathname(pathname: string | null): Tool | null {
+  if (!pathname) return null
+  for (const cat of TOOL_CATEGORIES) {
+    for (const tool of cat.tools) {
+      if (pathname === tool.href || pathname.startsWith(`${tool.href}/`)) {
+        return tool
+      }
+    }
+  }
+  return null
+}

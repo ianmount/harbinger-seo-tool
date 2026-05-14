@@ -71,7 +71,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   inner div is sticky so nav content stays visible while scrolling */}
               <aside
                 className={cn(
-                  "z-40 w-60 shrink-0 bg-[color:var(--sidebar)] text-[color:var(--sidebar-foreground)]",
+                  "z-40 w-[300px] shrink-0 bg-[color:var(--sidebar)] text-[color:var(--sidebar-foreground)]",
                   "fixed inset-y-0 left-0 transition-transform duration-200 ease-out",
                   "md:static md:translate-x-0",
                   navOpen ? "translate-x-0 shadow-overlay" : "-translate-x-full",

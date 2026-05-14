@@ -17,13 +17,15 @@ import { cn } from "@/lib/utils"
 
 const TAB_LABELS: Record<string, string> = {
   "/audit": "Audit",
-  "/comp-analysis": "Comp Analysis",
-  "/strategy": "Strategy",
-  "/content": "Content",
-  "/backlinks": "Backlinks",
-  "/reporting": "Reporting",
-  "/keyword-research": "Keyword Research",
   "/onboarding": "Onboarding",
+  "/keywords": "Keywords",
+  "/backlinks": "Backlinks",
+  "/technical": "Technical",
+  "/competitive": "Competitive Analysis",
+  "/local": "Local",
+  "/ai": "AI",
+  "/partners": "Partner Dashboard",
+  "/scheduled-tasks": "Scheduled Tasks",
   "/": "Home",
 }
 
@@ -69,9 +71,9 @@ export function ChatBaseContextSync() {
     }
 
     // Assessment workflow context — only attached when there's actual
-    // input/output to talk about. Audit + Comp Analysis tabs share this.
-    const onAssessmentTab =
-      pathname === "/audit" || pathname === "/comp-analysis"
+    // input/output to talk about. Audit is the only assessment tab now;
+    // Comp Analysis was removed in the DFSEO refactor.
+    const onAssessmentTab = pathname === "/audit"
     const hasAssessmentInputs =
       assessment.websiteUrl ||
       assessment.targetLocations ||
