@@ -273,6 +273,9 @@ export default function KeywordMagicPage() {
       if (intentFilters.size > 0 && (!r.intent || !intentFilters.has(r.intent)))
         return false
       const v = r.volumes[activeMarketKey] ?? null
+      // When a city scope is active, drop rows that have no Ads volume
+      // for that city (national kept as-is so the default view stays full).
+      if (activeMarketKey !== "national" && (v == null || v === 0)) return false
       if (min != null && (v == null || v < min)) return false
       if (max != null && (r.kd == null || r.kd > max)) return false
       if (needle && !r.keyword.toLowerCase().includes(needle)) return false
