@@ -40,6 +40,8 @@ type MagicMarket = {
   location_code: number
   location_name: string
   is_national: boolean
+  coverage: number
+  queried: number
 }
 
 type MagicRow = {
@@ -141,17 +143,20 @@ function Chip({
   onClick,
   count,
   className,
+  title,
 }: {
   children: React.ReactNode
   active?: boolean
   onClick?: () => void
   count?: number
   className?: string
+  title?: string
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      title={title}
       className={cn(
         "inline-flex items-center gap-1.5 rounded-md border border-transparent px-2.5 py-1 text-[12px] transition-colors",
         active
@@ -386,6 +391,8 @@ export default function KeywordMagicPage() {
                 key={m.key}
                 active={m.key === activeMarketKey}
                 onClick={() => setActiveMarketKey(m.key)}
+                count={m.coverage}
+                title={`location_code ${m.location_code} (${m.location_name}) · ${m.coverage} of ${m.queried} keywords returned Ads volume`}
                 className="px-2.5 py-1 text-[11px]"
               >
                 {m.label}

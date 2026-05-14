@@ -57,6 +57,13 @@ export type MagicMarket = {
   location_code: number
   location_name: string
   is_national: boolean
+  /** Count of keywords DFSEO returned a non-null search_volume for in
+   *  this market. Surfaces in the UI as a coverage chip so you can
+   *  verify city-level data is actually different from national. */
+  coverage: number
+  /** Total keywords queried for this market (same across markets within
+   *  a run, but useful for the "47 / 220" label form). */
+  queried: number
 }
 
 export type MagicRow = {
@@ -289,6 +296,8 @@ export async function POST(request: Request) {
       location_code: nationalCode,
       location_name: nationalLabel,
       is_national: true,
+      coverage: 0,
+      queried: 0,
     })
     for (const c of input.city_markets) {
       markets.push({
@@ -297,6 +306,8 @@ export async function POST(request: Request) {
         location_code: c.location_code,
         location_name: c.location_name,
         is_national: false,
+        coverage: 0,
+        queried: 0,
       })
     }
 
@@ -346,6 +357,8 @@ export async function POST(request: Request) {
             row.cpc = raw.cpc
           }
         }
+        m.coverage = coverage
+        m.queried = adsKeywords.length
         console.log(
           `[keyword-magic] ads volume: market=${m.label} code=${m.location_code} keywords=${adsKeywords.length} with-volume=${coverage}`,
         )
