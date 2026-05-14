@@ -4,12 +4,21 @@ import { dfsCost, locationFields, runTool } from "@/lib/tool-route"
 export const dynamic = "force-dynamic"
 export const maxDuration = 300
 
+const CityInput = z.object({
+  location_code: z.number().int(),
+  location_name: z.string().min(1),
+})
+
 const Input = z.object({
   target: z.string().min(3),
   location_code: z.number().int().optional(),
   location_name: z.string().optional(),
   language_code: z.string().default("en"),
-  cities: z.array(z.string().min(1)).default([]),
+  // Cities are picked from the DFS Labs taxonomy on the client (via
+  // LocationAutocomplete), so we get a validated location_code per city and
+  // can feed the SERP endpoint by code rather than name — no fuzzy matching,
+  // no ambiguity between "Springfield, MO" and "Springfield, IL".
+  cities: z.array(CityInput).default([]),
   kw_limit: z.number().int().min(1).max(20).default(5),
 })
 
@@ -343,16 +352,19 @@ export async function POST(request: Request) {
     }
 
     // ── City SERP matrix: one SERP call per (keyword × city) ─────────────
-    // The user-supplied free-text cities feed location_name directly; DFS
-    // accepts city-level names for /v3/serp/google/organic/live/advanced
-    // (unlike Labs endpoints, which reject city-level locations).
-    const cities = input.cities.map((c) => c.trim()).filter(Boolean)
+    // Cities come from the client as { location_code, location_name } pairs
+    // sourced from DFS's Labs locations taxonomy. We send location_code to
+    // /v3/serp/google/organic/live/advanced — codes are unambiguous, no fuzzy
+    // matching, and DFS will reject typos at the city-picker stage rather
+    // than mid-batch here.
+    const cityLocations = input.cities
+    const cityKey = (c: { location_name: string }) => c.location_name
     const serpEnvelopes: unknown[] = []
     const serpRawRows: RawEnvelopes["envelopes"]["serp_google_organic"] = []
     const citySerp: CitySerpRow[] = []
-    if (topKeywords.length > 0 && cities.length > 0) {
+    if (topKeywords.length > 0 && cityLocations.length > 0) {
       const pairs = topKeywords.flatMap((kw) =>
-        cities.map((city) => ({ keyword: kw.keyword, city })),
+        cityLocations.map((city) => ({ keyword: kw.keyword, city })),
       )
       const results = await Promise.all(
         pairs.map(({ keyword, city }) =>
@@ -361,7 +373,7 @@ export async function POST(request: Request) {
             [
               {
                 keyword,
-                location_name: city,
+                location_code: city.location_code,
                 language_code: input.language_code,
                 depth: 100,
               },
@@ -382,19 +394,22 @@ export async function POST(request: Request) {
         if (r.env) serpEnvelopes.push(r.env)
         serpRawRows.push({
           keyword: r.keyword,
-          city: r.city,
+          city: cityKey(r.city),
           envelope: r.env,
           error: r.error,
         })
       }
       const positionsByKw = new Map<string, Record<string, number | null>>()
       for (const kw of topKeywords) {
-        positionsByKw.set(kw.keyword, Object.fromEntries(cities.map((c) => [c, null])))
+        positionsByKw.set(
+          kw.keyword,
+          Object.fromEntries(cityLocations.map((c) => [cityKey(c), null])),
+        )
       }
       for (const r of results) {
         const pos = findTargetPositionInSerp(r.env, target)
         const row = positionsByKw.get(r.keyword)
-        if (row) row[r.city] = pos
+        if (row) row[cityKey(r.city)] = pos
       }
       for (const kw of topKeywords) {
         citySerp.push({
@@ -403,6 +418,7 @@ export async function POST(request: Request) {
         })
       }
     }
+    const cities = cityLocations.map(cityKey)
 
     const rawEnvelopes: RawEnvelopes = {
       generatedAt: new Date().toISOString(),

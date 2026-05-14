@@ -5,6 +5,7 @@ import { Download, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { LocationAutocomplete } from "@/components/LocationAutocomplete"
 import { MarketPicker } from "@/components/tool/MarketPicker"
 import { ToolShell } from "@/components/tool/ToolShell"
 import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
@@ -95,7 +96,7 @@ export default function DomainOverviewPage() {
   const tool = findToolByPathname("/competitive/domain-overview")!
   const [target, setTarget] = useState("")
   const [market, setMarket] = useState<DfsLabsLocation | null>(null)
-  const [citiesText, setCitiesText] = useState("")
+  const [cities, setCities] = useState<DfsLabsLocation[]>([])
   const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/competitive/domain-overview",
   )
@@ -106,17 +107,23 @@ export default function DomainOverviewPage() {
       setError("Enter a domain.")
       return
     }
-    const cities = citiesText
-      .split(/[,\n]/)
-      .map((c) => c.trim())
-      .filter(Boolean)
     await run({
       target: target.trim(),
       location_code: market?.location_code,
       location_name: market ? undefined : "United States",
-      cities,
+      cities: cities.map((c) => ({
+        location_code: c.location_code,
+        location_name: c.location_name,
+      })),
     })
   }
+
+  const handleAddCity = (loc: DfsLabsLocation) =>
+    setCities((prev) =>
+      prev.some((p) => p.location_code === loc.location_code) ? prev : [...prev, loc],
+    )
+  const handleRemoveCity = (code: number) =>
+    setCities((prev) => prev.filter((p) => p.location_code !== code))
 
   return (
     <ToolShell
@@ -126,38 +133,33 @@ export default function DomainOverviewPage() {
       endpoints={tool.endpoints}
       meta={meta}
       form={
-        <form
-          onSubmit={onSubmit}
-          className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_280px_1fr_auto] md:items-end"
-        >
-          <div className="space-y-1.5">
-            <Label htmlFor="target">Target domain</Label>
-            <Input
-              id="target"
-              value={target}
-              onChange={(e) => setTarget(e.target.value)}
-              placeholder="example.com"
-              disabled={loading}
-            />
+        <form onSubmit={onSubmit} className="space-y-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_280px_auto] md:items-end">
+            <div className="space-y-1.5">
+              <Label htmlFor="target">Target domain</Label>
+              <Input
+                id="target"
+                value={target}
+                onChange={(e) => setTarget(e.target.value)}
+                placeholder="example.com"
+                disabled={loading}
+              />
+            </div>
+            <MarketPicker value={market} onChange={setMarket} />
+            <Button type="submit" disabled={loading}>
+              {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Run Overview
+            </Button>
           </div>
-          <MarketPicker value={market} onChange={setMarket} />
-          <div className="space-y-1.5">
-            <Label htmlFor="cities">
-              City SERP positions{" "}
-              <span className="text-ink-3 font-normal">(comma-separated, optional)</span>
-            </Label>
-            <Input
-              id="cities"
-              value={citiesText}
-              onChange={(e) => setCitiesText(e.target.value)}
-              placeholder="Orlando, Sunrise, Palm Coast"
-              disabled={loading}
-            />
-          </div>
-          <Button type="submit" disabled={loading}>
-            {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-            Run Overview
-          </Button>
+          <LocationAutocomplete
+            inputId="city-serp-locations"
+            label="City SERP positions (optional)"
+            helpText="Pick city-level locations from the DataForSEO taxonomy. One paid SERP call per (top-5 keyword × city)."
+            selected={cities}
+            onAdd={handleAddCity}
+            onRemove={handleRemoveCity}
+            disabled={loading}
+          />
         </form>
       }
       results={
