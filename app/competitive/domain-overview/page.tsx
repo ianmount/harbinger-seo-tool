@@ -1,7 +1,7 @@
 "use client"
 
 import { useMemo, useState, type FormEvent } from "react"
-import { Loader2 } from "lucide-react"
+import { Download, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -61,6 +61,13 @@ type CitySerpRow = {
   positions: Record<string, number | null>
 }
 
+type RawEnvelopes = {
+  generatedAt: string
+  target: string
+  market: string
+  envelopes: Record<string, unknown>
+}
+
 type Data = {
   target: string
   market: string
@@ -73,6 +80,7 @@ type Data = {
   competitors: Competitor[]
   backlinkProfile: BacklinkProfile
   citySerp: CitySerpRow[]
+  _raw: RawEnvelopes
 }
 
 const POS_BAND_COLORS = {
@@ -178,6 +186,13 @@ function EmptyState() {
 function Results({ data }: { data: Data }) {
   return (
     <div className="space-y-3.5">
+      <div className="flex items-center justify-between">
+        <p className="font-mono text-[11px] text-ink-3">
+          Target: <span className="text-foreground">{data.target}</span> ·
+          Market: <span className="text-foreground">{data.market}</span>
+        </p>
+        <DownloadRawButton raw={data._raw} target={data.target} />
+      </div>
       <KpiRow kpis={data.kpis} />
       <SourceLine>domain_rank_overview · backlinks/summary</SourceLine>
 
@@ -763,6 +778,46 @@ function BacklinkMini({
         {value}
       </p>
     </div>
+  )
+}
+
+function DownloadRawButton({
+  raw,
+  target,
+}: {
+  raw: RawEnvelopes
+  target: string
+}) {
+  const handleDownload = () => {
+    const blob = new Blob([JSON.stringify(raw, null, 2)], {
+      type: "application/json",
+    })
+    const url = URL.createObjectURL(blob)
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[:.]/g, "-")
+      .slice(0, 19)
+    const safeTarget = target.replace(/[^a-z0-9.-]+/gi, "-")
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `domain-overview-${safeTarget}-${stamp}.json`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      onClick={handleDownload}
+      className="h-8"
+      title="Download every DataForSEO envelope returned during this run"
+    >
+      <Download className="mr-1.5 h-3.5 w-3.5" />
+      Download raw JSON
+    </Button>
   )
 }
 

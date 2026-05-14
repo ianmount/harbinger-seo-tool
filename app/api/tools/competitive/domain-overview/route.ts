@@ -65,6 +65,30 @@ type CitySerpRow = {
   positions: Record<string, number | null>
 }
 
+// Verbatim DataForSEO envelopes for every API call made during this run.
+// Surfaced under `data._raw` so the dashboard can offer a "Download raw JSON"
+// button — useful for debugging response-shape changes and inspecting fields
+// the dashboard doesn't currently render.
+type RawEnvelopes = {
+  generatedAt: string
+  target: string
+  market: string
+  envelopes: {
+    "domain_rank_overview": unknown
+    "historical_rank_overview": unknown
+    "backlinks_summary": unknown
+    "backlinks_timeseries_new_lost_summary": unknown | null
+    "competitors_domain": unknown
+    "ranked_keywords": unknown
+    "serp_google_organic": {
+      keyword: string
+      city: string
+      envelope: unknown | null
+      error: string | null
+    }[]
+  }
+}
+
 type Data = {
   target: string
   market: string
@@ -77,6 +101,7 @@ type Data = {
   competitors: Competitor[]
   backlinkProfile: BacklinkProfile
   citySerp: CitySerpRow[]
+  _raw: RawEnvelopes
 }
 
 const MONTH_LABELS = [
@@ -323,6 +348,7 @@ export async function POST(request: Request) {
     // (unlike Labs endpoints, which reject city-level locations).
     const cities = input.cities.map((c) => c.trim()).filter(Boolean)
     const serpEnvelopes: unknown[] = []
+    const serpRawRows: RawEnvelopes["envelopes"]["serp_google_organic"] = []
     const citySerp: CitySerpRow[] = []
     if (topKeywords.length > 0 && cities.length > 0) {
       const pairs = topKeywords.flatMap((kw) =>
@@ -351,8 +377,16 @@ export async function POST(request: Request) {
             })),
         ),
       )
-      // Accumulate envelopes for cost reporting.
-      for (const r of results) if (r.env) serpEnvelopes.push(r.env)
+      // Accumulate envelopes for cost reporting and raw-export rows.
+      for (const r of results) {
+        if (r.env) serpEnvelopes.push(r.env)
+        serpRawRows.push({
+          keyword: r.keyword,
+          city: r.city,
+          envelope: r.env,
+          error: r.error,
+        })
+      }
       const positionsByKw = new Map<string, Record<string, number | null>>()
       for (const kw of topKeywords) {
         positionsByKw.set(kw.keyword, Object.fromEntries(cities.map((c) => [c, null])))
@@ -370,6 +404,21 @@ export async function POST(request: Request) {
       }
     }
 
+    const rawEnvelopes: RawEnvelopes = {
+      generatedAt: new Date().toISOString(),
+      target,
+      market: marketLabel,
+      envelopes: {
+        domain_rank_overview: overviewEnv,
+        historical_rank_overview: historicalEnv,
+        backlinks_summary: summaryEnv,
+        backlinks_timeseries_new_lost_summary: timeseriesEnv,
+        competitors_domain: competitorsEnv,
+        ranked_keywords: rankedEnv,
+        serp_google_organic: serpRawRows,
+      },
+    }
+
     return {
       data: {
         target,
@@ -383,6 +432,7 @@ export async function POST(request: Request) {
         competitors,
         backlinkProfile,
         citySerp,
+        _raw: rawEnvelopes,
       },
       endpoints: [
         "/v3/dataforseo_labs/google/domain_rank_overview/live",
