@@ -239,12 +239,15 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
         category: "competitive",
         label: "Domain Overview",
         description:
-          "Organic + backlink snapshot and top organic competitors for a domain.",
+          "Visibility KPIs, position distribution, traffic trend, top keywords, competitors, backlink profile, and per-city SERP positions.",
         href: "/competitive/domain-overview",
         endpoints: [
           "/v3/dataforseo_labs/google/domain_rank_overview/live",
+          "/v3/dataforseo_labs/google/historical_rank_overview/live",
           "/v3/backlinks/summary/live",
+          "/v3/backlinks/timeseries_new_lost_summary/live",
           "/v3/dataforseo_labs/google/competitors_domain/live",
+          "/v3/dataforseo_labs/google/ranked_keywords/live",
           "/v3/serp/google/organic/live/advanced",
         ],
       },
