@@ -256,12 +256,13 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
         category: "competitive",
         label: "Organic Rankings",
         description:
-          "Keywords a domain ranks for, with position, search volume, and ranking URL.",
+          "Visibility score, 12-month trend, movers, SERP features, intent breakdown, pages, keyword table, and per-city positions for a domain.",
         href: "/competitive/organic-rankings",
         endpoints: [
           "/v3/dataforseo_labs/google/ranked_keywords/live",
           "/v3/dataforseo_labs/google/historical_rank_overview/live",
           "/v3/dataforseo_labs/google/relevant_pages/live",
+          "/v3/dataforseo_labs/google/search_intent/live",
           "/v3/serp/google/organic/live/advanced",
         ],
       },
