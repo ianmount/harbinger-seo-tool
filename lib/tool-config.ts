@@ -61,14 +61,17 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
         category: "keywords",
         label: "Keyword Overview",
         description:
-          "Volume, difficulty, CPC, and intent for a list of keywords.",
+          "Single-keyword deep dive: volume, difficulty, CPC, intent, 12-month trend, per-city volume, SERP composition, features, PAA, related and phrase-match suggestions.",
         href: "/keywords/overview",
         endpoints: [
           "/v3/dataforseo_labs/google/keyword_overview/live",
           "/v3/dataforseo_labs/google/historical_keyword_data/live",
           "/v3/dataforseo_labs/google/search_intent/live",
-          "/v3/serp/google/organic/live/advanced",
           "/v3/keywords_data/google_ads/search_volume/live",
+          "/v3/serp/google/organic/live/advanced",
+          "/v3/dataforseo_labs/google/related_keywords/live",
+          "/v3/dataforseo_labs/google/keyword_suggestions/live",
+          "/v3/backlinks/bulk_ranks/live",
         ],
       },
       {
