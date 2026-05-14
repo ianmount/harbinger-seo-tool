@@ -1,5 +1,4 @@
 import { z } from "zod"
-import { callClaude, ClaudeApiError } from "@/lib/claude"
 import { dfsCost, dfsItems, locationFields, runTool } from "@/lib/tool-route"
 
 export const dynamic = "force-dynamic"
@@ -64,21 +63,17 @@ export type MagicRow = {
   keyword: string
   source: SourceTag
   intent: "I" | "N" | "C" | "T" | null
-  /** Search volume per market key. Falls back to Labs national volume. */
+  /** Per-market Google Ads search volume. National is keyed `national`,
+   *  cities are keyed `city:${location_code}`. `undefined` means the
+   *  market wasn't queried; `null` means the market was queried but the
+   *  keyword returned no volume row. */
   volumes: Record<MarketKey, number | null>
   kd: number | null
   cpc: number | null
   competition_level: string | null
-  /** Distinct SERP feature slugs from DFSEO `serp_info.serp_item_types`. */
+  /** Distinct SERP feature slugs from DFSEO Labs `serp_info.serp_item_types`. */
   serp_features: string[]
   is_question: boolean
-  cluster: string | null
-}
-
-export type MagicCluster = {
-  label: string
-  count: number
-  keywords: string[]
 }
 
 export type MagicData = {
@@ -97,12 +92,19 @@ export type MagicData = {
     avg_volume: number | null
     avg_kd: number | null
   }
-  clusters: MagicCluster[]
   rows: MagicRow[]
-  cluster_warning: string | null
 }
 
-type LabsItem = {
+/**
+ * Canonicalised shape of a single Labs item after unwrapping the
+ * `related_keywords` envelope. `keyword_suggestions` and `keyword_ideas`
+ * return flat items; `related_keywords` nests the keyword data under
+ * `keyword_data` (the parent item itself only carries `depth` and the
+ * `related_keywords` string array). We normalise both into the same
+ * shape so the downstream extractor doesn't care which source it came
+ * from.
+ */
+type CanonicalLabsItem = {
   keyword?: string
   keyword_info?: {
     search_volume?: number | null
@@ -115,9 +117,21 @@ type LabsItem = {
   keyword_properties?: {
     keyword_difficulty?: number | null
   } | null
+  // Labs returns `serp_info` as a TOP-LEVEL sibling of `keyword_info`,
+  // even when `include_serp_info: true`. Keep `keyword_info.serp_info`
+  // as a fallback because some snapshot variants nest it.
+  serp_info?: {
+    serp_item_types?: string[] | null
+  } | null
   search_intent_info?: {
     main_intent?: string | null
   } | null
+}
+
+type RelatedKeywordsItem = {
+  depth?: number
+  related_keywords?: string[] | null
+  keyword_data?: CanonicalLabsItem | null
 }
 
 function nationalLocFields(input: z.infer<typeof Input>) {
@@ -152,155 +166,48 @@ function isQuestion(keyword: string): boolean {
   return QUESTION_PREFIXES.includes(first)
 }
 
+function canonicalise(
+  raw: CanonicalLabsItem | RelatedKeywordsItem,
+  source: SourceTag,
+): CanonicalLabsItem | null {
+  if (source === "related") {
+    const kd = (raw as RelatedKeywordsItem).keyword_data
+    return kd ?? null
+  }
+  return raw as CanonicalLabsItem
+}
+
 function extractItems(envelope: unknown, source: SourceTag): MagicRow[] {
   const rows: MagicRow[] = []
-  for (const raw of dfsItems<LabsItem>(envelope)) {
-    if (!raw.keyword) continue
-    const serpTypes = raw.keyword_info?.serp_info?.serp_item_types ?? []
-    // De-dup within-row + canonicalize.
+  for (const raw of dfsItems<CanonicalLabsItem | RelatedKeywordsItem>(
+    envelope,
+  )) {
+    const item = canonicalise(raw, source)
+    if (!item?.keyword) continue
+    // Prefer top-level `serp_info` (the documented shape) and fall back
+    // to the nested `keyword_info.serp_info` for older snapshots.
+    const serpTypes =
+      item.serp_info?.serp_item_types ??
+      item.keyword_info?.serp_info?.serp_item_types ??
+      []
     const features = Array.from(new Set(serpTypes.filter(Boolean)))
-    const inlineIntent = raw.search_intent_info?.main_intent ?? null
+    const inlineIntent = item.search_intent_info?.main_intent ?? null
     const intent = inlineIntent ? INTENT_LETTER[inlineIntent] ?? null : null
     rows.push({
-      keyword: raw.keyword,
+      keyword: item.keyword,
       source,
       intent,
-      volumes: { national: raw.keyword_info?.search_volume ?? null } as Record<
-        MarketKey,
-        number | null
-      >,
-      kd: raw.keyword_properties?.keyword_difficulty ?? null,
-      cpc: raw.keyword_info?.cpc ?? null,
-      competition_level: raw.keyword_info?.competition_level ?? null,
+      volumes: {
+        national: item.keyword_info?.search_volume ?? null,
+      } as Record<MarketKey, number | null>,
+      kd: item.keyword_properties?.keyword_difficulty ?? null,
+      cpc: item.keyword_info?.cpc ?? null,
+      competition_level: item.keyword_info?.competition_level ?? null,
       serp_features: features,
-      is_question: isQuestion(raw.keyword),
-      cluster: null,
+      is_question: isQuestion(item.keyword),
     })
   }
   return rows
-}
-
-// ─── Claude clustering ──────────────────────────────────────────────────────
-
-const ClusterResponseSchema = z.object({
-  clusters: z
-    .array(
-      z.object({
-        label: z.string().trim().min(1).max(40),
-        keywords: z.array(z.string().trim().min(1)).min(1).max(500),
-      }),
-    )
-    .min(1)
-    .max(12),
-})
-
-function stripCodeFences(text: string): string {
-  const t = text.trim()
-  const m = t.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i)
-  return m ? m[1].trim() : t
-}
-
-function extractJsonObject(text: string): string {
-  const stripped = stripCodeFences(text)
-  const first = stripped.indexOf("{")
-  const last = stripped.lastIndexOf("}")
-  if (first === -1 || last === -1 || last <= first) return stripped
-  return stripped.slice(first, last + 1)
-}
-
-async function clusterKeywordsWithClaude(
-  seed: string,
-  rows: MagicRow[],
-): Promise<{ clusters: MagicCluster[]; warning: string | null }> {
-  // Cap the input we send to Claude. Pick top-volume keywords first so
-  // long-tail noise doesn't displace the meaningful clusters.
-  const CAP = 250
-  const sorted = [...rows].sort(
-    (a, b) => (b.volumes.national ?? 0) - (a.volumes.national ?? 0),
-  )
-  const sample = sorted.slice(0, CAP)
-  const list = sample
-    .map((r) => `- ${r.keyword}`)
-    .join("\n")
-
-  const system =
-    "You are an SEO analyst grouping a seed keyword's expansions into topical clusters. Return JSON only — no prose, no code fences."
-  const prompt = [
-    `Seed: "${seed}"`,
-    "",
-    "Group the following keywords into 5–8 distinct, mutually-exclusive topical clusters.",
-    "Each cluster label should be 1–3 lowercase words describing the theme (e.g. \"installation\", \"vs comparisons\", \"motorized\").",
-    "Every keyword from the input MUST be assigned to exactly one cluster. Do not invent keywords.",
-    "",
-    "Output JSON shape:",
-    `{ "clusters": [ { "label": "<theme>", "keywords": ["<kw1>", "<kw2>", ...] } ] }`,
-    "",
-    "Keywords:",
-    list,
-  ].join("\n")
-
-  let text: string
-  try {
-    text = await callClaude(prompt, {
-      model: "claude-opus-4-7",
-      maxTokens: 4096,
-      system,
-    })
-  } catch (err) {
-    const msg = err instanceof ClaudeApiError ? err.message : "unknown"
-    return { clusters: [], warning: `Clustering skipped: ${msg}` }
-  }
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(extractJsonObject(text))
-  } catch (err) {
-    return {
-      clusters: [],
-      warning: `Clustering JSON parse failed: ${err instanceof Error ? err.message : "unknown"}`,
-    }
-  }
-  const result = ClusterResponseSchema.safeParse(parsed)
-  if (!result.success) {
-    return {
-      clusters: [],
-      warning: `Clustering response shape invalid: ${result.error.message}`,
-    }
-  }
-
-  // Validate every cluster keyword actually exists in the sample we sent.
-  // Claude occasionally paraphrases; those would silently drop from the
-  // count. Drop unknowns and rebuild counts from the surviving members.
-  const pool = new Set(sample.map((r) => r.keyword.toLowerCase()))
-  const dedup = new Map<string, string[]>()
-  let hallucinated = 0
-  for (const c of result.data.clusters) {
-    const label = c.label.toLowerCase()
-    const arr = dedup.get(label) ?? []
-    for (const kw of c.keywords) {
-      const lc = kw.toLowerCase()
-      if (pool.has(lc)) arr.push(lc)
-      else hallucinated++
-    }
-    dedup.set(label, arr)
-  }
-  const clusters: MagicCluster[] = []
-  for (const [label, keywords] of dedup) {
-    if (keywords.length === 0) continue
-    clusters.push({
-      label,
-      count: keywords.length,
-      keywords: Array.from(new Set(keywords)),
-    })
-  }
-  clusters.sort((a, b) => b.count - a.count)
-
-  const warning =
-    hallucinated > 0
-      ? `Claude introduced ${hallucinated} keyword${hallucinated === 1 ? "" : "s"} not in the source list — they were dropped.`
-      : null
-
-  return { clusters, warning }
 }
 
 export async function POST(request: Request) {
@@ -309,7 +216,8 @@ export async function POST(request: Request) {
 
     // ── Stage 1: parallel labs calls. Each emits `serp_info` so we can
     //    populate the SERP-features icons without a separate SERP call.
-    //    `include_serp_info` flag enables `serp_item_types` per item.
+    //    `include_serp_info` is the documented flag on every Labs
+    //    keyword endpoint.
     const suggestionsBody = [
       {
         keyword: input.seed,
@@ -357,7 +265,6 @@ export async function POST(request: Request) {
       // Merge SERP features across sources for the same keyword.
       const merged = new Set([...existing.serp_features, ...row.serp_features])
       existing.serp_features = Array.from(merged)
-      // Backfill any missing fields from the duplicate row.
       existing.kd ??= row.kd
       existing.cpc ??= row.cpc
       existing.competition_level ??= row.competition_level
@@ -410,10 +317,19 @@ export async function POST(request: Request) {
         return dfs("/v3/keywords_data/google_ads/search_volume/live", body)
       })
       const results = await Promise.all(adsCalls)
+      // Pre-mark every queried market as `null` on every row so the UI
+      // can tell "queried, no data" apart from "never queried" via
+      // hasOwnProperty. Without this, a city that returned no row for a
+      // given keyword would have `undefined` and the UI would silently
+      // fall through to the next defined value.
       for (let i = 0; i < markets.length; i++) {
         const m = markets[i]
+        for (const row of merged) {
+          if (!(m.key in row.volumes)) row.volumes[m.key] = null
+        }
         const env = results[i]
         adsEnvelopes.push(env)
+        let coverage = 0
         for (const raw of dfsItems<{
           keyword?: string
           search_volume?: number | null
@@ -423,16 +339,20 @@ export async function POST(request: Request) {
           const row = rowsByKw.get(raw.keyword)
           if (!row) continue
           row.volumes[m.key] = raw.search_volume ?? null
-          if (m.is_national) {
-            // Prefer Ads CPC for national since it tends to be more accurate
-            // than the Labs imputed value.
-            if (raw.cpc != null) row.cpc = raw.cpc
+          if (raw.search_volume != null) coverage++
+          if (m.is_national && raw.cpc != null) {
+            // Prefer Ads CPC for national since it tends to be more
+            // accurate than the Labs imputed value.
+            row.cpc = raw.cpc
           }
         }
+        console.log(
+          `[keyword-magic] ads volume: market=${m.label} code=${m.location_code} keywords=${adsKeywords.length} with-volume=${coverage}`,
+        )
       }
     }
 
-    // ── Stage 3: search_intent for everything we have (in chunks of 1000).
+    // ── Stage 3: search_intent for everything we have (cap 1000/call).
     let intentEnv: unknown = null
     const intentKeywords = merged.map((r) => r.keyword).slice(0, 1000)
     if (intentKeywords.length > 0) {
@@ -454,19 +374,6 @@ export async function POST(request: Request) {
         // Intent is auxiliary — keep the inline values we got from labs.
         console.warn("[keyword-magic] search_intent failed:", err)
       }
-    }
-
-    // ── Stage 4: clusters via Claude.
-    const { clusters, warning: clusterWarning } = await clusterKeywordsWithClaude(
-      input.seed,
-      merged,
-    )
-    const clusterByKw = new Map<string, string>()
-    for (const c of clusters) {
-      for (const kw of c.keywords) clusterByKw.set(kw.toLowerCase(), c.label)
-    }
-    for (const row of merged) {
-      row.cluster = clusterByKw.get(row.keyword.toLowerCase()) ?? null
     }
 
     // ── Tab counts + stats.
@@ -494,15 +401,19 @@ export async function POST(request: Request) {
       avg_kd: avg(kdsForAvg),
     }
 
+    // One-time visibility check that SERP features actually came through.
+    const withFeatures = merged.filter((r) => r.serp_features.length > 0).length
+    console.log(
+      `[keyword-magic] rows=${merged.length} with-serp-features=${withFeatures}`,
+    )
+
     return {
       data: {
         seed: input.seed,
         markets,
         counts,
         stats,
-        clusters,
         rows: merged,
-        cluster_warning: clusterWarning,
       },
       endpoints: [
         "/v3/dataforseo_labs/google/keyword_suggestions/live",

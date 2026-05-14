@@ -2,7 +2,6 @@
 
 import { useMemo, useState, type FormEvent } from "react"
 import {
-  AlertCircle,
   BookOpen,
   ChevronLeft,
   ChevronRight,
@@ -53,13 +52,6 @@ type MagicRow = {
   competition_level: string | null
   serp_features: string[]
   is_question: boolean
-  cluster: string | null
-}
-
-type MagicCluster = {
-  label: string
-  count: number
-  keywords: string[]
 }
 
 type Data = {
@@ -77,9 +69,7 @@ type Data = {
     avg_volume: number | null
     avg_kd: number | null
   }
-  clusters: MagicCluster[]
   rows: MagicRow[]
-  cluster_warning: string | null
 }
 
 type MatchMode = "all" | "phrase" | "related" | "pasf" | "questions"
@@ -205,7 +195,6 @@ export default function KeywordMagicPage() {
 
   // ── UI state for the results pane ─────────────────────────────────────
   const [activeMarketKey, setActiveMarketKey] = useState<MarketKey>("national")
-  const [activeCluster, setActiveCluster] = useState<string | null>(null)
   const [matchMode, setMatchMode] = useState<MatchMode>("all")
   const [volumeMin, setVolumeMin] = useState<string>("")
   const [kdMax, setKdMax] = useState<string>("")
@@ -245,7 +234,6 @@ export default function KeywordMagicPage() {
     setKdMax("")
     setIntentFilters(new Set())
     setMatchMode("all")
-    setActiveCluster(null)
     setTextFilter("")
     setPage(0)
   }
@@ -257,7 +245,6 @@ export default function KeywordMagicPage() {
       return
     }
     setSelected(new Set())
-    setActiveCluster(null)
     setMatchMode("all")
     setActiveMarketKey("national")
     setPage(0)
@@ -283,16 +270,15 @@ export default function KeywordMagicPage() {
       if (matchMode === "related" && r.source !== "idea") return false
       if (matchMode === "pasf" && r.source !== "related") return false
       if (matchMode === "questions" && !r.is_question) return false
-      if (activeCluster && r.cluster !== activeCluster) return false
       if (intentFilters.size > 0 && (!r.intent || !intentFilters.has(r.intent)))
         return false
-      const v = r.volumes[activeMarketKey] ?? r.volumes.national ?? null
+      const v = r.volumes[activeMarketKey] ?? null
       if (min != null && (v == null || v < min)) return false
       if (max != null && (r.kd == null || r.kd > max)) return false
       if (needle && !r.keyword.toLowerCase().includes(needle)) return false
       return true
     })
-  }, [data, matchMode, activeCluster, intentFilters, volumeMin, kdMax, activeMarketKey, textFilter])
+  }, [data, matchMode, intentFilters, volumeMin, kdMax, activeMarketKey, textFilter])
 
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE))
   const safePage = Math.min(page, totalPages - 1)
@@ -344,7 +330,7 @@ export default function KeywordMagicPage() {
         {
           label: `Volume (${activeMarket.label})`,
           numeric: true,
-          value: (r) => r.volumes[activeMarket.key] ?? r.volumes.national ?? null,
+          value: (r) => r.volumes[activeMarket.key] ?? null,
           width: 16,
         },
         {
@@ -369,11 +355,6 @@ export default function KeywordMagicPage() {
           label: "Source",
           value: (r) => SOURCE_BADGE[r.source],
           width: 10,
-        },
-        {
-          label: "Cluster",
-          value: (r) => r.cluster ?? "",
-          width: 18,
         },
       ],
       "Keyword Magic",
@@ -446,39 +427,8 @@ export default function KeywordMagicPage() {
       <p className="font-sans text-[10.5px] font-bold uppercase tracking-[0.18em] text-ink-3">
         Clusters
       </p>
-      <div className="mt-2.5 flex flex-wrap gap-1.5">
-        <Chip
-          active={activeCluster === null}
-          onClick={() => {
-            setActiveCluster(null)
-            setPage(0)
-          }}
-          count={data.rows.length}
-        >
-          All
-        </Chip>
-        {data.clusters.map((c) => (
-          <Chip
-            key={c.label}
-            active={activeCluster === c.label}
-            onClick={() => {
-              setActiveCluster(c.label === activeCluster ? null : c.label)
-              setPage(0)
-            }}
-            count={c.count}
-          >
-            {c.label}
-          </Chip>
-        ))}
-      </div>
-      {data.cluster_warning ? (
-        <p className="mt-2 font-mono text-[10.5px] text-ink-3">
-          <AlertCircle className="mr-1 inline h-3 w-3" />
-          {data.cluster_warning}
-        </p>
-      ) : null}
 
-      <div className="mt-4 flex flex-wrap gap-0 border-b border-line">
+      <div className="mt-2 flex flex-wrap gap-0 border-b border-line">
         {(
           [
             ["all", "All", data.counts.all],
@@ -576,7 +526,7 @@ export default function KeywordMagicPage() {
             )
           })}
         </span>
-        {volumeMin || kdMax || intentFilters.size > 0 || activeCluster || matchMode !== "all" ? (
+        {volumeMin || kdMax || intentFilters.size > 0 || matchMode !== "all" ? (
           <Button
             type="button"
             variant="ghost"
@@ -592,8 +542,7 @@ export default function KeywordMagicPage() {
       <p className="mt-3 font-mono text-[10.5px] text-ink-3">
         keyword_suggestions (Phrase) · keyword_ideas (Related) ·
         related_keywords (PASF) · merged + deduped · search_intent for Intent ·
-        google_ads/search_volume for city volume scope · Claude opus-4-7 for
-        clusters
+        google_ads/search_volume for per-market volume scope
       </p>
     </div>
   ) : null
@@ -665,8 +614,7 @@ export default function KeywordMagicPage() {
               </tr>
             ) : (
               pagedRows.map((r) => {
-                const v =
-                  r.volumes[activeMarketKey] ?? r.volumes.national ?? null
+                const v = r.volumes[activeMarketKey] ?? null
                 return (
                   <tr key={r.keyword} className="border-b border-line/60">
                     <td className="px-3 py-1.5">
@@ -857,7 +805,7 @@ export default function KeywordMagicPage() {
           <div className="rounded-lg border border-dashed border-line bg-muted/30 px-6 py-10 text-center">
             <p className="font-serif text-[13.5px] text-ink-3">
               Enter a seed keyword above to fetch suggestions, ideas, related
-              terms, intent, and Claude-generated clusters.
+              terms, intent, and per-market volume.
             </p>
           </div>
         ) : (
