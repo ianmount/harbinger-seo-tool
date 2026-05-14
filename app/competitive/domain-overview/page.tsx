@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { LocationAutocomplete } from "@/components/LocationAutocomplete"
-import { MarketPicker } from "@/components/tool/MarketPicker"
 import { ToolShell } from "@/components/tool/ToolShell"
 import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
@@ -95,7 +94,6 @@ const POS_BAND_COLORS = {
 export default function DomainOverviewPage() {
   const tool = findToolByPathname("/competitive/domain-overview")!
   const [target, setTarget] = useState("")
-  const [market, setMarket] = useState<DfsLabsLocation | null>(null)
   const [cities, setCities] = useState<DfsLabsLocation[]>([])
   const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/competitive/domain-overview",
@@ -109,8 +107,6 @@ export default function DomainOverviewPage() {
     }
     await run({
       target: target.trim(),
-      location_code: market?.location_code,
-      location_name: market ? undefined : "United States",
       cities: cities.map((c) => ({
         location_code: c.location_code,
         location_name: c.location_name,
@@ -134,7 +130,7 @@ export default function DomainOverviewPage() {
       meta={meta}
       form={
         <form onSubmit={onSubmit} className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_280px_auto] md:items-end">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_auto] md:items-end">
             <div className="space-y-1.5">
               <Label htmlFor="target">Target domain</Label>
               <Input
@@ -145,7 +141,6 @@ export default function DomainOverviewPage() {
                 disabled={loading}
               />
             </div>
-            <MarketPicker value={market} onChange={setMarket} />
             <Button type="submit" disabled={loading}>
               {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
               Run Overview
@@ -190,8 +185,7 @@ function Results({ data }: { data: Data }) {
     <div className="space-y-3.5">
       <div className="flex items-center justify-between">
         <p className="font-mono text-[11px] text-ink-3">
-          Target: <span className="text-foreground">{data.target}</span> ·
-          Market: <span className="text-foreground">{data.market}</span>
+          Target: <span className="text-foreground">{data.target}</span>
         </p>
         <DownloadRawButton raw={data._raw} target={data.target} />
       </div>

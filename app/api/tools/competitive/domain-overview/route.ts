@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { dfsCost, locationFields, runTool } from "@/lib/tool-route"
+import { dfsCost, runTool } from "@/lib/tool-route"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 300
@@ -11,8 +11,6 @@ const CityInput = z.object({
 
 const Input = z.object({
   target: z.string().min(3),
-  location_code: z.number().int().optional(),
-  location_name: z.string().optional(),
   language_code: z.string().default("en"),
   // Cities are picked from the DFS Labs taxonomy on the client (via
   // LocationAutocomplete), so we get a validated location_code per city and
@@ -21,6 +19,12 @@ const Input = z.object({
   cities: z.array(CityInput).default([]),
   kw_limit: z.number().int().min(1).max(20).default(5),
 })
+
+// Hardcoded US-only. The Labs endpoints (domain_rank_overview, ranked_keywords,
+// historical_rank_overview, competitors_domain) all run against the US country
+// row; per-city granularity for SERP is provided via the cities[] parameter
+// below, which uses /v3/serp/google/organic/live/advanced with city codes.
+const US_LOCATION = { location_name: "United States", language_code: "en" }
 
 type Kpis = {
   organicKeywords: number
@@ -192,52 +196,38 @@ function buildPositionDistribution(
   return { top3, p4_10, p11_20, p21_50, p51_100, total }
 }
 
-// SERP-feature-presence keys living alongside `pos_*`/`is_*` on metrics.organic.
-// Each is a count of keywords for which the domain shows that feature. We
-// count features where presence > 0 to match the spec's "types ranking" KPI.
-const SERP_FEATURE_KEYS = [
-  "featured_snippet",
-  "local_pack",
-  "knowledge_graph",
-  "people_also_ask",
-  "image",
-  "image_pack",
-  "video",
-  "carousel",
-  "shopping",
-  "twitter",
-  "top_stories",
-  "answer_box",
-  "ai_overview",
-  "related_searches",
-  "site_links",
-  "faq",
-  "questions_and_answers",
-  "reviews",
-  "podcasts",
-  "events",
-] as const
-
-function countSerpFeatures(metrics: Record<string, number>): number {
+// DFS structures `metrics` in domain_rank_overview as a dictionary where each
+// SERP feature gets its own keyed sub-object (sibling to `organic` / `paid`),
+// shaped roughly { count, etv, pos_1, pos_2_3, ... }. To count "types ranking",
+// walk every key that isn't `organic` or `paid` and report each one whose
+// sub-object has at least one ranking (count > 0).
+function countSerpFeatures(env: unknown): number {
+  const items = readLabsItems(env)
+  const first = (items[0] ?? {}) as { metrics?: Record<string, unknown> }
+  const metrics = first.metrics ?? {}
   let n = 0
-  for (const k of SERP_FEATURE_KEYS) if ((metrics[k] ?? 0) > 0) n++
+  for (const [key, value] of Object.entries(metrics)) {
+    if (key === "organic" || key === "paid") continue
+    if (!value || typeof value !== "object") continue
+    const count = (value as { count?: unknown }).count
+    if (typeof count === "number" && count > 0) n++
+  }
   return n
 }
 
 export async function POST(request: Request) {
   return runTool<typeof Input, Data>(request, Input, async (input, { dfs }) => {
     const target = stripDomain(input.target)
-    const loc = locationFields(input)
-    const marketLabel =
-      typeof loc.location_name === "string"
-        ? loc.location_name
-        : `location_code=${String(loc.location_code ?? "")}`
 
     // Parallel batch A: everything that doesn't depend on derived state.
     //   - domain_rank_overview   → KPIs (organic kw/traffic), pos buckets,
     //                              is_new/is_lost/is_up/is_down, SERP features
-    //   - historical_rank_overview → monthly etv buckets for the 12mo trend
-    //   - backlinks/summary       → backlinks total + dofollow ratio + ref domains
+    //   - historical_rank_overview → monthly etv buckets for the 12mo trend.
+    //                              Explicit date_from forces a trailing-12
+    //                              window — without it DFS defaults to a
+    //                              year-to-date slice that's <12 months in Q1.
+    //   - backlinks/summary       → backlinks total + dofollow ratio + ref
+    //                              domains + the DFSEO domain rank (0–1000)
     //   - timeseries_new_lost     → new/lost backlinks in last 30d
     //   - competitors_domain      → top 5 competitors by intersections
     //   - ranked_keywords         → top N keywords with ranking URL
@@ -251,11 +241,18 @@ export async function POST(request: Request) {
     ] = await Promise.all([
       dfs(
         "/v3/dataforseo_labs/google/domain_rank_overview/live",
-        [{ target, ...loc }],
+        [{ target, ...US_LOCATION }],
       ),
       dfs(
         "/v3/dataforseo_labs/google/historical_rank_overview/live",
-        [{ target, ...loc }],
+        [
+          {
+            target,
+            ...US_LOCATION,
+            date_from: historicalDateFrom(),
+            date_to: today(),
+          },
+        ],
       ),
       dfs("/v3/backlinks/summary/live", [
         { target, internal_list_limit: 1, backlinks_status_type: "live" },
@@ -265,14 +262,14 @@ export async function POST(request: Request) {
       ]).catch(() => null),
       dfs(
         "/v3/dataforseo_labs/google/competitors_domain/live",
-        [{ target, ...loc, limit: 5 }],
+        [{ target, ...US_LOCATION, limit: 5 }],
       ),
       dfs(
         "/v3/dataforseo_labs/google/ranked_keywords/live",
         [
           {
             target,
-            ...loc,
+            ...US_LOCATION,
             limit: input.kw_limit,
             order_by: ["ranked_serp_element.serp_item.etv,desc"],
           },
@@ -290,16 +287,16 @@ export async function POST(request: Request) {
       isDown: organic["is_down"] ?? 0,
     }
 
-    // dataforseo_labs overview also reports a numeric "rank" (0–1000)
-    // and the metrics.organic.{count,etv} totals.
+    // domain_rank_overview's metrics.organic.{count,etv} are the visibility
+    // totals. The 0–1000 "DFSEO rank" used to live on this same item, but
+    // empirically (and per DFS docs) the canonical rank lives on the
+    // backlinks/summary result. Read it from summaryEnv below.
     const overviewItems = readLabsItems(overviewEnv) as {
       metrics?: { organic?: { count?: number; etv?: number } }
-      rank?: number
     }[]
     const overviewItem = overviewItems[0] ?? {}
     const organicKeywords = overviewItem.metrics?.organic?.count ?? 0
     const organicTraffic = Math.round(overviewItem.metrics?.organic?.etv ?? 0)
-    const rank = overviewItem.rank ?? 0
 
     // ── Backlinks summary ────────────────────────────────────────────────
     const summaryTaskResult = (
@@ -309,6 +306,7 @@ export async function POST(request: Request) {
           referring_main_domains?: number
           referring_domains?: number
           backlinks_dofollow?: number
+          rank?: number
         } | null)[] | null }[]
       }
     ).tasks?.[0]?.result?.[0] ?? {}
@@ -321,6 +319,7 @@ export async function POST(request: Request) {
       totalBacklinks > 0 && summaryTaskResult.backlinks_dofollow != null
         ? (summaryTaskResult.backlinks_dofollow / totalBacklinks) * 100
         : null
+    const rank = summaryTaskResult.rank ?? 0
 
     // ── Backlinks 30-day new/lost ────────────────────────────────────────
     const { new30d, lost30d } = sumBacklinksTimeseries(timeseriesEnv)
@@ -341,7 +340,7 @@ export async function POST(request: Request) {
       backlinks: totalBacklinks,
       referringDomains,
       rank,
-      serpFeatures: countSerpFeatures(organic),
+      serpFeatures: countSerpFeatures(overviewEnv),
     }
 
     const backlinkProfile: BacklinkProfile = {
@@ -423,7 +422,7 @@ export async function POST(request: Request) {
     const rawEnvelopes: RawEnvelopes = {
       generatedAt: new Date().toISOString(),
       target,
-      market: marketLabel,
+      market: US_LOCATION.location_name,
       envelopes: {
         domain_rank_overview: overviewEnv,
         historical_rank_overview: historicalEnv,
@@ -438,7 +437,7 @@ export async function POST(request: Request) {
     return {
       data: {
         target,
-        market: marketLabel,
+        market: US_LOCATION.location_name,
         cities,
         kpis,
         positionDistribution,
@@ -481,6 +480,21 @@ function backlinksTimeseriesDateFrom(): string {
   // overlap absorbs timezone / processing lag without pulling unrelated data.
   const d = new Date()
   d.setUTCDate(d.getUTCDate() - 35)
+  return d.toISOString().slice(0, 10)
+}
+
+function today(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
+// 13 months back so the trailing-12 slice in buildTrafficTrend always has
+// 12 complete months even when the current month is partially elapsed.
+// Without this, DFS's historical_rank_overview default is year-to-date,
+// which collapses the chart to 1–5 months in Q1.
+function historicalDateFrom(): string {
+  const d = new Date()
+  d.setUTCMonth(d.getUTCMonth() - 13)
+  d.setUTCDate(1)
   return d.toISOString().slice(0, 10)
 }
 
@@ -536,10 +550,15 @@ function buildTrafficTrend(env: unknown): TrafficPoint[] {
       return (a.month ?? 0) - (b.month ?? 0)
     })
   const recent = sorted.slice(-12)
-  return recent.map((i) => ({
-    label: MONTH_LABELS[(i.month ?? 1) - 1] ?? String(i.month ?? ""),
-    etv: Math.round(i.metrics?.organic?.etv ?? 0),
-  }))
+  return recent.map((i) => {
+    const monthName = MONTH_LABELS[(i.month ?? 1) - 1] ?? String(i.month ?? "")
+    const yearSuffix =
+      i.year != null ? ` '${String(i.year).slice(-2)}` : ""
+    return {
+      label: `${monthName}${yearSuffix}`,
+      etv: Math.round(i.metrics?.organic?.etv ?? 0),
+    }
+  })
 }
 
 function parseTopKeywords(env: unknown, limit: number): TopKeyword[] {
