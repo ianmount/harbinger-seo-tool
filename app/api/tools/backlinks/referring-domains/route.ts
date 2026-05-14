@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { runTool } from "@/lib/tool-route"
+import { dfsCost, dfsItems, runTool } from "@/lib/tool-route"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
@@ -9,7 +9,7 @@ const Input = z.object({
   limit: z.number().int().min(1).max(1000).default(200),
 })
 
-type Row = {
+type DomainRow = {
   domain: string
   rank: number | null
   backlinks: number | null
@@ -18,9 +18,18 @@ type Row = {
   dofollow: number | null
 }
 
+type NetworkRow = {
+  network: string
+  network_type: string | null
+  referring_domains: number | null
+  backlinks: number | null
+}
+
+type Data = { domains: DomainRow[]; networks: NetworkRow[] }
+
 export async function POST(request: Request) {
-  return runTool<typeof Input, Row>(request, Input, async (input, { dfs }) => {
-    const body = [
+  return runTool<typeof Input, Data>(request, Input, async (input, { dfs }) => {
+    const domainsBody = [
       {
         target: input.target,
         limit: input.limit,
@@ -28,35 +37,55 @@ export async function POST(request: Request) {
         order_by: ["rank,desc"],
       },
     ]
-    const env = (await dfs("/v3/backlinks/referring_domains/live", body)) as {
-      cost?: number
-      tasks?: { result?: { items?: unknown[] }[] }[]
-    }
-    const items =
-      env.tasks?.flatMap((t) => t.result?.flatMap((r) => r.items ?? []) ?? []) ??
-      []
-    const rows: Row[] = items.map((raw) => {
-      const it = raw as {
-        domain?: string
-        rank?: number | null
-        backlinks?: number | null
-        first_seen?: string | null
-        lost_date?: string | null
-        dofollow?: number | null
-      }
-      return {
-        domain: it.domain ?? "",
-        rank: it.rank ?? null,
-        backlinks: it.backlinks ?? null,
-        first_seen: it.first_seen ?? null,
-        lost_date: it.lost_date ?? null,
-        dofollow: it.dofollow ?? null,
-      }
-    })
+    const networksBody = [
+      {
+        target: input.target,
+        limit: input.limit,
+        network_address_type: "ip",
+        backlinks_status_type: "live",
+      },
+    ]
+
+    const [domainsEnv, networksEnv] = await Promise.all([
+      dfs("/v3/backlinks/referring_domains/live", domainsBody),
+      dfs("/v3/backlinks/referring_networks/live", networksBody),
+    ])
+
+    const domains: DomainRow[] = dfsItems<{
+      domain?: string
+      rank?: number | null
+      backlinks?: number | null
+      first_seen?: string | null
+      lost_date?: string | null
+      dofollow?: number | null
+    }>(domainsEnv).map((it) => ({
+      domain: it.domain ?? "",
+      rank: it.rank ?? null,
+      backlinks: it.backlinks ?? null,
+      first_seen: it.first_seen ?? null,
+      lost_date: it.lost_date ?? null,
+      dofollow: it.dofollow ?? null,
+    }))
+
+    const networks: NetworkRow[] = dfsItems<{
+      network_address?: string
+      network_address_type?: string | null
+      referring_domains?: number | null
+      backlinks?: number | null
+    }>(networksEnv).map((it) => ({
+      network: it.network_address ?? "",
+      network_type: it.network_address_type ?? null,
+      referring_domains: it.referring_domains ?? null,
+      backlinks: it.backlinks ?? null,
+    }))
+
     return {
-      rows,
-      endpoints: ["/v3/backlinks/referring_domains/live"],
-      costUsd: env.cost,
+      data: { domains, networks },
+      endpoints: [
+        "/v3/backlinks/referring_domains/live",
+        "/v3/backlinks/referring_networks/live",
+      ],
+      costUsd: dfsCost(domainsEnv, networksEnv),
     }
   })
 }

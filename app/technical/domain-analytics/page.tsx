@@ -10,17 +10,25 @@ import {
   type ResultColumn,
 } from "@/components/tool/ResultsTable"
 import { ToolShell } from "@/components/tool/ToolShell"
-import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
+import {
+  ToolError,
+  ToolSection,
+  useToolRun,
+} from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 
-type Row = {
+type TechRow = {
   category: string
   technology: string
   group: string | null
   first_detected: string | null
 }
 
-const COLUMNS: ResultColumn<Row>[] = [
+type WhoisRow = { field: string; value: string }
+
+type Data = { technologies: TechRow[]; whois: WhoisRow[] }
+
+const TECH_COLS: ResultColumn<TechRow>[] = [
   { key: "category", label: "Category", accessor: (r) => r.category },
   { key: "technology", label: "Technology", accessor: (r) => r.technology },
   {
@@ -33,15 +41,19 @@ const COLUMNS: ResultColumn<Row>[] = [
     key: "first_detected",
     label: "First Detected",
     accessor: (r) => r.first_detected,
-    format: (r) =>
-      r.first_detected ? r.first_detected.slice(0, 10) : "—",
+    format: (r) => (r.first_detected ? r.first_detected.slice(0, 10) : "—"),
   },
+]
+
+const WHOIS_COLS: ResultColumn<WhoisRow>[] = [
+  { key: "field", label: "Field", accessor: (r) => r.field },
+  { key: "value", label: "Value", accessor: (r) => r.value },
 ]
 
 export default function DomainAnalyticsPage() {
   const tool = findToolByPathname("/technical/domain-analytics")!
   const [target, setTarget] = useState("")
-  const { rows, loading, error, run, setError } = useToolRun<Row>(
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/technical/domain-analytics",
   )
 
@@ -60,6 +72,7 @@ export default function DomainAnalyticsPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
         <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
           <div className="grow space-y-1.5 min-w-[260px]">
@@ -74,7 +87,7 @@ export default function DomainAnalyticsPage() {
           </div>
           <Button type="submit" disabled={loading}>
             {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-            Detect Technologies
+            Pull Domain Analytics
           </Button>
         </form>
       }
@@ -82,7 +95,22 @@ export default function DomainAnalyticsPage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable rows={rows} columns={COLUMNS} filename="domain-analytics" />
+          <>
+            <ToolSection title="Detected Technologies">
+              <ResultsTable
+                rows={data?.technologies ?? []}
+                columns={TECH_COLS}
+                filename="technologies"
+              />
+            </ToolSection>
+            <ToolSection title="WHOIS Overview">
+              <ResultsTable
+                rows={data?.whois ?? []}
+                columns={WHOIS_COLS}
+                filename="whois"
+              />
+            </ToolSection>
+          </>
         )
       }
     />

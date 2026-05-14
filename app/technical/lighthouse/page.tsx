@@ -25,6 +25,7 @@ type Row = {
   score: number | null
   display_value: string | null
 }
+type Data = { rows: Row[] }
 
 const COLUMNS: ResultColumn<Row>[] = [
   { key: "category", label: "Metric", accessor: (r) => r.category },
@@ -48,7 +49,7 @@ export default function LighthousePage() {
   const tool = findToolByPathname("/technical/lighthouse")!
   const [url, setUrl] = useState("")
   const [device, setDevice] = useState<"desktop" | "mobile">("mobile")
-  const { rows, loading, error, run, setError } = useToolRun<Row>(
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/technical/lighthouse",
   )
 
@@ -67,6 +68,7 @@ export default function LighthousePage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
         <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
           <div className="grow space-y-1.5 min-w-[260px]">
@@ -105,7 +107,7 @@ export default function LighthousePage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable rows={rows} columns={COLUMNS} filename="lighthouse" />
+          <ResultsTable rows={data?.rows ?? []} columns={COLUMNS} filename="lighthouse" />
         )
       }
     />

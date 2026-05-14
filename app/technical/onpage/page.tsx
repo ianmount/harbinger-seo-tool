@@ -10,23 +10,61 @@ import {
   type ResultColumn,
 } from "@/components/tool/ResultsTable"
 import { ToolShell } from "@/components/tool/ToolShell"
-import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
+import {
+  ToolError,
+  ToolSection,
+  useToolRun,
+} from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 
-type Row = {
+type PageRow = {
   url: string
   status_code: number | null
   title: string | null
   meta_description_length: number | null
   word_count: number | null
   internal_links: number | null
-  external_links: number | null
   has_h1: boolean
 }
 
-const COLUMNS: ResultColumn<Row>[] = [
+type ResourceRow = {
+  url: string
+  resource_type: string | null
+  status_code: number | null
+  size: number | null
+  fetch_time_ms: number | null
+}
+
+type LinkRow = {
+  source: string
+  target: string
+  link_type: string | null
+  direction: string | null
+  status_code: number | null
+}
+
+type DuplicateRow = {
+  field: string
+  value: string
+  affected_pages: number
+  sample_url: string | null
+}
+
+type Data = {
+  pages: PageRow[]
+  resources: ResourceRow[]
+  links: LinkRow[]
+  duplicates: DuplicateRow[]
+}
+
+const PAGE_COLS: ResultColumn<PageRow>[] = [
   { key: "url", label: "URL", accessor: (r) => r.url },
-  { key: "status_code", label: "Status", numeric: true, accessor: (r) => r.status_code },
+  {
+    key: "status_code",
+    label: "Status",
+    numeric: true,
+    accessor: (r) => r.status_code,
+  },
   {
     key: "title",
     label: "Title",
@@ -35,7 +73,7 @@ const COLUMNS: ResultColumn<Row>[] = [
   },
   {
     key: "meta_description_length",
-    label: "Meta Desc Length",
+    label: "Meta Desc Len",
     numeric: true,
     accessor: (r) => r.meta_description_length,
   },
@@ -51,16 +89,75 @@ const COLUMNS: ResultColumn<Row>[] = [
     numeric: true,
     accessor: (r) => r.internal_links,
   },
+  { key: "has_h1", label: "H1", accessor: (r) => (r.has_h1 ? "yes" : "no") },
+]
+
+const RESOURCE_COLS: ResultColumn<ResourceRow>[] = [
+  { key: "url", label: "Resource URL", accessor: (r) => r.url },
   {
-    key: "external_links",
-    label: "External Links",
-    numeric: true,
-    accessor: (r) => r.external_links,
+    key: "resource_type",
+    label: "Type",
+    accessor: (r) => r.resource_type,
+    format: (r) => r.resource_type ?? "—",
   },
   {
-    key: "has_h1",
-    label: "H1",
-    accessor: (r) => (r.has_h1 ? "yes" : "no"),
+    key: "status_code",
+    label: "Status",
+    numeric: true,
+    accessor: (r) => r.status_code,
+  },
+  {
+    key: "size",
+    label: "Size (bytes)",
+    numeric: true,
+    accessor: (r) => r.size,
+    format: (r) => (r.size == null ? "—" : r.size.toLocaleString()),
+  },
+  {
+    key: "fetch_time_ms",
+    label: "Fetch (ms)",
+    numeric: true,
+    accessor: (r) => r.fetch_time_ms,
+  },
+]
+
+const LINK_COLS: ResultColumn<LinkRow>[] = [
+  { key: "source", label: "Source", accessor: (r) => r.source },
+  { key: "target", label: "Target", accessor: (r) => r.target },
+  {
+    key: "link_type",
+    label: "Type",
+    accessor: (r) => r.link_type,
+    format: (r) => r.link_type ?? "—",
+  },
+  {
+    key: "direction",
+    label: "Direction",
+    accessor: (r) => r.direction,
+    format: (r) => r.direction ?? "—",
+  },
+  {
+    key: "status_code",
+    label: "Status",
+    numeric: true,
+    accessor: (r) => r.status_code,
+  },
+]
+
+const DUP_COLS: ResultColumn<DuplicateRow>[] = [
+  { key: "field", label: "Tag", accessor: (r) => r.field },
+  { key: "value", label: "Duplicated Value", accessor: (r) => r.value },
+  {
+    key: "affected_pages",
+    label: "Affected",
+    numeric: true,
+    accessor: (r) => r.affected_pages,
+  },
+  {
+    key: "sample_url",
+    label: "Sample URL",
+    accessor: (r) => r.sample_url,
+    format: (r) => r.sample_url ?? "—",
   },
 ]
 
@@ -68,7 +165,7 @@ export default function OnPagePage() {
   const tool = findToolByPathname("/technical/onpage")!
   const [target, setTarget] = useState("")
   const [maxPages, setMaxPages] = useState("50")
-  const { rows, loading, error, run, setError } = useToolRun<Row>(
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/technical/onpage",
   )
 
@@ -92,6 +189,7 @@ export default function OnPagePage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
         <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
           <div className="grow space-y-1.5 min-w-[260px]">
@@ -126,7 +224,39 @@ export default function OnPagePage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable rows={rows} columns={COLUMNS} filename="onpage" />
+          <>
+            <ToolSection title="Pages">
+              <ResultsTable
+                rows={data?.pages ?? []}
+                columns={PAGE_COLS}
+                filename="onpage-pages"
+              />
+            </ToolSection>
+            <ToolSection title="Resources">
+              <ResultsTable
+                rows={data?.resources ?? []}
+                columns={RESOURCE_COLS}
+                filename="onpage-resources"
+              />
+            </ToolSection>
+            <ToolSection title="Internal Links">
+              <ResultsTable
+                rows={data?.links ?? []}
+                columns={LINK_COLS}
+                filename="onpage-links"
+              />
+            </ToolSection>
+            <ToolSection
+              title="Duplicate Title / Description Tags"
+              description="Pages sharing the same title or meta description — usually a thin-content or templating bug."
+            >
+              <ResultsTable
+                rows={data?.duplicates ?? []}
+                columns={DUP_COLS}
+                filename="onpage-duplicate-tags"
+              />
+            </ToolSection>
+          </>
         )
       }
     />

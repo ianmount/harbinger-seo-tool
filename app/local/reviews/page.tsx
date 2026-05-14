@@ -10,16 +10,18 @@ import {
   type ResultColumn,
 } from "@/components/tool/ResultsTable"
 import { ToolShell } from "@/components/tool/ToolShell"
-import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
+import {
+  ToolError,
+  ToolSection,
+  useToolRun,
+} from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 
-type Row = {
-  bucket: string
-  value: number | null
-  category: string
-}
+type StatRow = { category: string; bucket: string; value: number | null }
+type TrendRow = { date: string; phrase: string; value: number | null }
+type Data = { stats: StatRow[]; trends: TrendRow[] }
 
-const COLUMNS: ResultColumn<Row>[] = [
+const STAT_COLS: ResultColumn<StatRow>[] = [
   { key: "category", label: "Group", accessor: (r) => r.category },
   { key: "bucket", label: "Bucket", accessor: (r) => r.bucket },
   {
@@ -31,10 +33,21 @@ const COLUMNS: ResultColumn<Row>[] = [
   },
 ]
 
+const TREND_COLS: ResultColumn<TrendRow>[] = [
+  { key: "date", label: "Date", accessor: (r) => r.date },
+  { key: "phrase", label: "Phrase", accessor: (r) => r.phrase },
+  {
+    key: "value",
+    label: "Citations",
+    numeric: true,
+    accessor: (r) => r.value,
+  },
+]
+
 export default function ReviewsPage() {
   const tool = findToolByPathname("/local/reviews")!
   const [keyword, setKeyword] = useState("")
-  const { rows, loading, error, run, setError } = useToolRun<Row>(
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/local/reviews",
   )
 
@@ -53,6 +66,7 @@ export default function ReviewsPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
         <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
           <div className="grow space-y-1.5 min-w-[260px]">
@@ -75,7 +89,22 @@ export default function ReviewsPage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable rows={rows} columns={COLUMNS} filename="review-sentiment" />
+          <>
+            <ToolSection title="Sentiment + Rating Distribution">
+              <ResultsTable
+                rows={data?.stats ?? []}
+                columns={STAT_COLS}
+                filename="review-stats"
+              />
+            </ToolSection>
+            <ToolSection title="Phrase Trends">
+              <ResultsTable
+                rows={data?.trends ?? []}
+                columns={TREND_COLS}
+                filename="review-phrase-trends"
+              />
+            </ToolSection>
+          </>
         )
       }
     />

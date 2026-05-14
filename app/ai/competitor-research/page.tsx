@@ -10,17 +10,29 @@ import {
   type ResultColumn,
 } from "@/components/tool/ResultsTable"
 import { ToolShell } from "@/components/tool/ToolShell"
-import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
+import {
+  ToolError,
+  ToolSection,
+  useToolRun,
+} from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 
-type Row = {
+type CompareRow = {
   keyword: string
   mentions: number | null
   share_of_voice: number | null
   avg_position: number | null
 }
 
-const COLUMNS: ResultColumn<Row>[] = [
+type PerBrandRow = {
+  keyword: string
+  metric: string
+  value: number | string | null
+}
+
+type Data = { comparison: CompareRow[]; perBrand: PerBrandRow[] }
+
+const COMPARE_COLS: ResultColumn<CompareRow>[] = [
   { key: "keyword", label: "Brand / Keyword", accessor: (r) => r.keyword },
   {
     key: "mentions",
@@ -47,10 +59,27 @@ const COLUMNS: ResultColumn<Row>[] = [
   },
 ]
 
+const PER_BRAND_COLS: ResultColumn<PerBrandRow>[] = [
+  { key: "keyword", label: "Brand", accessor: (r) => r.keyword },
+  { key: "metric", label: "Metric", accessor: (r) => r.metric },
+  {
+    key: "value",
+    label: "Value",
+    numeric: true,
+    accessor: (r) => r.value,
+    format: (r) =>
+      r.value == null
+        ? "—"
+        : typeof r.value === "number"
+          ? r.value.toLocaleString()
+          : r.value,
+  },
+]
+
 export default function CompetitorResearchPage() {
   const tool = findToolByPathname("/ai/competitor-research")!
   const [text, setText] = useState("")
-  const { rows, loading, error, run, setError } = useToolRun<Row>(
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/ai/competitor-research",
   )
 
@@ -74,6 +103,7 @@ export default function CompetitorResearchPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
         <form onSubmit={onSubmit} className="space-y-3">
           <div className="space-y-1.5">
@@ -97,7 +127,22 @@ export default function CompetitorResearchPage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable rows={rows} columns={COLUMNS} filename="ai-competitor-research" />
+          <>
+            <ToolSection title="Cross-Brand Comparison">
+              <ResultsTable
+                rows={data?.comparison ?? []}
+                columns={COMPARE_COLS}
+                filename="ai-competitor-comparison"
+              />
+            </ToolSection>
+            <ToolSection title="Per-Brand Aggregated Metrics">
+              <ResultsTable
+                rows={data?.perBrand ?? []}
+                columns={PER_BRAND_COLS}
+                filename="ai-competitor-per-brand"
+              />
+            </ToolSection>
+          </>
         )
       }
     />

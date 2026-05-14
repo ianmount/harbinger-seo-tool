@@ -10,10 +10,14 @@ import {
   type ResultColumn,
 } from "@/components/tool/ResultsTable"
 import { ToolShell } from "@/components/tool/ToolShell"
-import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
+import {
+  ToolError,
+  ToolSection,
+  useToolRun,
+} from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 
-type Row = {
+type CitationRow = {
   url: string
   title: string | null
   date: string | null
@@ -22,7 +26,22 @@ type Row = {
   language: string | null
 }
 
-const COLUMNS: ResultColumn<Row>[] = [
+type StatRow = { group: string; metric: string; value: number | string | null }
+
+type TrendRow = {
+  date: string
+  label: string
+  value: number | null
+  kind: "phrase" | "category"
+}
+
+type Data = {
+  citations: CitationRow[]
+  stats: StatRow[]
+  trends: TrendRow[]
+}
+
+const CITATION_COLS: ResultColumn<CitationRow>[] = [
   { key: "url", label: "URL", accessor: (r) => r.url },
   {
     key: "title",
@@ -58,10 +77,39 @@ const COLUMNS: ResultColumn<Row>[] = [
   },
 ]
 
+const STAT_COLS: ResultColumn<StatRow>[] = [
+  { key: "group", label: "Group", accessor: (r) => r.group },
+  { key: "metric", label: "Metric", accessor: (r) => r.metric },
+  {
+    key: "value",
+    label: "Value",
+    numeric: true,
+    accessor: (r) => r.value,
+    format: (r) =>
+      r.value == null
+        ? "—"
+        : typeof r.value === "number"
+          ? r.value.toLocaleString()
+          : r.value,
+  },
+]
+
+const TREND_COLS: ResultColumn<TrendRow>[] = [
+  { key: "kind", label: "Kind", accessor: (r) => r.kind },
+  { key: "date", label: "Date", accessor: (r) => r.date },
+  { key: "label", label: "Phrase / Category", accessor: (r) => r.label },
+  {
+    key: "value",
+    label: "Citations",
+    numeric: true,
+    accessor: (r) => r.value,
+  },
+]
+
 export default function ContentAnalysisPage() {
   const tool = findToolByPathname("/technical/content-analysis")!
   const [keyword, setKeyword] = useState("")
-  const { rows, loading, error, run, setError } = useToolRun<Row>(
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/technical/content-analysis",
   )
 
@@ -80,6 +128,7 @@ export default function ContentAnalysisPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
         <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
           <div className="grow space-y-1.5 min-w-[260px]">
@@ -102,7 +151,29 @@ export default function ContentAnalysisPage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable rows={rows} columns={COLUMNS} filename="content-analysis" />
+          <>
+            <ToolSection title="Citations">
+              <ResultsTable
+                rows={data?.citations ?? []}
+                columns={CITATION_COLS}
+                filename="content-citations"
+              />
+            </ToolSection>
+            <ToolSection title="Summary Stats">
+              <ResultsTable
+                rows={data?.stats ?? []}
+                columns={STAT_COLS}
+                filename="content-stats"
+              />
+            </ToolSection>
+            <ToolSection title="Phrase + Category Trends">
+              <ResultsTable
+                rows={data?.trends ?? []}
+                columns={TREND_COLS}
+                filename="content-trends"
+              />
+            </ToolSection>
+          </>
         )
       }
     />

@@ -10,9 +10,14 @@ import {
   type ResultColumn,
 } from "@/components/tool/ResultsTable"
 import { ToolShell } from "@/components/tool/ToolShell"
+import {
+  ToolError,
+  ToolSection,
+  useToolRun,
+} from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 
-type Row = {
+type DomainRow = {
   domain: string
   rank: number | null
   backlinks: number | null
@@ -21,7 +26,16 @@ type Row = {
   dofollow: number | null
 }
 
-const COLUMNS: ResultColumn<Row>[] = [
+type NetworkRow = {
+  network: string
+  network_type: string | null
+  referring_domains: number | null
+  backlinks: number | null
+}
+
+type Data = { domains: DomainRow[]; networks: NetworkRow[] }
+
+const DOMAIN_COLS: ResultColumn<DomainRow>[] = [
   { key: "domain", label: "Referring Domain", accessor: (r) => r.domain },
   { key: "rank", label: "Domain Rank", numeric: true, accessor: (r) => r.rank },
   {
@@ -51,35 +65,43 @@ const COLUMNS: ResultColumn<Row>[] = [
   },
 ]
 
+const NETWORK_COLS: ResultColumn<NetworkRow>[] = [
+  { key: "network", label: "Network (IP/Subnet)", accessor: (r) => r.network },
+  {
+    key: "network_type",
+    label: "Type",
+    accessor: (r) => r.network_type,
+    format: (r) => r.network_type ?? "—",
+  },
+  {
+    key: "referring_domains",
+    label: "Ref. Domains",
+    numeric: true,
+    accessor: (r) => r.referring_domains,
+  },
+  {
+    key: "backlinks",
+    label: "Backlinks",
+    numeric: true,
+    accessor: (r) => r.backlinks,
+    format: (r) => (r.backlinks == null ? "—" : r.backlinks.toLocaleString()),
+  },
+]
+
 export default function ReferringDomainsPage() {
   const tool = findToolByPathname("/backlinks/referring-domains")!
   const [target, setTarget] = useState("")
-  const [rows, setRows] = useState<Row[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
+    "/api/tools/backlinks/referring-domains",
+  )
 
-  async function run(e: FormEvent) {
+  async function onSubmit(e: FormEvent) {
     e.preventDefault()
-    setError(null)
     if (!target.trim()) {
       setError("Enter a domain or URL.")
       return
     }
-    setLoading(true)
-    try {
-      const res = await fetch("/api/tools/backlinks/referring-domains", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: target.trim() }),
-      })
-      const body = (await res.json()) as { rows?: Row[]; error?: string }
-      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`)
-      setRows(body.rows ?? [])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Request failed")
-    } finally {
-      setLoading(false)
-    }
+    await run({ target: target.trim() })
   }
 
   return (
@@ -88,8 +110,9 @@ export default function ReferringDomainsPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
-        <form onSubmit={run} className="flex flex-wrap items-end gap-3">
+        <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
           <div className="grow space-y-1.5 min-w-[260px]">
             <Label htmlFor="target">Target domain or URL</Label>
             <Input
@@ -108,15 +131,27 @@ export default function ReferringDomainsPage() {
       }
       results={
         error ? (
-          <div className="rounded-lg border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-            {error}
-          </div>
+          <ToolError message={error} />
         ) : (
-          <ResultsTable
-            rows={rows}
-            columns={COLUMNS}
-            filename="referring-domains"
-          />
+          <>
+            <ToolSection title="Referring Domains">
+              <ResultsTable
+                rows={data?.domains ?? []}
+                columns={DOMAIN_COLS}
+                filename="referring-domains"
+              />
+            </ToolSection>
+            <ToolSection
+              title="Referring Networks"
+              description="IPs / subnets that host multiple referring domains — useful for PBN detection."
+            >
+              <ResultsTable
+                rows={data?.networks ?? []}
+                columns={NETWORK_COLS}
+                filename="referring-networks"
+              />
+            </ToolSection>
+          </>
         )
       }
     />

@@ -7,7 +7,12 @@ import { DataForSEOError, dfsRequest } from "@/lib/dataforseo"
  * Thin helper used by every `app/api/tools/<cat>/<tool>/route.ts`. Parses
  * the request body with the supplied Zod schema, runs the DFSEO call(s),
  * and standardises error responses so the client-side tool pages can
- * always expect `{ rows, meta }` or `{ error }`.
+ * always expect `{ data, meta }` or `{ error }`.
+ *
+ * `data` is whatever shape the tool needs — for simple single-table
+ * tools that's `{ rows: Row[] }`; multi-section tools return whatever
+ * keyed shape they want and the page renders one `<ResultsTable>` per
+ * section.
  */
 
 export type ToolMeta = {
@@ -19,18 +24,22 @@ export type ToolMeta = {
   durationMs: number
 }
 
-export type ToolSuccess<Row> = {
-  rows: Row[]
+export type ToolSuccess<TData> = {
+  data: TData
   meta: ToolMeta
 }
 
-export async function runTool<Schema extends ZodTypeAny, Row>(
+export async function runTool<Schema extends ZodTypeAny, TData>(
   request: Request,
   schema: Schema,
   handler: (
     input: z.infer<Schema>,
     ctx: { dfs: typeof dfsRequest },
-  ) => Promise<{ rows: Row[]; endpoints: readonly string[]; costUsd?: number }>,
+  ) => Promise<{
+    data: TData
+    endpoints: readonly string[]
+    costUsd?: number
+  }>,
 ): Promise<NextResponse> {
   const startedAt = Date.now()
 
@@ -58,13 +67,13 @@ export async function runTool<Schema extends ZodTypeAny, Row>(
   try {
     const result = await handler(parsed.data, { dfs: dfsRequest })
     return NextResponse.json({
-      rows: result.rows,
+      data: result.data,
       meta: {
         endpoints: result.endpoints,
         costUsd: result.costUsd,
         durationMs: Date.now() - startedAt,
       },
-    } satisfies ToolSuccess<Row>)
+    } satisfies ToolSuccess<TData>)
   } catch (err) {
     if (err instanceof DataForSEOError) {
       return NextResponse.json(
@@ -81,57 +90,53 @@ export async function runTool<Schema extends ZodTypeAny, Row>(
 }
 
 /**
- * DFSEO envelope shape we depend on, validated leniently. Pass a row
- * schema to validate just the items the tool cares about.
+ * Flatten a DFSEO envelope into the items array embedded at
+ * `tasks[*].result[*].items`. Lenient — silently skips tasks whose
+ * `result` is null (DFSEO returns null when an individual task within a
+ * batch fails, even if the batch itself succeeded).
  */
-export function extractResults<T>(
-  envelope: unknown,
-  rowSchema: z.ZodType<T>,
-): { rows: T[]; cost: number } {
-  const env = z
-    .object({
-      cost: z.number().optional(),
-      tasks: z
-        .array(
-          z
-            .object({
-              status_code: z.number(),
-              status_message: z.string(),
-              cost: z.number().optional(),
-              result: z.array(z.unknown()).nullable().optional(),
-            })
-            .passthrough(),
-        )
-        .optional()
-        .default([]),
-    })
-    .passthrough()
-    .parse(envelope)
-
-  const cost = env.cost ?? 0
-  const rows: T[] = []
-  for (const task of env.tasks) {
-    if (task.status_code >= 40000) {
-      throw new DataForSEOError(
-        `DFSEO task failed: ${task.status_message}`,
-        { dfsStatus: task.status_code },
-      )
-    }
-    if (!task.result) continue
-    for (const item of task.result) {
-      // Each task.result is typically a single object whose `items` array
-      // holds the rows. Flatten conservatively: handle both shapes.
-      if (item && typeof item === "object" && "items" in item) {
-        const inner = (item as { items?: unknown[] }).items ?? []
-        for (const row of inner) {
-          const parsed = rowSchema.safeParse(row)
-          if (parsed.success) rows.push(parsed.data)
-        }
-      } else {
-        const parsed = rowSchema.safeParse(item)
-        if (parsed.success) rows.push(parsed.data)
+export function dfsItems<T = unknown>(envelope: unknown): T[] {
+  const env = envelope as {
+    tasks?: { result?: { items?: unknown[] }[] | null }[]
+  }
+  const out: T[] = []
+  for (const task of env.tasks ?? []) {
+    for (const r of task.result ?? []) {
+      for (const item of r.items ?? []) {
+        out.push(item as T)
       }
     }
   }
-  return { rows, cost }
+  return out
+}
+
+/**
+ * Sum the per-call `cost` fields across one or more DFSEO envelopes.
+ * Use after `Promise.all([...])` to report total run cost in `costUsd`.
+ */
+export function dfsCost(...envelopes: unknown[]): number {
+  let total = 0
+  for (const env of envelopes) {
+    const c = (env as { cost?: number } | null)?.cost
+    if (typeof c === "number") total += c
+  }
+  return total
+}
+
+/** Helper for the common DFSEO Labs location + language field pair. */
+export function locationFields(input: {
+  location_code?: number
+  location_name?: string
+  language_code?: string
+}): Record<string, string | number> {
+  if (input.location_code) {
+    return {
+      location_code: input.location_code,
+      language_code: input.language_code ?? "en",
+    }
+  }
+  return {
+    location_name: input.location_name ?? "United States",
+    language_name: "English",
+  }
 }

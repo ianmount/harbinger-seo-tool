@@ -11,27 +11,60 @@ import {
   type ResultColumn,
 } from "@/components/tool/ResultsTable"
 import { ToolShell } from "@/components/tool/ToolShell"
+import {
+  ToolError,
+  ToolSection,
+  useToolRun,
+} from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 import type { DfsLabsLocation } from "@/lib/types"
 
-type Row = {
+type KeywordRow = {
   keyword: string
-  search_volume: number | null
+  labs_volume: number | null
+  ads_volume: number | null
   cpc: number | null
   competition_level: string | null
-  competition: number | null
   keyword_difficulty: number | null
   main_intent: string | null
+  serp_top_domain: string | null
 }
 
-const COLUMNS: ResultColumn<Row>[] = [
+type SerpRow = {
+  keyword: string
+  position: number
+  domain: string
+  url: string
+  title: string | null
+}
+
+type MonthlyRow = {
+  keyword: string
+  date: string
+  search_volume: number | null
+}
+
+type Data = {
+  keywords: KeywordRow[]
+  serp: SerpRow[]
+  monthly: MonthlyRow[]
+}
+
+const KEYWORD_COLS: ResultColumn<KeywordRow>[] = [
   { key: "keyword", label: "Keyword", accessor: (r) => r.keyword },
   {
-    key: "search_volume",
-    label: "Volume",
+    key: "labs_volume",
+    label: "Labs Vol.",
     numeric: true,
-    accessor: (r) => r.search_volume,
-    format: (r) => (r.search_volume == null ? "—" : r.search_volume.toLocaleString()),
+    accessor: (r) => r.labs_volume,
+    format: (r) => (r.labs_volume == null ? "—" : r.labs_volume.toLocaleString()),
+  },
+  {
+    key: "ads_volume",
+    label: "Ads City Vol.",
+    numeric: true,
+    accessor: (r) => r.ads_volume,
+    format: (r) => (r.ads_volume == null ? "—" : r.ads_volume.toLocaleString()),
   },
   {
     key: "cpc",
@@ -52,7 +85,6 @@ const COLUMNS: ResultColumn<Row>[] = [
     label: "Difficulty",
     numeric: true,
     accessor: (r) => r.keyword_difficulty,
-    format: (r) => (r.keyword_difficulty == null ? "—" : r.keyword_difficulty),
   },
   {
     key: "main_intent",
@@ -60,19 +92,50 @@ const COLUMNS: ResultColumn<Row>[] = [
     accessor: (r) => r.main_intent,
     format: (r) => r.main_intent ?? "—",
   },
+  {
+    key: "serp_top_domain",
+    label: "Top SERP Domain",
+    accessor: (r) => r.serp_top_domain,
+    format: (r) => r.serp_top_domain ?? "—",
+  },
+]
+
+const SERP_COLS: ResultColumn<SerpRow>[] = [
+  { key: "keyword", label: "Keyword", accessor: (r) => r.keyword },
+  { key: "position", label: "Pos.", numeric: true, accessor: (r) => r.position },
+  { key: "domain", label: "Domain", accessor: (r) => r.domain },
+  {
+    key: "title",
+    label: "Title",
+    accessor: (r) => r.title,
+    format: (r) => r.title ?? "—",
+  },
+  { key: "url", label: "URL", accessor: (r) => r.url },
+]
+
+const MONTHLY_COLS: ResultColumn<MonthlyRow>[] = [
+  { key: "keyword", label: "Keyword", accessor: (r) => r.keyword },
+  { key: "date", label: "Month", accessor: (r) => r.date },
+  {
+    key: "search_volume",
+    label: "Volume",
+    numeric: true,
+    accessor: (r) => r.search_volume,
+    format: (r) =>
+      r.search_volume == null ? "—" : r.search_volume.toLocaleString(),
+  },
 ]
 
 export default function KeywordOverviewPage() {
   const tool = findToolByPathname("/keywords/overview")!
   const [keywordsText, setKeywordsText] = useState("")
   const [market, setMarket] = useState<DfsLabsLocation | null>(null)
-  const [rows, setRows] = useState<Row[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
+    "/api/tools/keywords/overview",
+  )
 
-  async function run(e: FormEvent) {
+  async function onSubmit(e: FormEvent) {
     e.preventDefault()
-    setError(null)
     const keywords = keywordsText
       .split(/\r?\n/)
       .map((s) => s.trim())
@@ -82,25 +145,11 @@ export default function KeywordOverviewPage() {
       setError("Enter at least one keyword.")
       return
     }
-    setLoading(true)
-    try {
-      const res = await fetch("/api/tools/keywords/overview", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          keywords,
-          location_code: market?.location_code,
-          location_name: market ? undefined : "United States",
-        }),
-      })
-      const body = (await res.json()) as { rows?: Row[]; error?: string }
-      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`)
-      setRows(body.rows ?? [])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Request failed")
-    } finally {
-      setLoading(false)
-    }
+    await run({
+      keywords,
+      location_code: market?.location_code,
+      location_name: market ? undefined : "United States",
+    })
   }
 
   return (
@@ -109,8 +158,12 @@ export default function KeywordOverviewPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
-        <form onSubmit={run} className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_280px]">
+        <form
+          onSubmit={onSubmit}
+          className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_280px]"
+        >
           <div className="space-y-1.5">
             <Label htmlFor="keywords">Keywords (one per line, max 100)</Label>
             <Textarea
@@ -133,15 +186,37 @@ export default function KeywordOverviewPage() {
       }
       results={
         error ? (
-          <div className="rounded-lg border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-            {error}
-          </div>
+          <ToolError message={error} />
         ) : (
-          <ResultsTable
-            rows={rows}
-            columns={COLUMNS}
-            filename="keyword-overview"
-          />
+          <>
+            <ToolSection title="Keywords">
+              <ResultsTable
+                rows={data?.keywords ?? []}
+                columns={KEYWORD_COLS}
+                filename="keyword-overview"
+              />
+            </ToolSection>
+            <ToolSection
+              title="SERP Composition (first 25 keywords)"
+              description="Top 10 organic results per keyword at the selected market."
+            >
+              <ResultsTable
+                rows={data?.serp ?? []}
+                columns={SERP_COLS}
+                filename="keyword-serp"
+              />
+            </ToolSection>
+            <ToolSection
+              title="Monthly Volume History"
+              description="Up to 4 years of historical Labs search-volume data."
+            >
+              <ResultsTable
+                rows={data?.monthly ?? []}
+                columns={MONTHLY_COLS}
+                filename="keyword-monthly"
+              />
+            </ToolSection>
+          </>
         )
       }
     />

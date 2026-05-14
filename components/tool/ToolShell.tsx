@@ -2,12 +2,16 @@
 
 import type { ReactNode } from "react"
 import { Card } from "@/components/ui/card"
+import type { ToolRunMeta } from "@/components/tool/use-tool-run"
 
 /**
- * Standard layout wrapper for every tool page under the new SEMRush-style
- * nav. Tools render their input form into `form` and their results into
- * `results`. The shell takes care of heading, description, and the
- * card-around-form chrome.
+ * Standard layout wrapper for every tool page. Tools render their input
+ * form into `form` and their results into `results`. The shell takes
+ * care of heading, description, and the card-around-form chrome.
+ *
+ * The footer reports the DFSEO endpoints from `tool-config.ts` (what
+ * the tool is *supposed* to hit) and, once a run has completed, the
+ * actual endpoints hit + cost + duration from the response meta.
  */
 export function ToolShell({
   category,
@@ -16,6 +20,7 @@ export function ToolShell({
   endpoints,
   form,
   results,
+  meta,
 }: {
   category: string
   title: string
@@ -23,6 +28,7 @@ export function ToolShell({
   endpoints: readonly string[]
   form: ReactNode
   results: ReactNode
+  meta?: ToolRunMeta | null
 }) {
   return (
     <div className="space-y-6">
@@ -38,22 +44,28 @@ export function ToolShell({
 
       <Card className="p-5">{form}</Card>
 
-      <section aria-label="Results">{results}</section>
+      <div className="space-y-6" aria-label="Results">
+        {results}
+      </div>
 
-      {endpoints.length > 0 ? (
-        <footer className="border-t border-dashed border-line pt-3">
+      <footer className="space-y-1 border-t border-dashed border-line pt-3">
+        <p className="font-mono text-[10.5px] text-ink-3">
+          Spec endpoints ({endpoints.length}):{" "}
+          <span className="text-foreground/70">{endpoints.join("  ·  ")}</span>
+        </p>
+        {meta ? (
           <p className="font-mono text-[10.5px] text-ink-3">
-            DataForSEO endpoints:{" "}
-            <span className="text-foreground/70">{endpoints[0]}</span>
-            {endpoints.length > 1 ? (
-              <span className="text-ink-3">
-                {" "}
-                · {endpoints.length - 1} more deferred
-              </span>
-            ) : null}
+            Last run: {meta.endpoints.length} endpoint
+            {meta.endpoints.length === 1 ? "" : "s"} hit
+            {typeof meta.costUsd === "number"
+              ? ` · $${meta.costUsd.toFixed(4)}`
+              : ""}
+            {typeof meta.durationMs === "number"
+              ? ` · ${(meta.durationMs / 1000).toFixed(1)}s`
+              : ""}
           </p>
-        </footer>
-      ) : null}
+        ) : null}
+      </footer>
     </div>
   )
 }

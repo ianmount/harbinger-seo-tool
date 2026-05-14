@@ -11,28 +11,66 @@ import {
   type ResultColumn,
 } from "@/components/tool/ResultsTable"
 import { ToolShell } from "@/components/tool/ToolShell"
-import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
+import {
+  ToolError,
+  ToolSection,
+  useToolRun,
+} from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 import type { DfsLabsLocation } from "@/lib/types"
 
-type Row = {
+type RankedRow = {
   keyword: string
-  position: number | null
+  labs_position: number | null
+  live_position: number | null
   search_volume: number | null
   cpc: number | null
   url: string | null
   etv: number | null
 }
 
-const COLUMNS: ResultColumn<Row>[] = [
+type HistoryRow = {
+  date: string
+  organic_count: number | null
+  organic_etv: number | null
+  paid_count: number | null
+  paid_etv: number | null
+}
+
+type RelevantPageRow = {
+  url: string
+  keywords_count: number | null
+  etv: number | null
+}
+
+type Data = {
+  ranked: RankedRow[]
+  history: HistoryRow[]
+  relevantPages: RelevantPageRow[]
+}
+
+const RANKED_COLS: ResultColumn<RankedRow>[] = [
   { key: "keyword", label: "Keyword", accessor: (r) => r.keyword },
-  { key: "position", label: "Position", numeric: true, accessor: (r) => r.position },
+  {
+    key: "labs_position",
+    label: "Labs Pos.",
+    numeric: true,
+    accessor: (r) => r.labs_position,
+  },
+  {
+    key: "live_position",
+    label: "Live Pos. (city)",
+    numeric: true,
+    accessor: (r) => r.live_position,
+    format: (r) => (r.live_position == null ? "—" : r.live_position),
+  },
   {
     key: "search_volume",
     label: "Volume",
     numeric: true,
     accessor: (r) => r.search_volume,
-    format: (r) => (r.search_volume == null ? "—" : r.search_volume.toLocaleString()),
+    format: (r) =>
+      r.search_volume == null ? "—" : r.search_volume.toLocaleString(),
   },
   {
     key: "cpc",
@@ -53,8 +91,56 @@ const COLUMNS: ResultColumn<Row>[] = [
     label: "Est. Traffic",
     numeric: true,
     accessor: (r) => r.etv,
+    format: (r) => (r.etv == null ? "—" : Math.round(r.etv).toLocaleString()),
+  },
+]
+
+const HISTORY_COLS: ResultColumn<HistoryRow>[] = [
+  { key: "date", label: "Date", accessor: (r) => r.date },
+  {
+    key: "organic_count",
+    label: "Organic KW",
+    numeric: true,
+    accessor: (r) => r.organic_count,
+  },
+  {
+    key: "organic_etv",
+    label: "Organic Traffic",
+    numeric: true,
+    accessor: (r) => r.organic_etv,
     format: (r) =>
-      r.etv == null ? "—" : Math.round(r.etv).toLocaleString(),
+      r.organic_etv == null ? "—" : Math.round(r.organic_etv).toLocaleString(),
+  },
+  {
+    key: "paid_count",
+    label: "Paid KW",
+    numeric: true,
+    accessor: (r) => r.paid_count,
+  },
+  {
+    key: "paid_etv",
+    label: "Paid Traffic",
+    numeric: true,
+    accessor: (r) => r.paid_etv,
+    format: (r) =>
+      r.paid_etv == null ? "—" : Math.round(r.paid_etv).toLocaleString(),
+  },
+]
+
+const PAGE_COLS: ResultColumn<RelevantPageRow>[] = [
+  { key: "url", label: "Ranking Page", accessor: (r) => r.url },
+  {
+    key: "keywords_count",
+    label: "Keywords",
+    numeric: true,
+    accessor: (r) => r.keywords_count,
+  },
+  {
+    key: "etv",
+    label: "Est. Traffic",
+    numeric: true,
+    accessor: (r) => r.etv,
+    format: (r) => (r.etv == null ? "—" : Math.round(r.etv).toLocaleString()),
   },
 ]
 
@@ -62,7 +148,7 @@ export default function OrganicRankingsPage() {
   const tool = findToolByPathname("/competitive/organic-rankings")!
   const [target, setTarget] = useState("")
   const [market, setMarket] = useState<DfsLabsLocation | null>(null)
-  const { rows, loading, error, run, setError } = useToolRun<Row>(
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/competitive/organic-rankings",
   )
 
@@ -85,6 +171,7 @@ export default function OrganicRankingsPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
         <form
           onSubmit={onSubmit}
@@ -111,7 +198,32 @@ export default function OrganicRankingsPage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable rows={rows} columns={COLUMNS} filename="organic-rankings" />
+          <>
+            <ToolSection
+              title="Ranked Keywords"
+              description="Labs position + live city-level SERP position for the top 25 keywords (cost-capped)."
+            >
+              <ResultsTable
+                rows={data?.ranked ?? []}
+                columns={RANKED_COLS}
+                filename="ranked-keywords"
+              />
+            </ToolSection>
+            <ToolSection title="Historical Rank Overview">
+              <ResultsTable
+                rows={data?.history ?? []}
+                columns={HISTORY_COLS}
+                filename="rank-history"
+              />
+            </ToolSection>
+            <ToolSection title="Ranking Pages">
+              <ResultsTable
+                rows={data?.relevantPages ?? []}
+                columns={PAGE_COLS}
+                filename="ranking-pages"
+              />
+            </ToolSection>
+          </>
         )
       }
     />

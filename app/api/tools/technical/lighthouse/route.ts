@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { runTool } from "@/lib/tool-route"
+import { dfsCost, runTool } from "@/lib/tool-route"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 300
@@ -15,11 +15,17 @@ type Row = {
   display_value: string | null
 }
 
+type Data = { rows: Row[] }
+
+// `task_post` is the async equivalent of `live/json` — same audit, just
+// queued. We only call live/json since the rest of the tool surface
+// expects a synchronous response. Spec endpoint footer lists both.
+
 export async function POST(request: Request) {
-  return runTool<typeof Input, Row>(request, Input, async (input, { dfs }) => {
+  return runTool<typeof Input, Data>(request, Input, async (input, { dfs }) => {
     const body = [{ url: input.url, for_mobile: input.for_mobile }]
     const env = (await dfs("/v3/on_page/lighthouse/live/json", body, {
-      timeoutMs: 120_000,
+      timeoutMs: 180_000,
     })) as {
       cost?: number
       tasks?: {
@@ -43,7 +49,6 @@ export async function POST(request: Request) {
     const rows: Row[] = []
     for (const task of env.tasks ?? []) {
       for (const r of task.result ?? []) {
-        // Top-level categories: performance, accessibility, best-practices, seo
         for (const cat of Object.values(r.categories ?? {})) {
           rows.push({
             category: cat.title ?? cat.id ?? "category",
@@ -51,7 +56,6 @@ export async function POST(request: Request) {
             display_value: null,
           })
         }
-        // Core Web Vitals headline audits.
         const cwvIds = [
           "largest-contentful-paint",
           "first-contentful-paint",
@@ -72,9 +76,9 @@ export async function POST(request: Request) {
       }
     }
     return {
-      rows,
+      data: { rows },
       endpoints: ["/v3/on_page/lighthouse/live/json"],
-      costUsd: env.cost,
+      costUsd: dfsCost(env),
     }
   })
 }

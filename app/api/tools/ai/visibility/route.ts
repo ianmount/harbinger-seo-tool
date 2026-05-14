@@ -1,79 +1,64 @@
 import { z } from "zod"
-import { runTool } from "@/lib/tool-route"
+import { dfsCost, dfsItems, runTool } from "@/lib/tool-route"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 120
 
-const Input = z.object({
-  keyword: z.string().min(1),
-})
+const Input = z.object({ keyword: z.string().min(1) })
 
-type Row = {
-  group: string
-  label: string
-  value: number | null
+type AggregatedRow = { metric: string; value: number | string | null }
+type DomainRow = { domain: string; mentions: number | null }
+type PageRow = { url: string; mentions: number | null }
+
+type Data = {
+  aggregated: AggregatedRow[]
+  topDomains: DomainRow[]
+  topPages: PageRow[]
 }
 
 export async function POST(request: Request) {
-  return runTool<typeof Input, Row>(request, Input, async (input, { dfs }) => {
+  return runTool<typeof Input, Data>(request, Input, async (input, { dfs }) => {
     const body = [{ keyword: input.keyword }]
-    const [topDomains, topPages, aggregated] = (await Promise.all([
+
+    const [aggEnv, domainsEnv, pagesEnv] = await Promise.all([
+      dfs("/v3/ai_optimization/llm_mentions/aggregated_metrics/live", body),
       dfs("/v3/ai_optimization/llm_mentions/top_domains/live", body),
       dfs("/v3/ai_optimization/llm_mentions/top_pages/live", body),
-      dfs("/v3/ai_optimization/llm_mentions/aggregated_metrics/live", body),
-    ])) as Array<{
-      cost?: number
-      tasks?: { result?: { items?: unknown[] }[] }[]
-    }>
+    ])
 
-    const rows: Row[] = []
+    const aggregated: AggregatedRow[] = []
+    for (const item of dfsItems<Record<string, unknown>>(aggEnv)) {
+      for (const [k, v] of Object.entries(item)) {
+        if (typeof v === "number" || typeof v === "string") {
+          aggregated.push({ metric: k, value: v })
+        }
+      }
+    }
 
-    for (const t of topDomains.tasks ?? []) {
-      for (const r of t.result ?? []) {
-        for (const raw of r.items ?? []) {
-          const it = raw as { domain?: string; mentions_count?: number | null }
-          rows.push({
-            group: "Top Domain",
-            label: it.domain ?? "",
-            value: it.mentions_count ?? null,
-          })
-        }
-      }
-    }
-    for (const t of topPages.tasks ?? []) {
-      for (const r of t.result ?? []) {
-        for (const raw of r.items ?? []) {
-          const it = raw as { url?: string; mentions_count?: number | null }
-          rows.push({
-            group: "Top Page",
-            label: it.url ?? "",
-            value: it.mentions_count ?? null,
-          })
-        }
-      }
-    }
-    for (const t of aggregated.tasks ?? []) {
-      for (const r of t.result ?? []) {
-        for (const raw of r.items ?? []) {
-          const it = raw as Record<string, unknown>
-          for (const [k, v] of Object.entries(it)) {
-            if (typeof v === "number") {
-              rows.push({ group: "Aggregated", label: k, value: v })
-            }
-          }
-        }
-      }
-    }
+    const topDomains: DomainRow[] = dfsItems<{
+      domain?: string
+      mentions_count?: number | null
+    }>(domainsEnv).map((it) => ({
+      domain: it.domain ?? "",
+      mentions: it.mentions_count ?? null,
+    }))
+
+    const topPages: PageRow[] = dfsItems<{
+      url?: string
+      mentions_count?: number | null
+    }>(pagesEnv).map((it) => ({
+      url: it.url ?? "",
+      mentions: it.mentions_count ?? null,
+    }))
 
     return {
-      rows,
+      data: { aggregated, topDomains, topPages },
       endpoints: [
+        "/v3/ai_optimization/llm_mentions/aggregated_metrics/live",
         "/v3/ai_optimization/llm_mentions/top_domains/live",
         "/v3/ai_optimization/llm_mentions/top_pages/live",
-        "/v3/ai_optimization/llm_mentions/aggregated_metrics/live",
       ],
-      costUsd:
-        (topDomains.cost ?? 0) + (topPages.cost ?? 0) + (aggregated.cost ?? 0),
+      costUsd: dfsCost(aggEnv, domainsEnv, pagesEnv),
     }
   })
 }

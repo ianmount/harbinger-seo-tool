@@ -10,10 +10,21 @@ import {
   type ResultColumn,
 } from "@/components/tool/ResultsTable"
 import { ToolShell } from "@/components/tool/ToolShell"
-import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
+import {
+  ToolError,
+  ToolSection,
+  useToolRun,
+} from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 
-type Row = {
+type WebRow = {
+  url: string
+  title: string | null
+  date: string | null
+  domain_rank: number | null
+}
+
+type LlmRow = {
   llm: string | null
   prompt: string | null
   brand_position: number | null
@@ -21,7 +32,33 @@ type Row = {
   date: string | null
 }
 
-const COLUMNS: ResultColumn<Row>[] = [
+type AggregatedRow = { metric: string; value: number | string | null }
+
+type Data = { web: WebRow[]; llm: LlmRow[]; aggregated: AggregatedRow[] }
+
+const WEB_COLS: ResultColumn<WebRow>[] = [
+  { key: "url", label: "URL", accessor: (r) => r.url },
+  {
+    key: "title",
+    label: "Title",
+    accessor: (r) => r.title,
+    format: (r) => r.title ?? "—",
+  },
+  {
+    key: "date",
+    label: "Date",
+    accessor: (r) => r.date,
+    format: (r) => (r.date ? r.date.slice(0, 10) : "—"),
+  },
+  {
+    key: "domain_rank",
+    label: "Domain Rank",
+    numeric: true,
+    accessor: (r) => r.domain_rank,
+  },
+]
+
+const LLM_COLS: ResultColumn<LlmRow>[] = [
   { key: "llm", label: "LLM", accessor: (r) => r.llm, format: (r) => r.llm ?? "—" },
   {
     key: "prompt",
@@ -31,7 +68,7 @@ const COLUMNS: ResultColumn<Row>[] = [
   },
   {
     key: "brand_position",
-    label: "Brand Position",
+    label: "Brand Pos.",
     numeric: true,
     accessor: (r) => r.brand_position,
   },
@@ -49,10 +86,26 @@ const COLUMNS: ResultColumn<Row>[] = [
   },
 ]
 
+const AGG_COLS: ResultColumn<AggregatedRow>[] = [
+  { key: "metric", label: "Metric", accessor: (r) => r.metric },
+  {
+    key: "value",
+    label: "Value",
+    numeric: true,
+    accessor: (r) => r.value,
+    format: (r) =>
+      r.value == null
+        ? "—"
+        : typeof r.value === "number"
+          ? r.value.toLocaleString()
+          : r.value,
+  },
+]
+
 export default function EntityMentionsPage() {
   const tool = findToolByPathname("/technical/entity-mentions")!
   const [entity, setEntity] = useState("")
-  const { rows, loading, error, run, setError } = useToolRun<Row>(
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/technical/entity-mentions",
   )
 
@@ -71,6 +124,7 @@ export default function EntityMentionsPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
         <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
           <div className="grow space-y-1.5 min-w-[260px]">
@@ -93,7 +147,29 @@ export default function EntityMentionsPage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable rows={rows} columns={COLUMNS} filename="entity-mentions" />
+          <>
+            <ToolSection title="Aggregated LLM Metrics">
+              <ResultsTable
+                rows={data?.aggregated ?? []}
+                columns={AGG_COLS}
+                filename="entity-aggregated"
+              />
+            </ToolSection>
+            <ToolSection title="LLM Mentions">
+              <ResultsTable
+                rows={data?.llm ?? []}
+                columns={LLM_COLS}
+                filename="entity-llm"
+              />
+            </ToolSection>
+            <ToolSection title="Open-Web Mentions">
+              <ResultsTable
+                rows={data?.web ?? []}
+                columns={WEB_COLS}
+                filename="entity-web"
+              />
+            </ToolSection>
+          </>
         )
       }
     />

@@ -11,25 +11,38 @@ import {
   type ResultColumn,
 } from "@/components/tool/ResultsTable"
 import { ToolShell } from "@/components/tool/ToolShell"
+import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 import type { DfsLabsLocation } from "@/lib/types"
 
 type Row = {
   keyword: string
-  search_volume: number | null
+  source: string
+  labs_volume: number | null
+  ads_volume: number | null
   cpc: number | null
   competition_level: string | null
   keyword_difficulty: number | null
 }
 
+type Data = { rows: Row[] }
+
 const COLUMNS: ResultColumn<Row>[] = [
   { key: "keyword", label: "Keyword Idea", accessor: (r) => r.keyword },
+  { key: "source", label: "Source", accessor: (r) => r.source },
   {
-    key: "search_volume",
-    label: "Volume",
+    key: "labs_volume",
+    label: "Labs Vol.",
     numeric: true,
-    accessor: (r) => r.search_volume,
-    format: (r) => (r.search_volume == null ? "—" : r.search_volume.toLocaleString()),
+    accessor: (r) => r.labs_volume,
+    format: (r) => (r.labs_volume == null ? "—" : r.labs_volume.toLocaleString()),
+  },
+  {
+    key: "ads_volume",
+    label: "Ads City Vol.",
+    numeric: true,
+    accessor: (r) => r.ads_volume,
+    format: (r) => (r.ads_volume == null ? "—" : r.ads_volume.toLocaleString()),
   },
   {
     key: "cpc",
@@ -50,7 +63,6 @@ const COLUMNS: ResultColumn<Row>[] = [
     label: "Difficulty",
     numeric: true,
     accessor: (r) => r.keyword_difficulty,
-    format: (r) => (r.keyword_difficulty == null ? "—" : r.keyword_difficulty),
   },
 ]
 
@@ -58,36 +70,21 @@ export default function KeywordMagicPage() {
   const tool = findToolByPathname("/keywords/magic")!
   const [seed, setSeed] = useState("")
   const [market, setMarket] = useState<DfsLabsLocation | null>(null)
-  const [rows, setRows] = useState<Row[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
+    "/api/tools/keywords/magic",
+  )
 
-  async function run(e: FormEvent) {
+  async function onSubmit(e: FormEvent) {
     e.preventDefault()
-    setError(null)
     if (!seed.trim()) {
       setError("Enter a seed keyword.")
       return
     }
-    setLoading(true)
-    try {
-      const res = await fetch("/api/tools/keywords/magic", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          seed: seed.trim(),
-          location_code: market?.location_code,
-          location_name: market ? undefined : "United States",
-        }),
-      })
-      const body = (await res.json()) as { rows?: Row[]; error?: string }
-      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`)
-      setRows(body.rows ?? [])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Request failed")
-    } finally {
-      setLoading(false)
-    }
+    await run({
+      seed: seed.trim(),
+      location_code: market?.location_code,
+      location_name: market ? undefined : "United States",
+    })
   }
 
   return (
@@ -96,8 +93,9 @@ export default function KeywordMagicPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
-        <form onSubmit={run} className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_280px]">
+        <form onSubmit={onSubmit} className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_280px]">
           <div className="space-y-1.5">
             <Label htmlFor="seed">Seed keyword</Label>
             <Input
@@ -119,11 +117,13 @@ export default function KeywordMagicPage() {
       }
       results={
         error ? (
-          <div className="rounded-lg border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-            {error}
-          </div>
+          <ToolError message={error} />
         ) : (
-          <ResultsTable rows={rows} columns={COLUMNS} filename="keyword-magic" />
+          <ResultsTable
+            rows={data?.rows ?? []}
+            columns={COLUMNS}
+            filename="keyword-magic"
+          />
         )
       }
     />

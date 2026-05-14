@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { runTool } from "@/lib/tool-route"
+import { dfsCost, dfsItems, runTool } from "@/lib/tool-route"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
@@ -10,7 +10,7 @@ const Input = z.object({
   mode: z.enum(["as_is", "one_per_domain", "one_per_anchor"]).default("as_is"),
 })
 
-type Row = {
+type BacklinkRow = {
   url_from: string
   url_to: string
   anchor: string | null
@@ -21,9 +21,18 @@ type Row = {
   last_seen: string | null
 }
 
+type AnchorRow = {
+  anchor: string
+  backlinks: number | null
+  referring_domains: number | null
+  first_seen: string | null
+}
+
+type Data = { backlinks: BacklinkRow[]; anchors: AnchorRow[] }
+
 export async function POST(request: Request) {
-  return runTool<typeof Input, Row>(request, Input, async (input, { dfs }) => {
-    const body = [
+  return runTool<typeof Input, Data>(request, Input, async (input, { dfs }) => {
+    const backlinksBody = [
       {
         target: input.target,
         mode: input.mode,
@@ -31,39 +40,58 @@ export async function POST(request: Request) {
         backlinks_status_type: "live",
       },
     ]
-    const env = (await dfs("/v3/backlinks/backlinks/live", body)) as {
-      cost?: number
-      tasks?: { result?: { items?: unknown[] }[] }[]
-    }
-    const items =
-      env.tasks?.flatMap((t) => t.result?.flatMap((r) => r.items ?? []) ?? []) ??
-      []
-    const rows: Row[] = items.map((raw) => {
-      const it = raw as {
-        url_from?: string
-        url_to?: string
-        anchor?: string | null
-        page_from_rank?: number | null
-        domain_from_rank?: number | null
-        dofollow?: boolean
-        first_seen?: string | null
-        last_seen?: string | null
-      }
-      return {
-        url_from: it.url_from ?? "",
-        url_to: it.url_to ?? "",
-        anchor: it.anchor ?? null,
-        page_from_rank: it.page_from_rank ?? null,
-        domain_from_rank: it.domain_from_rank ?? null,
-        dofollow: Boolean(it.dofollow),
-        first_seen: it.first_seen ?? null,
-        last_seen: it.last_seen ?? null,
-      }
-    })
+    const anchorsBody = [
+      {
+        target: input.target,
+        limit: input.limit,
+        backlinks_status_type: "live",
+      },
+    ]
+
+    const [backlinksEnv, anchorsEnv] = await Promise.all([
+      dfs("/v3/backlinks/backlinks/live", backlinksBody),
+      dfs("/v3/backlinks/anchors/live", anchorsBody),
+    ])
+
+    const backlinks: BacklinkRow[] = dfsItems<{
+      url_from?: string
+      url_to?: string
+      anchor?: string | null
+      page_from_rank?: number | null
+      domain_from_rank?: number | null
+      dofollow?: boolean
+      first_seen?: string | null
+      last_seen?: string | null
+    }>(backlinksEnv).map((it) => ({
+      url_from: it.url_from ?? "",
+      url_to: it.url_to ?? "",
+      anchor: it.anchor ?? null,
+      page_from_rank: it.page_from_rank ?? null,
+      domain_from_rank: it.domain_from_rank ?? null,
+      dofollow: Boolean(it.dofollow),
+      first_seen: it.first_seen ?? null,
+      last_seen: it.last_seen ?? null,
+    }))
+
+    const anchors: AnchorRow[] = dfsItems<{
+      anchor?: string
+      backlinks?: number | null
+      referring_domains?: number | null
+      first_seen?: string | null
+    }>(anchorsEnv).map((it) => ({
+      anchor: it.anchor ?? "",
+      backlinks: it.backlinks ?? null,
+      referring_domains: it.referring_domains ?? null,
+      first_seen: it.first_seen ?? null,
+    }))
+
     return {
-      rows,
-      endpoints: ["/v3/backlinks/backlinks/live"],
-      costUsd: env.cost,
+      data: { backlinks, anchors },
+      endpoints: [
+        "/v3/backlinks/backlinks/live",
+        "/v3/backlinks/anchors/live",
+      ],
+      costUsd: dfsCost(backlinksEnv, anchorsEnv),
     }
   })
 }

@@ -10,31 +10,65 @@ import {
   type ResultColumn,
 } from "@/components/tool/ResultsTable"
 import { ToolShell } from "@/components/tool/ToolShell"
-import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
+import {
+  ToolError,
+  ToolSection,
+  useToolRun,
+} from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 
-type Row = {
-  group: string
-  label: string
-  value: number | null
+type AggregatedRow = { metric: string; value: number | string | null }
+type DomainRow = { domain: string; mentions: number | null }
+type PageRow = { url: string; mentions: number | null }
+
+type Data = {
+  aggregated: AggregatedRow[]
+  topDomains: DomainRow[]
+  topPages: PageRow[]
 }
 
-const COLUMNS: ResultColumn<Row>[] = [
-  { key: "group", label: "Group", accessor: (r) => r.group },
-  { key: "label", label: "Item", accessor: (r) => r.label },
+const AGG_COLS: ResultColumn<AggregatedRow>[] = [
+  { key: "metric", label: "Metric", accessor: (r) => r.metric },
   {
     key: "value",
-    label: "Mentions",
+    label: "Value",
     numeric: true,
     accessor: (r) => r.value,
-    format: (r) => (r.value == null ? "—" : r.value.toLocaleString()),
+    format: (r) =>
+      r.value == null
+        ? "—"
+        : typeof r.value === "number"
+          ? r.value.toLocaleString()
+          : r.value,
+  },
+]
+
+const DOMAIN_COLS: ResultColumn<DomainRow>[] = [
+  { key: "domain", label: "Domain", accessor: (r) => r.domain },
+  {
+    key: "mentions",
+    label: "Mentions",
+    numeric: true,
+    accessor: (r) => r.mentions,
+    format: (r) => (r.mentions == null ? "—" : r.mentions.toLocaleString()),
+  },
+]
+
+const PAGE_COLS: ResultColumn<PageRow>[] = [
+  { key: "url", label: "URL", accessor: (r) => r.url },
+  {
+    key: "mentions",
+    label: "Mentions",
+    numeric: true,
+    accessor: (r) => r.mentions,
+    format: (r) => (r.mentions == null ? "—" : r.mentions.toLocaleString()),
   },
 ]
 
 export default function AiVisibilityPage() {
   const tool = findToolByPathname("/ai/visibility")!
   const [keyword, setKeyword] = useState("")
-  const { rows, loading, error, run, setError } = useToolRun<Row>(
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/ai/visibility",
   )
 
@@ -53,6 +87,7 @@ export default function AiVisibilityPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
         <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
           <div className="grow space-y-1.5 min-w-[260px]">
@@ -75,7 +110,29 @@ export default function AiVisibilityPage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable rows={rows} columns={COLUMNS} filename="ai-visibility" />
+          <>
+            <ToolSection title="Aggregated Metrics">
+              <ResultsTable
+                rows={data?.aggregated ?? []}
+                columns={AGG_COLS}
+                filename="ai-visibility-aggregated"
+              />
+            </ToolSection>
+            <ToolSection title="Top Domains in LLM Responses">
+              <ResultsTable
+                rows={data?.topDomains ?? []}
+                columns={DOMAIN_COLS}
+                filename="ai-visibility-top-domains"
+              />
+            </ToolSection>
+            <ToolSection title="Top Pages Cited by LLMs">
+              <ResultsTable
+                rows={data?.topPages ?? []}
+                columns={PAGE_COLS}
+                filename="ai-visibility-top-pages"
+              />
+            </ToolSection>
+          </>
         )
       }
     />

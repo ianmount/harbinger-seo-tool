@@ -14,6 +14,7 @@ import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 
 type Row = { target: string; spam_score: number | null }
+type Data = { rows: Row[] }
 
 const COLUMNS: ResultColumn<Row>[] = [
   { key: "target", label: "Target", accessor: (r) => r.target },
@@ -29,7 +30,7 @@ const COLUMNS: ResultColumn<Row>[] = [
 export default function SpamScoringPage() {
   const tool = findToolByPathname("/backlinks/spam-scoring")!
   const [text, setText] = useState("")
-  const { rows, loading, error, run, setError } = useToolRun<Row>(
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/backlinks/spam-scoring",
   )
 
@@ -53,6 +54,7 @@ export default function SpamScoringPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
         <form onSubmit={onSubmit} className="space-y-3">
           <div className="space-y-1.5">
@@ -76,7 +78,7 @@ export default function SpamScoringPage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable rows={rows} columns={COLUMNS} filename="spam-score" />
+          <ResultsTable rows={data?.rows ?? []} columns={COLUMNS} filename="spam-score" />
         )
       }
     />

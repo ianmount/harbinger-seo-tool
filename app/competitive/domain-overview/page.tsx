@@ -11,11 +11,21 @@ import {
   type ResultColumn,
 } from "@/components/tool/ResultsTable"
 import { ToolShell } from "@/components/tool/ToolShell"
-import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
+import {
+  ToolError,
+  ToolSection,
+  useToolRun,
+} from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 import type { DfsLabsLocation } from "@/lib/types"
 
-type Row = {
+type SnapshotRow = {
+  group: string
+  metric: string
+  value: number | string | null
+}
+
+type CompetitorRow = {
   domain: string
   rank: number | null
   organic_keywords: number | null
@@ -24,9 +34,39 @@ type Row = {
   overlap_with_target: number | null
 }
 
-const COLUMNS: ResultColumn<Row>[] = [
+type SerpRow = {
+  position: number
+  domain: string
+  url: string
+  title: string | null
+}
+
+type Data = {
+  snapshot: SnapshotRow[]
+  competitors: CompetitorRow[]
+  brandSerp: SerpRow[]
+}
+
+const SNAPSHOT_COLS: ResultColumn<SnapshotRow>[] = [
+  { key: "group", label: "Group", accessor: (r) => r.group },
+  { key: "metric", label: "Metric", accessor: (r) => r.metric },
+  {
+    key: "value",
+    label: "Value",
+    numeric: true,
+    accessor: (r) => r.value,
+    format: (r) =>
+      r.value == null
+        ? "—"
+        : typeof r.value === "number"
+          ? r.value.toLocaleString()
+          : r.value,
+  },
+]
+
+const COMPETITOR_COLS: ResultColumn<CompetitorRow>[] = [
   { key: "domain", label: "Competitor", accessor: (r) => r.domain },
-  { key: "rank", label: "Rank", numeric: true, accessor: (r) => r.rank },
+  { key: "rank", label: "Avg. Pos.", numeric: true, accessor: (r) => r.rank },
   {
     key: "organic_keywords",
     label: "Organic KW",
@@ -62,11 +102,23 @@ const COLUMNS: ResultColumn<Row>[] = [
   },
 ]
 
+const SERP_COLS: ResultColumn<SerpRow>[] = [
+  { key: "position", label: "Pos.", numeric: true, accessor: (r) => r.position },
+  { key: "domain", label: "Domain", accessor: (r) => r.domain },
+  {
+    key: "title",
+    label: "Title",
+    accessor: (r) => r.title,
+    format: (r) => r.title ?? "—",
+  },
+  { key: "url", label: "URL", accessor: (r) => r.url },
+]
+
 export default function DomainOverviewPage() {
   const tool = findToolByPathname("/competitive/domain-overview")!
   const [target, setTarget] = useState("")
   const [market, setMarket] = useState<DfsLabsLocation | null>(null)
-  const { rows, loading, error, run, setError } = useToolRun<Row>(
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/competitive/domain-overview",
   )
 
@@ -89,6 +141,7 @@ export default function DomainOverviewPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
         <form
           onSubmit={onSubmit}
@@ -115,7 +168,35 @@ export default function DomainOverviewPage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable rows={rows} columns={COLUMNS} filename="domain-overview" />
+          <>
+            <ToolSection
+              title="Snapshot"
+              description="Organic, paid, and backlink metrics for the target at the selected market."
+            >
+              <ResultsTable
+                rows={data?.snapshot ?? []}
+                columns={SNAPSHOT_COLS}
+                filename="domain-snapshot"
+              />
+            </ToolSection>
+            <ToolSection title="Organic Competitors">
+              <ResultsTable
+                rows={data?.competitors ?? []}
+                columns={COMPETITOR_COLS}
+                filename="domain-competitors"
+              />
+            </ToolSection>
+            <ToolSection
+              title="Brand SERP (city-level)"
+              description="Top 10 organic results when searching for the brand domain in the selected market."
+            >
+              <ResultsTable
+                rows={data?.brandSerp ?? []}
+                columns={SERP_COLS}
+                filename="domain-brand-serp"
+              />
+            </ToolSection>
+          </>
         )
       }
     />

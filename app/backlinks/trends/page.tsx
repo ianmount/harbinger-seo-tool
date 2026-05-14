@@ -19,7 +19,14 @@ type Row = {
   referring_domains: number | null
   new_backlinks: number | null
   lost_backlinks: number | null
+  new_referring_domains: number | null
+  lost_referring_domains: number | null
 }
+
+type Data = { rows: Row[] }
+
+const formatNum = (n: number | null) =>
+  n == null ? "—" : n.toLocaleString()
 
 const COLUMNS: ResultColumn<Row>[] = [
   { key: "date", label: "Date", accessor: (r) => r.date },
@@ -28,34 +35,49 @@ const COLUMNS: ResultColumn<Row>[] = [
     label: "Backlinks",
     numeric: true,
     accessor: (r) => r.backlinks,
-    format: (r) => (r.backlinks == null ? "—" : r.backlinks.toLocaleString()),
+    format: (r) => formatNum(r.backlinks),
   },
   {
     key: "referring_domains",
     label: "Ref. Domains",
     numeric: true,
     accessor: (r) => r.referring_domains,
-    format: (r) =>
-      r.referring_domains == null ? "—" : r.referring_domains.toLocaleString(),
+    format: (r) => formatNum(r.referring_domains),
   },
   {
     key: "new_backlinks",
-    label: "New",
+    label: "New Links",
     numeric: true,
     accessor: (r) => r.new_backlinks,
+    format: (r) => formatNum(r.new_backlinks),
   },
   {
     key: "lost_backlinks",
-    label: "Lost",
+    label: "Lost Links",
     numeric: true,
     accessor: (r) => r.lost_backlinks,
+    format: (r) => formatNum(r.lost_backlinks),
+  },
+  {
+    key: "new_referring_domains",
+    label: "New Domains",
+    numeric: true,
+    accessor: (r) => r.new_referring_domains,
+    format: (r) => formatNum(r.new_referring_domains),
+  },
+  {
+    key: "lost_referring_domains",
+    label: "Lost Domains",
+    numeric: true,
+    accessor: (r) => r.lost_referring_domains,
+    format: (r) => formatNum(r.lost_referring_domains),
   },
 ]
 
 export default function BacklinksTrendsPage() {
   const tool = findToolByPathname("/backlinks/trends")!
   const [target, setTarget] = useState("")
-  const { rows, loading, error, run, setError } = useToolRun<Row>(
+  const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/backlinks/trends",
   )
 
@@ -74,6 +96,7 @@ export default function BacklinksTrendsPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      meta={meta}
       form={
         <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
           <div className="grow space-y-1.5 min-w-[260px]">
@@ -96,7 +119,11 @@ export default function BacklinksTrendsPage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable rows={rows} columns={COLUMNS} filename="backlink-trends" />
+          <ResultsTable
+            rows={data?.rows ?? []}
+            columns={COLUMNS}
+            filename="backlink-trends"
+          />
         )
       }
     />
