@@ -307,6 +307,18 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
           "/v3/content_analysis/phrase_trends/live",
         ],
       },
+      {
+        slug: "gbp-heatmap",
+        category: "local",
+        label: "GBP Heatmap",
+        description:
+          "Geo-grid rank tracker for a business + keyword. Resolves the business via Google Business Profile, then runs a parallel Google Maps SERP scan across a 5×7 grid of vantage points and rolls the results up into rank KPIs and a competitor sidebar.",
+        href: "/local/gbp-heatmap",
+        endpoints: [
+          "/v3/business_data/google/my_business_info/live",
+          "/v3/serp/google/maps/live/advanced",
+        ],
+      },
     ],
   },
   {
