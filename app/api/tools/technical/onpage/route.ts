@@ -1,7 +1,18 @@
 import { z } from "zod"
 import { NextResponse } from "next/server"
-import { dfsRequest } from "@/lib/dataforseo"
-import { runOnPageCrawl, OnPageError } from "@/lib/dataforseo-onpage"
+import {
+  OnPageError,
+  fetchDuplicateTags,
+  fetchLighthouseLive,
+  fetchLinks,
+  fetchMicrodata,
+  fetchNonIndexable,
+  fetchRedirectChains,
+  fetchSummary,
+  runOnPageCrawl,
+} from "@/lib/dataforseo-onpage"
+import { buildAuditReport, type AuditReport } from "@/lib/onpage-audit"
+import { discoverSitemap } from "@/lib/sitemap"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 300
@@ -10,47 +21,8 @@ const Input = z.object({
   target: z.string().min(3),
   max_crawl_pages: z.number().int().min(1).max(200),
   enable_javascript: z.boolean().default(false),
+  run_lighthouse: z.boolean().default(true),
 })
-
-type PageRow = {
-  url: string
-  status_code: number | null
-  title: string | null
-  meta_description_length: number | null
-  word_count: number | null
-  internal_links: number | null
-  has_h1: boolean
-}
-
-type ResourceRow = {
-  url: string
-  resource_type: string | null
-  status_code: number | null
-  size: number | null
-  fetch_time_ms: number | null
-}
-
-type LinkRow = {
-  source: string
-  target: string
-  link_type: string | null
-  direction: string | null
-  status_code: number | null
-}
-
-type DuplicateRow = {
-  field: string
-  value: string
-  affected_pages: number
-  sample_url: string | null
-}
-
-type Data = {
-  pages: PageRow[]
-  resources: ResourceRow[]
-  links: LinkRow[]
-  duplicates: DuplicateRow[]
-}
 
 export async function POST(request: Request) {
   const startedAt = Date.now()
@@ -74,137 +46,66 @@ export async function POST(request: Request) {
       maxPages: parsed.data.max_crawl_pages,
       enableJavaScript: parsed.data.enable_javascript,
     })
-
     const taskId = crawl.taskId
 
-    // After the crawl finishes, the same task_id unlocks the rest of the
-    // On-Page API surface. Pull resources, links, and duplicate-tags in
-    // parallel; each is a POST with `{ id: taskId, limit }`.
-    const [resourcesEnv, linksEnv, dupTitleEnv, dupDescEnv] = await Promise.all(
-      [
-        dfsRequest("/v3/on_page/resources", [
-          { id: taskId, limit: 1000 },
-        ]).catch(() => null),
-        dfsRequest("/v3/on_page/links", [
-          { id: taskId, limit: 1000 },
-        ]).catch(() => null),
-        dfsRequest("/v3/on_page/duplicate_tags", [
-          { id: taskId, tag: "title", limit: 100 },
-        ]).catch(() => null),
-        dfsRequest("/v3/on_page/duplicate_tags", [
-          { id: taskId, tag: "description", limit: 100 },
-        ]).catch(() => null),
-      ],
-    )
+    // After the crawl finishes, hit every audit-tab endpoint in parallel.
+    // Each fetcher swallows its own task-level errors and returns [].
+    const homepage = crawl.pages[0]?.finalUrl ?? crawl.pages[0]?.url ?? null
 
-    const pages: PageRow[] = crawl.pages.map((p) => ({
-      url: p.url,
-      status_code: p.statusCode,
-      title: p.title,
-      meta_description_length: p.description?.length ?? null,
-      word_count: p.wordCount,
-      internal_links: p.internalLinksCount,
-      has_h1: p.h1s.length > 0,
-    }))
+    const [
+      summary,
+      rawLinks,
+      rawDupTitles,
+      rawDupDescs,
+      rawMicrodata,
+      rawRedirectChains,
+      rawNonIndexable,
+      sitemapProbe,
+      lighthouse,
+    ] = await Promise.all([
+      fetchSummary(taskId).catch(() => null),
+      fetchLinks(taskId).catch(() => []),
+      fetchDuplicateTags(taskId, "title").catch(() => []),
+      fetchDuplicateTags(taskId, "description").catch(() => []),
+      fetchMicrodata(taskId).catch(() => []),
+      fetchRedirectChains(taskId).catch(() => []),
+      fetchNonIndexable(taskId).catch(() => []),
+      probeSitemap(parsed.data.target),
+      parsed.data.run_lighthouse && homepage
+        ? fetchLighthouseLive(homepage)
+        : Promise.resolve(null),
+    ])
 
-    const resources: ResourceRow[] = []
-    const rTasks = (resourcesEnv as
-      | {
-          tasks?: { result?: { items?: unknown[] }[] }[]
-        }
-      | null)?.tasks
-    for (const t of rTasks ?? []) {
-      for (const r of t.result ?? []) {
-        for (const raw of r.items ?? []) {
-          const it = raw as {
-            url?: string
-            resource_type?: string | null
-            status_code?: number | null
-            size?: number | null
-            fetch_time?: number | null
-          }
-          resources.push({
-            url: it.url ?? "",
-            resource_type: it.resource_type ?? null,
-            status_code: it.status_code ?? null,
-            size: it.size ?? null,
-            fetch_time_ms: it.fetch_time ?? null,
-          })
-        }
-      }
-    }
+    const report = buildAuditReport({
+      pages: crawl.pages,
+      rawLinks,
+      rawDupTitles,
+      rawDupDescs,
+      rawNonIndexable,
+      rawRedirectChains,
+      rawMicrodata,
+      summary,
+      sitemapMissing: sitemapProbe.missing,
+      lighthouse,
+      jsRendered: crawl.enabledJavaScript,
+    })
 
-    const links: LinkRow[] = []
-    const lTasks = (linksEnv as
-      | { tasks?: { result?: { items?: unknown[] }[] }[] }
-      | null)?.tasks
-    for (const t of lTasks ?? []) {
-      for (const r of t.result ?? []) {
-        for (const raw of r.items ?? []) {
-          const it = raw as {
-            page_from?: string
-            link_from?: string
-            page_to?: string
-            link_to?: string
-            link_type?: string | null
-            type?: string | null
-            direction?: string | null
-            status_code?: number | null
-          }
-          links.push({
-            source: it.page_from ?? it.link_from ?? "",
-            target: it.page_to ?? it.link_to ?? "",
-            link_type: it.link_type ?? it.type ?? null,
-            direction: it.direction ?? null,
-            status_code: it.status_code ?? null,
-          })
-        }
-      }
-    }
-
-    const duplicates: DuplicateRow[] = []
-    for (const [field, env] of [
-      ["title", dupTitleEnv] as const,
-      ["description", dupDescEnv] as const,
-    ]) {
-      const tasks = (env as
-        | { tasks?: { result?: { items?: unknown[] }[] }[] }
-        | null)?.tasks
-      for (const t of tasks ?? []) {
-        for (const r of t.result ?? []) {
-          for (const raw of r.items ?? []) {
-            const it = raw as {
-              value?: string
-              total_count?: number
-              pages?: { url?: string }[]
-            }
-            duplicates.push({
-              field,
-              value: it.value ?? "",
-              affected_pages: it.total_count ?? it.pages?.length ?? 0,
-              sample_url: it.pages?.[0]?.url ?? null,
-            })
-          }
-        }
-      }
-    }
+    const endpoints = [
+      "/v3/on_page/task_post",
+      "/v3/on_page/summary",
+      "/v3/on_page/pages",
+      "/v3/on_page/links",
+      "/v3/on_page/duplicate_tags",
+      "/v3/on_page/microdata",
+      "/v3/on_page/redirect_chains",
+      "/v3/on_page/non_indexable",
+      ...(lighthouse ? ["/v3/on_page/lighthouse/live/json"] : []),
+    ]
 
     return NextResponse.json({
-      data: {
-        pages,
-        resources,
-        links,
-        duplicates,
-      } satisfies Data,
+      data: report satisfies AuditReport,
       meta: {
-        endpoints: [
-          "/v3/on_page/task_post",
-          "/v3/on_page/summary",
-          "/v3/on_page/pages",
-          ...(resourcesEnv ? ["/v3/on_page/resources"] : []),
-          ...(linksEnv ? ["/v3/on_page/links"] : []),
-          ...(dupTitleEnv || dupDescEnv ? ["/v3/on_page/duplicate_tags"] : []),
-        ],
+        endpoints,
         durationMs: Date.now() - startedAt,
       },
     })
@@ -216,5 +117,18 @@ export async function POST(request: Request) {
           ? err.message
           : "Crawl failed"
     return NextResponse.json({ error: message }, { status: 502 })
+  }
+}
+
+async function probeSitemap(
+  target: string,
+): Promise<{ missing: boolean }> {
+  try {
+    const result = await discoverSitemap(target)
+    // Treat "no sitemap URLs discovered" as missing — covers both no
+    // robots.txt advertisement and 404s on the conventional fallbacks.
+    return { missing: result.sitemapUrls.length === 0 }
+  } catch {
+    return { missing: true }
   }
 }

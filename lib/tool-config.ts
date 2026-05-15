@@ -178,15 +178,18 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
         category: "technical",
         label: "OnPage SEO Checker",
         description:
-          "Crawl a site for on-page SEO issues, duplicate tags, broken resources, and link graph.",
+          "Site-wide audit: weighted health score, prioritized issues by severity, per-URL audit, Core Web Vitals, and schema validation.",
         href: "/technical/onpage",
         endpoints: [
           "/v3/on_page/task_post",
           "/v3/on_page/summary",
           "/v3/on_page/pages",
-          "/v3/on_page/resources",
           "/v3/on_page/links",
           "/v3/on_page/duplicate_tags",
+          "/v3/on_page/microdata",
+          "/v3/on_page/redirect_chains",
+          "/v3/on_page/non_indexable",
+          "/v3/on_page/lighthouse/live/json",
         ],
       },
       {

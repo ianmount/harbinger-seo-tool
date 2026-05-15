@@ -208,6 +208,11 @@ const pageItemSchema = z
     final_url: z.string().nullable().optional(),
     status_code: z.number().nullable().optional(),
     meta: metaSchema.nullable().optional(),
+    // DataForSEO emits a flat `checks` map per page — same keys as the
+    // aggregate counts in `summary.page_metrics.checks`. We surface it
+    // verbatim so the analyzer can apply weighted scoring without an
+    // adapter.
+    checks: z.record(z.string(), z.boolean()).nullable().optional(),
     redirect: z
       .object({
         url: z.string().optional(),
@@ -237,6 +242,7 @@ const pageItemSchema = z
       .nullable()
       .optional(),
     total_dom_size: z.number().nullable().optional(),
+    size: z.number().nullable().optional(),
     custom_js_response: z.unknown().optional(),
     onpage_score: z.number().nullable().optional(),
   })
@@ -327,6 +333,12 @@ export interface OnPagePageRow {
   internalLinksCount: number
   redirectChain: string[]
   loadTimeMs: number
+  /** Per-page check flags from `/v3/on_page/pages` (e.g. `is_4xx_code`,
+   *  `no_h1_tag`, `is_https`). Keys/values verbatim from DataForSEO. */
+  checks: Record<string, boolean>
+  /** Total resource size in bytes when DataForSEO reports it on the page
+   *  row; otherwise 0. Used for the `size_greater_than_3mb` check. */
+  totalSizeBytes: number
 }
 
 export interface OnPageCrawlResult {
@@ -421,6 +433,13 @@ function parsePageItem(raw: unknown): OnPagePageRow | null {
       item.page_timing?.dom_complete,
     ) ?? 0
 
+  const checks: Record<string, boolean> = {}
+  if (item.checks && typeof item.checks === "object") {
+    for (const [k, v] of Object.entries(item.checks)) {
+      if (typeof v === "boolean") checks[k] = v
+    }
+  }
+
   return {
     url: startUrl,
     finalUrl,
@@ -441,6 +460,8 @@ function parsePageItem(raw: unknown): OnPagePageRow | null {
     internalLinksCount,
     redirectChain,
     loadTimeMs,
+    checks,
+    totalSizeBytes: firstNumber(item.size, item.total_dom_size) ?? 0,
   }
 }
 
@@ -729,4 +750,127 @@ export async function fetchRawHtml(
     }
   }
   return null
+}
+
+// ── Audit-tab fetchers ──────────────────────────────────────────────────────
+//
+// These power the OnPage SEO Checker tool. Each unwraps the standard envelope
+// and returns a loose `unknown[]` of items so the analyzer can inspect raw
+// fields without us tightening schemas before real responses are observed.
+
+async function fetchTaskItems(
+  endpoint: string,
+  body: Record<string, unknown>,
+): Promise<unknown[]> {
+  const env = await dfsOnPageRequest(endpoint, [body])
+  const out: unknown[] = []
+  for (const task of env.tasks) {
+    for (const result of task.result ?? []) {
+      const r = result as Record<string, unknown> | null | undefined
+      const items = r?.items
+      if (Array.isArray(items)) out.push(...items)
+    }
+  }
+  return out
+}
+
+export async function fetchSummary(taskId: string): Promise<unknown> {
+  const env = await dfsOnPageRequest("/v3/on_page/summary", [{ id: taskId }])
+  return env.tasks[0]?.result?.[0] ?? null
+}
+
+export async function fetchResources(taskId: string): Promise<unknown[]> {
+  return fetchTaskItems("/v3/on_page/resources", { id: taskId, limit: 1000 })
+}
+
+export async function fetchLinks(taskId: string): Promise<unknown[]> {
+  return fetchTaskItems("/v3/on_page/links", { id: taskId, limit: 1000 })
+}
+
+export async function fetchDuplicateTags(
+  taskId: string,
+  tag: "title" | "description",
+): Promise<unknown[]> {
+  return fetchTaskItems("/v3/on_page/duplicate_tags", {
+    id: taskId,
+    tag,
+    limit: 100,
+  })
+}
+
+export async function fetchMicrodata(taskId: string): Promise<unknown[]> {
+  return fetchTaskItems("/v3/on_page/microdata", { id: taskId, limit: 1000 })
+}
+
+export async function fetchRedirectChains(taskId: string): Promise<unknown[]> {
+  return fetchTaskItems("/v3/on_page/redirect_chains", {
+    id: taskId,
+    limit: 1000,
+  })
+}
+
+export async function fetchNonIndexable(taskId: string): Promise<unknown[]> {
+  return fetchTaskItems("/v3/on_page/non_indexable", {
+    id: taskId,
+    limit: 1000,
+  })
+}
+
+/**
+ * Synchronous Lighthouse audit for a single URL. Used for the Core Web
+ * Vitals card on the OnPage SEO Checker — we run it once on the homepage
+ * as a representative sample rather than for every crawled page, since
+ * per-page Lighthouse would blow the function-duration budget.
+ *
+ * Returns the audited-by-category metric set (LCP/INP/CLS as numbers in
+ * the DFSEO Lighthouse JSON), or `null` if the call fails.
+ */
+export interface LighthouseCwv {
+  url: string
+  lcpMs: number | null
+  inpMs: number | null
+  cls: number | null
+}
+
+export async function fetchLighthouseLive(
+  url: string,
+): Promise<LighthouseCwv | null> {
+  try {
+    const env = await dfsOnPageRequest("/v3/on_page/lighthouse/live/json", [
+      {
+        url,
+        for_mobile: false,
+        categories: ["performance"],
+        audits: [
+          "largest-contentful-paint",
+          "interaction-to-next-paint",
+          "experimental-interaction-to-next-paint",
+          "cumulative-layout-shift",
+        ],
+      },
+    ])
+    const audits = (env.tasks[0]?.result?.[0] as
+      | { audits?: Record<string, { numericValue?: number | null }> }
+      | undefined)?.audits
+    if (!audits) return null
+
+    const lcp = audits["largest-contentful-paint"]?.numericValue
+    const inp =
+      audits["interaction-to-next-paint"]?.numericValue ??
+      audits["experimental-interaction-to-next-paint"]?.numericValue
+    const cls = audits["cumulative-layout-shift"]?.numericValue
+
+    return {
+      url,
+      lcpMs: typeof lcp === "number" ? lcp : null,
+      inpMs: typeof inp === "number" ? inp : null,
+      cls: typeof cls === "number" ? cls : null,
+    }
+  } catch (err) {
+    console.warn(
+      `[dataforseo-onpage] lighthouse failed for ${url}:`,
+      err instanceof Error ? err.message : err,
+    )
+    return null
+  }
 }
