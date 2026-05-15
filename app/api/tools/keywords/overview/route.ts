@@ -284,23 +284,55 @@ export async function POST(request: Request) {
     })
 
     // ── 12-month volume trend (national) ─────────────────────────────────
+    // DFS Labs historical_keyword_data nests volume two levels deep:
+    //   items[].history[].keyword_info.search_volume          (per snapshot)
+    //   items[].history[].keyword_info.monthly_searches[]     (rolling 12)
+    // The cleanest 12-month series is the most recent snapshot's
+    // monthly_searches array. Fall back to iterating snapshots if that's
+    // unavailable (older account tiers don't always return monthly_searches).
     const monthly: TrendPoint[] = []
-    for (const raw of dfsItems<{
-      keyword?: string
-      history?: {
-        year?: number
-        month?: number
+    type HistoryEntry = {
+      year?: number
+      month?: number
+      keyword_info?: {
         search_volume?: number | null
-      }[]
-    }>(historicalEnv)) {
-      if (raw.keyword?.toLowerCase() !== input.keyword.toLowerCase()) continue
-      for (const h of raw.history ?? []) {
-        if (h.year == null || h.month == null) continue
-        const mm = String(h.month).padStart(2, "0")
-        monthly.push({
-          date: `${h.year}-${mm}`,
-          volume: h.search_volume ?? null,
-        })
+        monthly_searches?: {
+          year?: number
+          month?: number
+          search_volume?: number | null
+        }[] | null
+      } | null
+    }
+    const histItem = dfsItems<{
+      keyword?: string
+      history?: HistoryEntry[]
+    }>(historicalEnv).find(
+      (it) => it.keyword?.toLowerCase() === input.keyword.toLowerCase(),
+    )
+    if (histItem?.history?.length) {
+      const ordered = [...histItem.history].sort((a, b) => {
+        const av = (a.year ?? 0) * 12 + (a.month ?? 0)
+        const bv = (b.year ?? 0) * 12 + (b.month ?? 0)
+        return av - bv
+      })
+      const newest = ordered[ordered.length - 1]
+      const rolling = newest?.keyword_info?.monthly_searches ?? []
+      if (rolling.length > 0) {
+        for (const m of rolling) {
+          if (m.year == null || m.month == null) continue
+          monthly.push({
+            date: `${m.year}-${String(m.month).padStart(2, "0")}`,
+            volume: m.search_volume ?? null,
+          })
+        }
+      } else {
+        for (const h of ordered) {
+          if (h.year == null || h.month == null) continue
+          monthly.push({
+            date: `${h.year}-${String(h.month).padStart(2, "0")}`,
+            volume: h.keyword_info?.search_volume ?? null,
+          })
+        }
       }
     }
     monthly.sort((a, b) => a.date.localeCompare(b.date))
