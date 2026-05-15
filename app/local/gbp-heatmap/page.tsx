@@ -13,6 +13,10 @@ import {
   ToolSection,
   useToolRun,
 } from "@/components/tool/use-tool-run"
+import {
+  HeatmapMap,
+  isGoogleMapsConfigured,
+} from "@/components/tool/HeatmapMap"
 import { rankColor } from "@/lib/gbp-heatmap"
 import { findToolByPathname } from "@/lib/tool-config"
 import type { DfsLabsLocation } from "@/lib/types"
@@ -411,6 +415,7 @@ function HeatmapPanel({
     targetRanks.length > 0
       ? targetRanks.reduce((a, b) => a + b, 0) / targetRanks.length
       : null
+  const mapConfigured = isGoogleMapsConfigured()
   return (
     <div className="rounded-xl border border-line bg-card">
       <div className="grid grid-cols-1 md:grid-cols-[220px_1fr]">
@@ -421,10 +426,31 @@ function HeatmapPanel({
           totalPoints={totalPoints}
         />
         <div className="border-t border-line p-4 md:border-l md:border-t-0">
-          <HeatmapGrid grid={grid} />
+          {mapConfigured && target ? (
+            <HeatmapMap
+              grid={grid}
+              centerLat={target.lat}
+              centerLng={target.lng}
+              businessTitle={target.title}
+            />
+          ) : (
+            <>
+              {!mapConfigured ? <MapSetupBanner /> : null}
+              <HeatmapGrid grid={grid} />
+            </>
+          )}
           <Legend />
         </div>
       </div>
+    </div>
+  )
+}
+
+function MapSetupBanner() {
+  return (
+    <div className="mb-3 rounded-md border border-amber-300/60 bg-amber-50/60 px-3 py-2 font-mono text-[11px] text-amber-900">
+      Set <code>NEXT_PUBLIC_GOOGLE_MAPS_API_KEY</code> in Vercel env vars to
+      overlay the grid on a real Google Map. Showing schematic grid instead.
     </div>
   )
 }

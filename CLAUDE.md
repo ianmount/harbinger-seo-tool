@@ -54,6 +54,7 @@ Local dev: set in `.env.local` (never committed; template in `.env.example`).
 - `AIRTABLE_PAT`, `AIRTABLE_BASE_ID`, `AIRTABLE_PARTNERS_TABLE`
 - `APP_PASSWORD`, `APP_AUTH_SECRET` (see Auth below)
 - `BLOB_READ_WRITE_TOKEN` (Audit tab only — Vercel Blob store; optional for the rest of the app)
+- `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` (GBP Heatmap tab only — overlays the rank grid on real Google Map tiles via `@vis.gl/react-google-maps`; falls back to a schematic SVG grid when unset). Optional companion: `NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID` (custom Map ID required by AdvancedMarker; defaults to `DEMO_MAP_ID` which is shared/rate-limited — create your own at Cloud Console → Maps → Map Management).
 
 ## Auth
 Single-password app-level gate in front of the entire app. This protects the production deployment because Vercel's free-tier "Vercel Authentication" only covers previews.
