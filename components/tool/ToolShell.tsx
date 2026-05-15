@@ -48,7 +48,7 @@ export function ToolShell({
         {results}
       </div>
 
-      <footer className="space-y-1 border-t border-dashed border-line pt-3">
+      <footer className="space-y-1 border-t border-dashed border-line pt-3 print:hidden">
         <p className="font-mono text-[10.5px] text-ink-3">
           Spec endpoints ({endpoints.length}):{" "}
           <span className="text-foreground/70">{endpoints.join("  ·  ")}</span>

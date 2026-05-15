@@ -46,8 +46,18 @@ export interface CompetitorRow {
   place_id: string | null
   rating: number | null
   rating_count: number | null
+  /** First non-null lat/lng seen across the grid. Used to drop a pin on the
+   * map when the user selects this competitor. */
+  lat: number | null
+  lng: number | null
+  address: string | null
   avgRank: number
   appearances: number
+  /** Rank at each grid point. Length matches the grid point count.
+   * `null` = the competitor didn't appear in the top-100 at that vantage
+   * point. Indices line up with the order of `gridItemsByPoint` passed to
+   * `rollupCompetitors`. */
+  ranks: (number | null)[]
 }
 
 const KM_PER_DEG_LAT = 111.0
@@ -89,6 +99,8 @@ export interface MapsSerpItem {
   rating?: { value?: number | null; votes_count?: number | null } | null
   address?: string | null
   cid?: string | null
+  latitude?: number | null
+  longitude?: number | null
 }
 
 export function extractMapsItems(envelope: unknown): MapsSerpItem[] {
@@ -207,13 +219,19 @@ export function rollupCompetitors(
     place_id: string | null
     rating: number | null
     rating_count: number | null
+    lat: number | null
+    lng: number | null
+    address: string | null
     rankSum: number
     appearances: number
+    ranks: (number | null)[]
   }
   const map = new Map<string, Acc>()
   const targetTitleLower = targetTitle?.toLowerCase() ?? null
+  const totalPoints = gridItemsByPoint.length
 
-  for (const items of gridItemsByPoint) {
+  for (let pointIdx = 0; pointIdx < totalPoints; pointIdx++) {
+    const items = gridItemsByPoint[pointIdx]
     for (const item of items) {
       const place_id = item.place_id ?? null
       const title = item.title ?? null
@@ -228,18 +246,39 @@ export function rollupCompetitors(
       const rank = item.rank_absolute ?? item.rank_group ?? null
       if (rank == null) continue
       const key = place_id ?? `title:${title.toLowerCase()}`
+      const lat =
+        typeof item.latitude === "number" ? item.latitude : null
+      const lng =
+        typeof item.longitude === "number" ? item.longitude : null
       const existing = map.get(key)
       if (existing) {
         existing.rankSum += rank
         existing.appearances += 1
+        existing.ranks[pointIdx] = rank
+        // Backfill location/address/rating from later rows if we
+        // didn't capture them on the first appearance.
+        if (existing.lat == null && lat != null) existing.lat = lat
+        if (existing.lng == null && lng != null) existing.lng = lng
+        if (existing.address == null && item.address)
+          existing.address = item.address
+        if (existing.rating == null && item.rating?.value != null)
+          existing.rating = item.rating.value
+        if (existing.rating_count == null && item.rating?.votes_count != null)
+          existing.rating_count = item.rating.votes_count
       } else {
+        const ranks: (number | null)[] = new Array(totalPoints).fill(null)
+        ranks[pointIdx] = rank
         map.set(key, {
           title,
           place_id,
           rating: item.rating?.value ?? null,
           rating_count: item.rating?.votes_count ?? null,
+          lat,
+          lng,
+          address: item.address ?? null,
           rankSum: rank,
           appearances: 1,
+          ranks,
         })
       }
     }
@@ -252,8 +291,12 @@ export function rollupCompetitors(
       place_id: acc.place_id,
       rating: acc.rating,
       rating_count: acc.rating_count,
+      lat: acc.lat,
+      lng: acc.lng,
+      address: acc.address,
       avgRank: acc.rankSum / acc.appearances,
       appearances: acc.appearances,
+      ranks: acc.ranks,
     })
   }
   rows.sort((a, b) => {

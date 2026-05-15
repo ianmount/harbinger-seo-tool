@@ -67,8 +67,12 @@ type Competitor = {
   place_id: string | null
   rating: number | null
   rating_count: number | null
+  lat: number | null
+  lng: number | null
+  address: string | null
   avg_rank: number
   appearances: number
+  ranks: (number | null)[]
 }
 
 type Data = {
@@ -313,8 +317,12 @@ export async function POST(request: Request) {
           place_id: c.place_id,
           rating: c.rating,
           rating_count: c.rating_count,
+          lat: c.lat,
+          lng: c.lng,
+          address: c.address,
           avg_rank: c.avgRank,
           appearances: c.appearances,
+          ranks: c.ranks,
         })),
         endpoints_called: endpointsCalled,
       },

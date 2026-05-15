@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect } from "react"
+import { useEffect, useRef } from "react"
 import {
   AdvancedMarker,
   APIProvider,
@@ -22,7 +22,6 @@ export type HeatmapPoint = {
   col: number
   lat: number
   lng: number
-  rank: number | null
 }
 
 export type HeatmapGridDef = {
@@ -36,58 +35,64 @@ export function isGoogleMapsConfigured(): boolean {
   return Boolean(API_KEY)
 }
 
+/**
+ * Heatmap map.
+ *
+ * `grid.points` defines the fixed 5×7 lattice of vantage points around the
+ * scanned business — these never change between target ↔ competitor views.
+ * `ranks` is a parallel array (same length, same index order) giving the
+ * rank to render at each grid point for the currently-selected entity.
+ * `markerLat/Lng/Title` describe the red pin overlay — the target's GBP by
+ * default, the competitor's GBP when one is selected.
+ */
 export function HeatmapMap({
   grid,
-  centerLat,
-  centerLng,
-  businessTitle,
+  ranks,
+  markerLat,
+  markerLng,
+  markerTitle,
 }: {
   grid: HeatmapGridDef
-  centerLat: number
-  centerLng: number
-  businessTitle: string
+  ranks: (number | null)[]
+  markerLat: number
+  markerLng: number
+  markerTitle: string
 }) {
   if (!API_KEY) return null
-  const targetRow = Math.floor(grid.rows / 2)
-  const targetCol = Math.floor(grid.cols / 2)
 
   return (
     <APIProvider apiKey={API_KEY}>
       <div className="h-[480px] w-full overflow-hidden rounded-lg border border-line">
         <Map
           mapId={MAP_ID}
-          defaultCenter={{ lat: centerLat, lng: centerLng }}
+          defaultCenter={{ lat: markerLat, lng: markerLng }}
           defaultZoom={12}
           gestureHandling="cooperative"
           mapTypeControl={false}
           streetViewControl={false}
           fullscreenControl={false}
         >
-          <AutoFitBounds points={grid.points} />
+          {/* Fit-bounds runs once, against the immutable grid lattice, so
+              flipping between competitors doesn't reframe the map. */}
+          <FitGridOnce points={grid.points} />
           <AdvancedMarker
-            position={{ lat: centerLat, lng: centerLng }}
-            title={businessTitle}
+            position={{ lat: markerLat, lng: markerLng }}
+            title={markerTitle}
             zIndex={1000}
           >
             <BusinessMarker />
           </AdvancedMarker>
-          {grid.points.map((p) => {
-            const isCenter = p.row === targetRow && p.col === targetCol
-            // Skip rendering a rank circle at the exact business location
-            // — the red business marker already occupies that pin.
-            if (isCenter) return null
-            return (
-              <AdvancedMarker
-                key={`${p.row}-${p.col}`}
-                position={{ lat: p.lat, lng: p.lng }}
-                title={`Row ${p.row + 1}, Col ${p.col + 1} · rank ${
-                  p.rank ?? "out of top 100"
-                }`}
-              >
-                <RankCircle rank={p.rank} />
-              </AdvancedMarker>
-            )
-          })}
+          {grid.points.map((p, i) => (
+            <AdvancedMarker
+              key={`${p.row}-${p.col}`}
+              position={{ lat: p.lat, lng: p.lng }}
+              title={`Row ${p.row + 1}, Col ${p.col + 1} · rank ${
+                ranks[i] ?? "out of top 100"
+              }`}
+            >
+              <RankCircle rank={ranks[i] ?? null} />
+            </AdvancedMarker>
+          ))}
         </Map>
       </div>
     </APIProvider>
@@ -137,15 +142,20 @@ function BusinessMarker() {
   )
 }
 
-function AutoFitBounds({ points }: { points: HeatmapPoint[] }) {
+/**
+ * Fit the map viewport to the grid lattice exactly once, on first paint.
+ * Subsequent re-renders (e.g. when the user picks a different competitor)
+ * keep the same bounds so the user's mental model of the map doesn't shift.
+ */
+function FitGridOnce({ points }: { points: HeatmapPoint[] }) {
   const map = useMap()
+  const fittedRef = useRef(false)
   useEffect(() => {
-    if (!map || points.length === 0) return
+    if (!map || fittedRef.current || points.length === 0) return
     const bounds = new google.maps.LatLngBounds()
     for (const p of points) bounds.extend({ lat: p.lat, lng: p.lng })
-    // 60px padding gives room around the corner markers so they don't
-    // sit flush against the map edge.
     map.fitBounds(bounds, 60)
+    fittedRef.current = true
   }, [map, points])
   return null
 }
