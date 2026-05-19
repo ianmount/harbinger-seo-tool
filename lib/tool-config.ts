@@ -88,6 +88,21 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
           "/v3/keywords_data/google_ads/search_volume/live",
         ],
       },
+      {
+        slug: "faq-research",
+        category: "keywords",
+        label: "FAQ Research",
+        description:
+          "Mine a list of seed keywords for FAQ-worthy questions. Harvests question-phrase keyword suggestions and related terms, pulls People Also Ask boxes from SERPs at click depth 4, clusters near-duplicates across seeds, and enriches the survivors with search volume, intent, and a frequency-weighted score.",
+        href: "/keywords/faq-research",
+        endpoints: [
+          "/v3/dataforseo_labs/google/keyword_suggestions/live",
+          "/v3/dataforseo_labs/google/related_keywords/live",
+          "/v3/serp/google/organic/live/advanced",
+          "/v3/dataforseo_labs/google/keyword_overview/live",
+          "/v3/dataforseo_labs/google/search_intent/live",
+        ],
+      },
     ],
   },
   {
