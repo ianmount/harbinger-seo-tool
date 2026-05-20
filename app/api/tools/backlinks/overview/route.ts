@@ -106,10 +106,27 @@ export async function POST(request: Request) {
       {
         target,
         limit: 10,
-        network_address_type: "subnet",
+        // "ip" is the proven value used by the Referring Domains tab. The
+        // docs list "subnet" too, but it surfaces a 40501 "Invalid Field:
+        // 'target'" — apparently incompatible with target-by-domain.
+        network_address_type: "ip",
         backlinks_status_type: "live",
       },
     ]
+
+    // Wrap each DFS call so a single endpoint failure surfaces *which*
+    // endpoint failed — dfsRequest's error string only includes the DFS
+    // status code/message, not the URL.
+    async function labeled<T>(endpoint: string, p: Promise<T>): Promise<T> {
+      try {
+        return await p
+      } catch (err) {
+        if (err instanceof Error) {
+          err.message = `${endpoint}: ${err.message}`
+        }
+        throw err
+      }
+    }
 
     const [
       spamEnv,
@@ -119,12 +136,24 @@ export async function POST(request: Request) {
       timeseriesEnv,
       networksEnv,
     ] = await Promise.all([
-      dfs("/v3/backlinks/bulk_spam_score/live", spamBody),
-      dfs("/v3/backlinks/summary/live", summaryBody),
-      dfs("/v3/backlinks/referring_domains/live", domainsBody),
-      dfs("/v3/backlinks/anchors/live", anchorsBody),
-      dfs("/v3/backlinks/timeseries_new_lost_summary/live", timeseriesBody),
-      dfs("/v3/backlinks/referring_networks/live", networksBody),
+      labeled(
+        "bulk_spam_score",
+        dfs("/v3/backlinks/bulk_spam_score/live", spamBody),
+      ),
+      labeled("summary", dfs("/v3/backlinks/summary/live", summaryBody)),
+      labeled(
+        "referring_domains",
+        dfs("/v3/backlinks/referring_domains/live", domainsBody),
+      ),
+      labeled("anchors", dfs("/v3/backlinks/anchors/live", anchorsBody)),
+      labeled(
+        "timeseries_new_lost_summary",
+        dfs("/v3/backlinks/timeseries_new_lost_summary/live", timeseriesBody),
+      ),
+      labeled(
+        "referring_networks",
+        dfs("/v3/backlinks/referring_networks/live", networksBody),
+      ),
     ])
 
     const spamItems = dfsItems<{ target?: string; spam_score?: number | null }>(
