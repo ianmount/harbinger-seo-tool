@@ -186,20 +186,43 @@ async function resolveGeo(geo: string): Promise<DfsLabsLocation | null> {
   return matches[0]?.loc ?? null
 }
 
+/**
+ * Build the `{ location_code, language_code }` pair used by every DFS endpoint
+ * that takes geo here. Always emits `location_code` (not `location_name`)
+ * because the AI Optimization endpoints reject `location_name` outright with
+ * `40501 Invalid Field: 'location_name'` — they only accept `location_code`.
+ *
+ * Returns `null` when the geo string couldn't be resolved upstream; the
+ * caller should surface a 400 in that case rather than silently dropping geo.
+ */
 function locationParams(
   loc: DfsLabsLocation | null,
-  geoRaw: string,
-): Record<string, string | number> {
-  if (loc) {
-    return {
-      location_code: loc.location_code,
-      language_code: "en",
-    }
-  }
+): Record<string, string | number> | null {
+  if (!loc) return null
   return {
-    location_name: geoRaw,
-    language_name: "English",
+    location_code: loc.location_code,
+    language_code: "en",
   }
+}
+
+/**
+ * Walk the DFS location's parent chain to the enclosing Country row. Used
+ * by AI Optimization endpoints (specifically `keywords_search_volume`),
+ * which only meaningfully accept country-level codes — passing a city code
+ * yields a 40501 in some endpoints and zero results in others.
+ */
+async function resolveCountryFor(
+  loc: DfsLabsLocation,
+): Promise<DfsLabsLocation | null> {
+  if (loc.location_type === "Country") return loc
+  const all = await listLabsLocations(loc.country_iso_code ?? "US")
+  const byCode = new Map(all.map((l) => [l.location_code, l]))
+  let cursor: DfsLabsLocation | undefined = loc
+  while (cursor && cursor.location_type !== "Country") {
+    if (cursor.location_code_parent == null) break
+    cursor = byCode.get(cursor.location_code_parent)
+  }
+  return cursor ?? null
 }
 
 /**
@@ -294,9 +317,26 @@ export async function POST(request: Request) {
       const geoRaw = input.geo.trim()
 
       // ── Geo resolution ────────────────────────────────────────────────
+      // Two location buckets here:
+      //   • `geoParams` — the specific city/state the user entered. Used by
+      //     SERP (which accepts and benefits from city granularity).
+      //   • `countryParams` — the country that contains the resolved geo,
+      //     or US by default. Used by AI Optimization endpoints (the
+      //     `ai_keyword_data/keywords_search_volume` endpoint specifically),
+      //     which only meaningfully accept country-level location_codes.
+      // The `llm_mentions/*` endpoints don't accept location params at all
+      // (40501 "Invalid Field: 'location_name'" / 'location_code') — they
+      // run global.
       const geoLoc = await resolveGeo(geoRaw).catch(() => null)
-      const resolvedGeo = geoLoc?.location_name ?? geoRaw
-      const locParams = locationParams(geoLoc, geoRaw)
+      if (!geoLoc) {
+        throw new Error(
+          `Geo "${geoRaw}" could not be matched to a DataForSEO location. Try a more standard format like "Atlanta, Georgia" or "United States".`,
+        )
+      }
+      const resolvedGeo = geoLoc.location_name
+      const countryLoc = await resolveCountryFor(geoLoc).catch(() => null)
+      const geoParams = locationParams(geoLoc)!
+      const countryParams = locationParams(countryLoc ?? geoLoc)!
 
       // ── Stage 1: candidate prompts + AI search volume ─────────────────
       const candidates = await generateCandidatePrompts(domain, resolvedGeo)
@@ -309,7 +349,7 @@ export async function POST(request: Request) {
         [
           {
             keywords: candidates,
-            ...locParams,
+            ...countryParams,
           },
         ],
       )
@@ -365,7 +405,9 @@ export async function POST(request: Request) {
       const repPrompts = promptList.slice(0, SUGGESTION_KEYWORDS_FOR_RANKING)
       const samplePrompts = promptList.slice(0, SAMPLE_RESPONSES)
 
-      const llmAggBody = [{ keyword: domain, ...locParams }]
+      // LLM Mentions endpoints reject any location field (40501) — pass only
+      // the keyword. They run against DFS's global cached LLM-response index.
+      const llmAggBody = [{ keyword: domain }]
 
       const [
         llmAggEnv,
@@ -385,22 +427,22 @@ export async function POST(request: Request) {
         Promise.all(
           repPrompts.map((kw) =>
             dfs("/v3/ai_optimization/llm_mentions/top_domains/live", [
-              { keyword: kw, limit: 20, ...locParams },
-            ]).catch(() => null),
+              { keyword: kw, limit: 20 },
+            ]).catch(captureWarning(warnings, "top_domains", kw)),
           ),
         ),
         Promise.all(
           repPrompts.map((kw) =>
             dfs("/v3/ai_optimization/llm_mentions/top_pages/live", [
-              { keyword: kw, limit: 20, ...locParams },
-            ]).catch(() => null),
+              { keyword: kw, limit: 20 },
+            ]).catch(captureWarning(warnings, "top_pages", kw)),
           ),
         ),
         Promise.all(
           promptList.map((kw) =>
             dfs("/v3/ai_optimization/llm_mentions/search/live", [
-              { keyword: kw, limit: 50, ...locParams },
-            ]).catch(() => null),
+              { keyword: kw, limit: 50 },
+            ]).catch(captureWarning(warnings, "llm_mentions_search", kw)),
           ),
         ),
         Promise.all(
@@ -408,12 +450,10 @@ export async function POST(request: Request) {
             dfs("/v3/serp/google/organic/live/advanced", [
               {
                 keyword: kw,
-                ...locParams,
+                ...geoParams,
                 depth: 10,
-                people_also_ask_click_depth: 1,
-                load_async_ai_overview: true,
               },
-            ]).catch(() => null),
+            ]).catch(captureWarning(warnings, "serp_advanced", kw)),
           ),
         ),
         Promise.all(
@@ -422,7 +462,7 @@ export async function POST(request: Request) {
               "/v3/ai_optimization/chat_gpt/llm_responses/live",
               [{ user_prompt: kw }],
               { timeoutMs: 240_000 },
-            ).catch(() => null),
+            ).catch(captureWarning(warnings, "chat_gpt_response", kw)),
           ),
         ),
       ])
@@ -573,16 +613,12 @@ export async function POST(request: Request) {
       // ── Cross-aggregated metrics across target + competitors ──────────
       let competitors: CompetitorBar[] = []
       if (competitorDomains.length > 0) {
-        const crossKeyword = promptList[0] ?? domain
+        // cross_aggregated_metrics takes `keywords` (brand/domain strings),
+        // not `targets`. No location param — same as the other llm_mentions
+        // endpoints.
         const crossEnv = await dfs(
           "/v3/ai_optimization/llm_mentions/cross_aggregated_metrics/live",
-          [
-            {
-              keyword: crossKeyword,
-              targets: [domain, ...competitorDomains],
-              ...locParams,
-            },
-          ],
+          [{ keywords: [domain, ...competitorDomains] }],
         ).catch((err: unknown) => {
           warnings.push(`cross_aggregated_metrics failed: ${describe(err)}`)
           return null
@@ -590,15 +626,15 @@ export async function POST(request: Request) {
 
         if (crossEnv) {
           type CrossItem = {
+            keyword?: string
             target?: string
             domain?: string
-            keyword?: string
             mentions_count?: number | null
             mentions?: number | null
           }
           const rows = dfsItems<CrossItem>(crossEnv)
           for (const it of rows) {
-            const dom = (it.target ?? it.domain ?? it.keyword ?? "").toLowerCase()
+            const dom = (it.keyword ?? it.target ?? it.domain ?? "").toLowerCase()
             if (!dom) continue
             const count = it.mentions_count ?? it.mentions ?? 0
             competitors.push({
@@ -764,6 +800,27 @@ export async function POST(request: Request) {
 function describe(err: unknown): string {
   if (err instanceof Error) return err.message
   return String(err)
+}
+
+/**
+ * Returns a `.catch` handler that records the first failure per (endpoint,
+ * keyword) into `warnings` and resolves to `null` so the downstream parser
+ * skips that envelope. Dedupes so 25 parallel failures with the same root
+ * cause don't blow up the warnings list.
+ */
+function captureWarning(
+  warnings: string[],
+  endpoint: string,
+  context: string,
+): (err: unknown) => null {
+  return (err: unknown) => {
+    const msg = describe(err)
+    const line = `${endpoint}("${context.slice(0, 40)}"): ${msg}`
+    if (!warnings.some((w) => w.startsWith(`${endpoint}(`))) {
+      warnings.push(line)
+    }
+    return null
+  }
 }
 
 function sameDomain(a: string, b: string): boolean {
