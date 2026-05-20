@@ -8,9 +8,18 @@ const Input = z.object({
   target: z.string().min(3),
 })
 
-type SpamRating = {
-  target: string
-  spam_score: number | null
+type ToxicRating = {
+  /** Count of referring domains with spam_score strictly greater than the
+   * threshold. Pulled from referring_domains/live with a server-side
+   * filter; cheaper and more honest than averaging spam_score across the
+   * whole profile (which dilutes spike-shaped toxicity into a clean-looking
+   * mean). */
+  count: number
+  /** Total referring domains for the target (from summary/live). Null if
+   * the summary call failed. */
+  total: number | null
+  /** Cutoff used for the count above; lets the UI label it. */
+  threshold: number
 }
 
 type Summary = {
@@ -59,13 +68,17 @@ type NetworkRow = {
 type SectionResult<T> = { data: T; error: null } | { data: null; error: string }
 
 type Data = {
-  spam: SectionResult<SpamRating>
+  toxic: SectionResult<ToxicRating>
   summary: SectionResult<Summary>
   domains: SectionResult<DomainRow[]>
   anchors: SectionResult<AnchorRow[]>
   timeseries: SectionResult<TimeseriesPoint[]>
   networks: SectionResult<NetworkRow[]>
 }
+
+/** Moz's commonly-used cutoff. Domains above this are typically treated
+ * as candidates for disavow. */
+const TOXIC_SPAM_THRESHOLD = 50
 
 // Twelve months back, day 1, for the timeseries window.
 function twelveMonthsAgo(): string {
@@ -96,7 +109,17 @@ export async function POST(request: Request) {
   return runTool<typeof Input, Data>(request, Input, async (input, { dfs }) => {
     const target = toDomain(input.target)
 
-    const spamBody = [{ targets: [target] }]
+    // Toxic count: filter referring_domains by spam_score > threshold,
+    // request 1 row, and read the `total_count` the API returns for the
+    // unfiltered total. Strictly cheaper than pulling the full list.
+    const toxicCountBody = [
+      {
+        target,
+        limit: 1,
+        backlinks_status_type: "live",
+        filters: [["backlinks_spam_score", ">", TOXIC_SPAM_THRESHOLD]],
+      },
+    ]
     const summaryBody = [
       {
         target,
@@ -141,7 +164,7 @@ export async function POST(request: Request) {
     // not blank out the whole dashboard. We collect per-section results
     // and surface failures inline.
     const settled = await Promise.allSettled([
-      dfs("/v3/backlinks/bulk_spam_score/live", spamBody),
+      dfs("/v3/backlinks/referring_domains/live", toxicCountBody),
       dfs("/v3/backlinks/summary/live", summaryBody),
       dfs("/v3/backlinks/referring_domains/live", domainsBody),
       dfs("/v3/backlinks/anchors/live", anchorsBody),
@@ -150,7 +173,7 @@ export async function POST(request: Request) {
     ])
 
     const [
-      spamSettled,
+      toxicSettled,
       summarySettled,
       domainsSettled,
       anchorsSettled,
@@ -161,20 +184,6 @@ export async function POST(request: Request) {
     function toErrorString(reason: unknown): string {
       if (reason instanceof Error) return reason.message
       return typeof reason === "string" ? reason : "Unknown error"
-    }
-
-    // ── spam ──────────────────────────────────────────────────────────
-    let spam: SectionResult<SpamRating>
-    if (spamSettled.status === "fulfilled") {
-      const items = dfsItems<{ target?: string; spam_score?: number | null }>(
-        spamSettled.value,
-      )
-      spam = {
-        data: { target, spam_score: items[0]?.spam_score ?? null },
-        error: null,
-      }
-    } else {
-      spam = { data: null, error: toErrorString(spamSettled.reason) }
     }
 
     // ── summary ───────────────────────────────────────────────────────
@@ -210,6 +219,28 @@ export async function POST(request: Request) {
       }
     } else {
       summary = { data: null, error: toErrorString(summarySettled.reason) }
+    }
+
+    // ── toxic count (derived from filtered referring_domains call) ────
+    // `total_count` on the result wrapper reports the count of items
+    // matching the request's filter set BEFORE limit/offset. That's the
+    // number of referring domains above the toxicity threshold.
+    let toxic: SectionResult<ToxicRating>
+    if (toxicSettled.status === "fulfilled") {
+      const env = toxicSettled.value as {
+        tasks?: { result?: { total_count?: number | null }[] | null }[]
+      }
+      const total_count = env.tasks?.[0]?.result?.[0]?.total_count ?? 0
+      toxic = {
+        data: {
+          count: total_count,
+          total: summary.data?.referring_domains ?? null,
+          threshold: TOXIC_SPAM_THRESHOLD,
+        },
+        error: null,
+      }
+    } else {
+      toxic = { data: null, error: toErrorString(toxicSettled.reason) }
     }
 
     // ── referring domains ─────────────────────────────────────────────
@@ -314,7 +345,7 @@ export async function POST(request: Request) {
 
     return {
       data: {
-        spam,
+        toxic,
         summary,
         domains,
         anchors,
@@ -322,7 +353,6 @@ export async function POST(request: Request) {
         networks,
       },
       endpoints: [
-        "/v3/backlinks/bulk_spam_score/live",
         "/v3/backlinks/summary/live",
         "/v3/backlinks/referring_domains/live",
         "/v3/backlinks/anchors/live",

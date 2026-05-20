@@ -19,7 +19,11 @@ import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 import { cn } from "@/lib/utils"
 
-type SpamRating = { target: string; spam_score: number | null }
+type ToxicRating = {
+  count: number
+  total: number | null
+  threshold: number
+}
 
 type Summary = {
   backlinks: number | null
@@ -62,7 +66,7 @@ type NetworkRow = {
 type SectionResult<T> = { data: T; error: null } | { data: null; error: string }
 
 type Data = {
-  spam: SectionResult<SpamRating>
+  toxic: SectionResult<ToxicRating>
   summary: SectionResult<Summary>
   domains: SectionResult<DomainRow[]>
   anchors: SectionResult<AnchorRow[]>
@@ -95,6 +99,8 @@ function fmtDate(s: string | null): string {
   return s.slice(0, 10)
 }
 
+/** Per-row pill coloring uses the absolute 0-100 spam_score for a
+ * single referring domain (Moz convention: 30 / 60 cutoffs). */
 function spamTier(score: number | null): "lo" | "med" | "hi" {
   if (score == null) return "lo"
   if (score >= 60) return "hi"
@@ -102,11 +108,21 @@ function spamTier(score: number | null): "lo" | "med" | "hi" {
   return "lo"
 }
 
-function spamLabel(score: number | null): string {
-  const tier = spamTier(score)
-  if (tier === "hi") return "High risk"
-  if (tier === "med") return "Medium risk"
-  return "Low risk"
+/** Headline tier uses the *share* of toxic referring domains, not an
+ * average score. <5% reads clean, 5-15% is review-worthy, >15% is a
+ * real problem. */
+function toxicTier(pct: number | null): "lo" | "med" | "hi" {
+  if (pct == null) return "lo"
+  if (pct >= 15) return "hi"
+  if (pct >= 5) return "med"
+  return "lo"
+}
+
+function toxicLabel(pct: number | null): string {
+  const tier = toxicTier(pct)
+  if (tier === "hi") return "High toxicity"
+  if (tier === "med") return "Medium toxicity"
+  return "Low toxicity"
 }
 
 const tierTagClasses: Record<"lo" | "med" | "hi", string> = {
@@ -127,9 +143,15 @@ const tierTextClasses: Record<"lo" | "med" | "hi", string> = {
   hi: "text-danger-dark",
 }
 
-function SpamHero({ score }: { score: number | null }) {
-  const tier = spamTier(score)
-  const markerPct = Math.max(0, Math.min(100, score ?? 0))
+function ToxicHero({ rating }: { rating: ToxicRating }) {
+  const { count, total, threshold } = rating
+  const pct = total && total > 0 ? (count / total) * 100 : null
+  const tier = toxicTier(pct)
+  // Gauge marker is clamped 0-30% so the visual range matches the tier
+  // cutoffs (15% high = past the second band). Anything past 30% just
+  // pegs the marker at the right edge — at that point the headline is
+  // already telling the story.
+  const markerPct = pct == null ? 0 : Math.max(0, Math.min(100, (pct / 30) * 100))
   return (
     <div className="grid items-center gap-6 sm:grid-cols-[auto_1fr]">
       <div className="flex items-baseline gap-1">
@@ -139,10 +161,10 @@ function SpamHero({ score }: { score: number | null }) {
             tierTextClasses[tier],
           )}
         >
-          {score ?? "—"}
+          {count.toLocaleString()}
         </span>
         <span className="font-sans text-[18px] text-ink-3 tabular-nums">
-          /100
+          {total == null ? "" : ` / ${total.toLocaleString()}`}
         </span>
       </div>
       <div className="flex flex-col gap-2.5">
@@ -152,13 +174,19 @@ function SpamHero({ score }: { score: number | null }) {
             tierTagClasses[tier],
           )}
         >
-          {spamLabel(score)}
+          {toxicLabel(pct)}
+          {pct != null ? ` · ${pct.toFixed(1)}%` : ""}
         </span>
+        <p className="font-serif text-[12.5px] text-ink-2">
+          Referring domains with spam_score &gt; {threshold}. Count is the
+          honest signal — averages dilute spike-shaped toxicity into a
+          clean-looking mean.
+        </p>
         <div className="relative h-3 overflow-hidden rounded-full">
           <div className="flex h-full w-full">
-            <div className="h-full w-[30%] bg-success-light" />
-            <div className="h-full w-[30%] bg-warning-light" />
-            <div className="h-full w-[40%] bg-danger-light" />
+            <div className="h-full w-[16.66%] bg-success-light" />
+            <div className="h-full w-[33.33%] bg-warning-light" />
+            <div className="h-full w-[50%] bg-danger-light" />
           </div>
           <div
             className="absolute -top-[3px] -bottom-[3px] w-[3px] rounded-sm bg-foreground"
@@ -167,10 +195,10 @@ function SpamHero({ score }: { score: number | null }) {
           />
         </div>
         <div className="flex justify-between font-mono text-[11px] text-ink-3 tabular-nums">
-          <span>0</span>
-          <span>30 low</span>
-          <span>60 medium</span>
-          <span>100 high</span>
+          <span>0%</span>
+          <span>5% low</span>
+          <span>15% medium</span>
+          <span>30%+ high</span>
         </div>
       </div>
     </div>
@@ -390,11 +418,11 @@ export default function BacklinkOverviewPage() {
         ) : data ? (
           <div className="space-y-3">
             <SectionCard
-              title="Spam rating"
-              endpoint="POST /v3/backlinks/bulk_spam_score"
+              title="Toxic referring domains"
+              endpoint="POST /v3/backlinks/referring_domains (filtered)"
             >
-              {withResult(data.spam, (d) => (
-                <SpamHero score={d.spam_score} />
+              {withResult(data.toxic, (d) => (
+                <ToxicHero rating={d} />
               ))}
             </SectionCard>
 
