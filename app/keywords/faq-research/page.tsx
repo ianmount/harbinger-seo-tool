@@ -356,7 +356,6 @@ function ResultsView({
 }) {
   return (
     <div className="space-y-4">
-      <PipelineStages data={data} />
       <MetricsRow counts={data.counts} />
       <RankedList
         rows={filtered}
@@ -367,89 +366,6 @@ function ResultsView({
         onTextFilter={onTextFilter}
         onExport={onExport}
       />
-    </div>
-  )
-}
-
-function PipelineStages({ data }: { data: Data }) {
-  const stages: {
-    num: string
-    title: string
-    desc: string
-    endpoints: string[]
-    detail?: string
-  }[] = [
-    {
-      num: "Stage 1",
-      title: "Question candidate harvest",
-      desc: "For each seed in parallel: pull long-tail suggestions and related keywords, filtered to question phrases with non-zero volume.",
-      endpoints: [
-        "dataforseo_labs_google_keyword_suggestions",
-        "dataforseo_labs_google_related_keywords",
-      ],
-      detail: `${data.counts.candidates_raw.toLocaleString()} raw rows → ${data.counts.candidates_deduped.toLocaleString()} deduped candidates across ${data.seeds.length} seed${data.seeds.length === 1 ? "" : "s"}`,
-    },
-    {
-      num: "Stage 2",
-      title: "PAA harvest",
-      desc: "Top candidates by volume + the original seeds get a SERP scrape with People Also Ask expanded to click depth 4.",
-      endpoints: ["serp_organic_live_advanced"],
-      detail: `${data.counts.paa_seeds.toLocaleString()} SERP calls → ${data.counts.paa_raw.toLocaleString()} raw PAA items`,
-    },
-    {
-      num: "Stage 3",
-      title: "Dedupe + cluster",
-      desc: "Lowercase, strip trailing punctuation, collapse whitespace. Group near-duplicates. Track which seeds surfaced each canonical question.",
-      endpoints: [],
-      detail: `${data.counts.deduped_questions.toLocaleString()} canonical questions`,
-    },
-    {
-      num: "Stage 4",
-      title: "Enrich + rank",
-      desc: "Batch deduped questions (chunks of 700) for volume, CPC, competition, and intent. Score = (frequency × 10) + log(volume + 1) × 5.",
-      endpoints: [
-        "dataforseo_labs_google_keyword_overview",
-        "dataforseo_labs_search_intent",
-      ],
-      detail: `${data.counts.final_faqs.toLocaleString()} ranked FAQs`,
-    },
-  ]
-  return (
-    <div className="space-y-2">
-      {stages.map((s, i) => (
-        <div
-          key={s.num}
-          className="rounded-lg border border-line bg-card px-5 py-3.5"
-        >
-          <div className="flex items-baseline gap-2.5">
-            <span className="inline-block rounded-full bg-info-light px-2.5 py-0.5 font-sans text-[11px] font-medium text-info-dark">
-              {s.num}
-            </span>
-            <span className="font-sans text-[14px] font-medium">{s.title}</span>
-            {i < stages.length - 1 ? null : null}
-          </div>
-          <p className="mt-1.5 text-[13px] text-ink-2">{s.desc}</p>
-          {s.endpoints.length > 0 ? (
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {s.endpoints.map((ep) => (
-                <code
-                  key={ep}
-                  className="rounded-md bg-secondary px-2 py-0.5 font-mono text-[11px] text-ink-2"
-                >
-                  {ep}
-                </code>
-              ))}
-            </div>
-          ) : (
-            <code className="mt-2 inline-block rounded-md border border-dashed border-line bg-transparent px-2 py-0.5 font-mono text-[11px] text-ink-3">
-              none — local processing only
-            </code>
-          )}
-          {s.detail ? (
-            <p className="mt-2 font-mono text-[11px] text-ink-3">{s.detail}</p>
-          ) : null}
-        </div>
-      ))}
     </div>
   )
 }
