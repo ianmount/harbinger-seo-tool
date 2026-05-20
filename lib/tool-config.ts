@@ -115,10 +115,9 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
         category: "backlinks",
         label: "Backlink Overview",
         description:
-          "Domain-wide backlink dashboard: spam rating, summary counts, top referring domains, anchor distribution, new vs lost over time, and referring networks.",
+          "Domain-wide backlink dashboard: toxic-domain headline (count of referring domains above spam_score 50), summary counts, top referring domains, anchor distribution, new vs lost over time, and referring networks.",
         href: "/backlinks/overview",
         endpoints: [
-          "/v3/backlinks/bulk_spam_score/live",
           "/v3/backlinks/summary/live",
           "/v3/backlinks/referring_domains/live",
           "/v3/backlinks/anchors/live",
