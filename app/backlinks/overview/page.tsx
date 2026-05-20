@@ -59,13 +59,15 @@ type NetworkRow = {
   backlinks: number | null
 }
 
+type SectionResult<T> = { data: T; error: null } | { data: null; error: string }
+
 type Data = {
-  spam: SpamRating
-  summary: Summary
-  domains: DomainRow[]
-  anchors: AnchorRow[]
-  timeseries: TimeseriesPoint[]
-  networks: NetworkRow[]
+  spam: SectionResult<SpamRating>
+  summary: SectionResult<Summary>
+  domains: SectionResult<DomainRow[]>
+  anchors: SectionResult<AnchorRow[]>
+  timeseries: SectionResult<TimeseriesPoint[]>
+  networks: SectionResult<NetworkRow[]>
 }
 
 const MONTH_LABELS = [
@@ -310,6 +312,22 @@ function SectionCard({
   )
 }
 
+function SectionError({ message }: { message: string }) {
+  return (
+    <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 font-mono text-[12px] text-destructive">
+      {message}
+    </div>
+  )
+}
+
+function withResult<T>(
+  result: SectionResult<T>,
+  render: (data: T) => React.ReactNode,
+): React.ReactNode {
+  if (result.error) return <SectionError message={result.error} />
+  return render(result.data as T)
+}
+
 function SpamPill({ score }: { score: number | null }) {
   if (score == null) return <span className="text-ink-3">—</span>
   const tier = spamTier(score)
@@ -375,59 +393,65 @@ export default function BacklinkOverviewPage() {
               title="Spam rating"
               endpoint="POST /v3/backlinks/bulk_spam_score"
             >
-              <SpamHero score={data.spam.spam_score} />
+              {withResult(data.spam, (d) => (
+                <SpamHero score={d.spam_score} />
+              ))}
             </SectionCard>
 
             <SectionCard
               title="Summary"
               endpoint="POST /v3/backlinks/summary"
             >
-              <KpiGrid summary={data.summary} />
+              {withResult(data.summary, (d) => (
+                <KpiGrid summary={d} />
+              ))}
             </SectionCard>
 
             <SectionCard
               title="Referring domains"
               endpoint="POST /v3/backlinks/referring_domains"
             >
-              {data.domains.length === 0 ? (
-                <p className="font-serif text-[13px] text-ink-3">
-                  No referring domains returned.
-                </p>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>domain</TableHead>
-                      <TableHead className="text-right">backlinks</TableHead>
-                      <TableHead className="text-right">rank</TableHead>
-                      <TableHead className="text-right">spam_score</TableHead>
-                      <TableHead>first_seen</TableHead>
-                      <TableHead>is_lost</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {data.domains.map((r) => (
-                      <TableRow key={r.domain}>
-                        <TableCell className="font-mono text-[12.5px]">
-                          {r.domain}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {fmtInt(r.backlinks)}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {fmtInt(r.rank)}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <SpamPill score={r.spam_score} />
-                        </TableCell>
-                        <TableCell className="tabular-nums">
-                          {fmtDate(r.first_seen)}
-                        </TableCell>
-                        <TableCell>{r.is_lost ? "true" : "false"}</TableCell>
+              {withResult(data.domains, (rows) =>
+                rows.length === 0 ? (
+                  <p className="font-serif text-[13px] text-ink-3">
+                    No referring domains returned.
+                  </p>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>domain</TableHead>
+                        <TableHead className="text-right">backlinks</TableHead>
+                        <TableHead className="text-right">rank</TableHead>
+                        <TableHead className="text-right">spam_score</TableHead>
+                        <TableHead>first_seen</TableHead>
+                        <TableHead>is_lost</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {rows.map((r) => (
+                        <TableRow key={r.domain}>
+                          <TableCell className="font-mono text-[12.5px]">
+                            {r.domain}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {fmtInt(r.backlinks)}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {fmtInt(r.rank)}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <SpamPill score={r.spam_score} />
+                          </TableCell>
+                          <TableCell className="tabular-nums">
+                            {fmtDate(r.first_seen)}
+                          </TableCell>
+                          <TableCell>{r.is_lost ? "true" : "false"}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ),
               )}
             </SectionCard>
 
@@ -435,45 +459,47 @@ export default function BacklinkOverviewPage() {
               title="Anchors"
               endpoint="POST /v3/backlinks/anchors"
             >
-              {data.anchors.length === 0 ? (
-                <p className="font-serif text-[13px] text-ink-3">
-                  No anchor data returned.
-                </p>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>anchor</TableHead>
-                      <TableHead className="text-right">backlinks</TableHead>
-                      <TableHead className="text-right">
-                        referring_domains
-                      </TableHead>
-                      <TableHead className="text-right">dofollow</TableHead>
-                      <TableHead>first_seen</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {data.anchors.map((r) => (
-                      <TableRow key={r.anchor}>
-                        <TableCell className="font-serif">
-                          {r.anchor || "(empty)"}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {fmtInt(r.backlinks)}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {fmtInt(r.referring_domains)}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {fmtInt(r.dofollow)}
-                        </TableCell>
-                        <TableCell className="tabular-nums">
-                          {fmtDate(r.first_seen)}
-                        </TableCell>
+              {withResult(data.anchors, (rows) =>
+                rows.length === 0 ? (
+                  <p className="font-serif text-[13px] text-ink-3">
+                    No anchor data returned.
+                  </p>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>anchor</TableHead>
+                        <TableHead className="text-right">backlinks</TableHead>
+                        <TableHead className="text-right">
+                          referring_domains
+                        </TableHead>
+                        <TableHead className="text-right">dofollow</TableHead>
+                        <TableHead>first_seen</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {rows.map((r) => (
+                        <TableRow key={r.anchor}>
+                          <TableCell className="font-serif">
+                            {r.anchor || "(empty)"}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {fmtInt(r.backlinks)}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {fmtInt(r.referring_domains)}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {fmtInt(r.dofollow)}
+                          </TableCell>
+                          <TableCell className="tabular-nums">
+                            {fmtDate(r.first_seen)}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ),
               )}
             </SectionCard>
 
@@ -481,44 +507,48 @@ export default function BacklinkOverviewPage() {
               title="New vs lost over time"
               endpoint="POST /v3/backlinks/timeseries_new_lost_summary"
             >
-              <NewLostChart points={data.timeseries} />
+              {withResult(data.timeseries, (points) => (
+                <NewLostChart points={points} />
+              ))}
             </SectionCard>
 
             <SectionCard
               title="Referring networks"
               endpoint="POST /v3/backlinks/referring_networks"
             >
-              {data.networks.length === 0 ? (
-                <p className="font-serif text-[13px] text-ink-3">
-                  No referring networks returned.
-                </p>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>network_address</TableHead>
-                      <TableHead className="text-right">
-                        referring_domains
-                      </TableHead>
-                      <TableHead className="text-right">backlinks</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {data.networks.map((r) => (
-                      <TableRow key={r.network_address}>
-                        <TableCell className="font-mono text-[12.5px]">
-                          {r.network_address}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {fmtInt(r.referring_domains)}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {fmtInt(r.backlinks)}
-                        </TableCell>
+              {withResult(data.networks, (rows) =>
+                rows.length === 0 ? (
+                  <p className="font-serif text-[13px] text-ink-3">
+                    No referring networks returned.
+                  </p>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>network_address</TableHead>
+                        <TableHead className="text-right">
+                          referring_domains
+                        </TableHead>
+                        <TableHead className="text-right">backlinks</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {rows.map((r) => (
+                        <TableRow key={r.network_address}>
+                          <TableCell className="font-mono text-[12.5px]">
+                            {r.network_address}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {fmtInt(r.referring_domains)}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {fmtInt(r.backlinks)}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ),
               )}
             </SectionCard>
           </div>
