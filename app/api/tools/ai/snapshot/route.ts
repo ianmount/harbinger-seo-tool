@@ -386,8 +386,14 @@ export async function POST(request: Request) {
       const samplePrompts = promptList.slice(0, SAMPLE_RESPONSES)
 
       // LLM Mentions endpoints reject any location field (40501) — pass only
-      // the keyword. They run against DFS's global cached LLM-response index.
-      const llmAggBody = [{ keyword: domain }]
+      // the target. They run against DFS's global cached LLM-response index.
+      //
+      // Body shape (per dfseo-tools-runner.ts):
+      //   { target: [{ keyword } | { domain }], ... }
+      // `target` is an ARRAY of OBJECTS, where each object carries either
+      // `{ keyword: "..." }` or `{ domain: "..." }`. Passing a flat `keyword`
+      // top-level field (the old shape) now yields 40501.
+      const llmAggBody = [{ target: [{ domain }] }]
 
       const [
         llmAggEnv,
@@ -407,21 +413,25 @@ export async function POST(request: Request) {
         Promise.all(
           repPrompts.map((kw) =>
             dfs("/v3/ai_optimization/llm_mentions/top_domains/live", [
-              { keyword: kw, limit: 20 },
+              { target: [{ keyword: kw }], limit: 20 },
             ]).catch(captureWarning(warnings, "top_domains", kw)),
           ),
         ),
         Promise.all(
           repPrompts.map((kw) =>
             dfs("/v3/ai_optimization/llm_mentions/top_pages/live", [
-              { keyword: kw, limit: 20 },
+              { target: [{ keyword: kw }], limit: 20 },
             ]).catch(captureWarning(warnings, "top_pages", kw)),
           ),
         ),
         Promise.all(
           promptList.map((kw) =>
             dfs("/v3/ai_optimization/llm_mentions/search/live", [
-              { keyword: kw, limit: 50 },
+              {
+                target: [{ keyword: kw }],
+                limit: 50,
+                order_by: ["ai_search_volume,desc"],
+              },
             ]).catch(captureWarning(warnings, "llm_mentions_search", kw)),
           ),
         ),
@@ -440,7 +450,10 @@ export async function POST(request: Request) {
           samplePrompts.map((kw) =>
             dfs(
               "/v3/ai_optimization/chat_gpt/llm_responses/live",
-              [{ user_prompt: kw }],
+              // `model_name` is required (40501 'Invalid Field' if omitted).
+              // gpt-4.1-mini matches the default the existing single-tool
+              // runner uses.
+              [{ user_prompt: kw, model_name: "gpt-4.1-mini" }],
               { timeoutMs: 240_000 },
             ).catch(captureWarning(warnings, "chat_gpt_response", kw)),
           ),
@@ -593,12 +606,16 @@ export async function POST(request: Request) {
       // ── Cross-aggregated metrics across target + competitors ──────────
       let competitors: CompetitorBar[] = []
       if (competitorDomains.length > 0) {
-        // cross_aggregated_metrics takes `keywords` (brand/domain strings),
-        // not `targets`. No location param — same as the other llm_mentions
-        // endpoints.
+        // cross_aggregated_metrics takes a `target` array — one object per
+        // brand to compare. We pass the target domain + auto-detected
+        // competitor domains so DFS returns one row of metrics per domain.
         const crossEnv = await dfs(
           "/v3/ai_optimization/llm_mentions/cross_aggregated_metrics/live",
-          [{ keywords: [domain, ...competitorDomains] }],
+          [
+            {
+              target: [domain, ...competitorDomains].map((d) => ({ domain: d })),
+            },
+          ],
         ).catch((err: unknown) => {
           warnings.push(`cross_aggregated_metrics failed: ${describe(err)}`)
           return null
@@ -607,14 +624,20 @@ export async function POST(request: Request) {
         if (crossEnv) {
           type CrossItem = {
             keyword?: string
-            target?: string
+            target?: { domain?: string; keyword?: string } | string
             domain?: string
             mentions_count?: number | null
             mentions?: number | null
           }
           const rows = dfsItems<CrossItem>(crossEnv)
           for (const it of rows) {
-            const dom = (it.keyword ?? it.target ?? it.domain ?? "").toLowerCase()
+            const fromTarget =
+              typeof it.target === "object" && it.target
+                ? (it.target.domain ?? it.target.keyword ?? "")
+                : typeof it.target === "string"
+                  ? it.target
+                  : ""
+            const dom = (fromTarget || it.keyword || it.domain || "").toLowerCase()
             if (!dom) continue
             const count = it.mentions_count ?? it.mentions ?? 0
             competitors.push({
