@@ -113,10 +113,26 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
       {
         slug: "overview",
         category: "backlinks",
-        label: "Backlinks",
+        label: "Backlink Overview",
+        description:
+          "Domain-wide backlink dashboard: spam rating, summary counts, top referring domains, anchor distribution, new vs lost over time, and referring networks.",
+        href: "/backlinks/overview",
+        endpoints: [
+          "/v3/backlinks/bulk_spam_score/live",
+          "/v3/backlinks/summary/live",
+          "/v3/backlinks/referring_domains/live",
+          "/v3/backlinks/anchors/live",
+          "/v3/backlinks/timeseries_new_lost_summary/live",
+          "/v3/backlinks/referring_networks/live",
+        ],
+      },
+      {
+        slug: "list",
+        category: "backlinks",
+        label: "Backlinks List",
         description:
           "Inbound links pointing at a domain or URL with anchor text and link type.",
-        href: "/backlinks/overview",
+        href: "/backlinks/list",
         endpoints: [
           "/v3/backlinks/backlinks/live",
           "/v3/backlinks/anchors/live",
@@ -146,15 +162,6 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
           "/v3/backlinks/domain_intersection/live",
           "/v3/backlinks/page_intersection/live",
         ],
-      },
-      {
-        slug: "spam-scoring",
-        category: "backlinks",
-        label: "Backlink Spam Scoring",
-        description:
-          "Bulk spam score lookup for a list of referring domains or target URLs.",
-        href: "/backlinks/spam-scoring",
-        endpoints: ["/v3/backlinks/bulk_spam_score/live"],
       },
       {
         slug: "trends",
