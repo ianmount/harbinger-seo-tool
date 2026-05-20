@@ -2,96 +2,241 @@ import { z } from "zod"
 import { dfsCost, dfsItems, runTool } from "@/lib/tool-route"
 
 export const dynamic = "force-dynamic"
-export const maxDuration = 60
+export const maxDuration = 120
 
 const Input = z.object({
   target: z.string().min(3),
-  limit: z.number().int().min(1).max(1000).default(200),
-  mode: z.enum(["as_is", "one_per_domain", "one_per_anchor"]).default("as_is"),
 })
 
-type BacklinkRow = {
-  url_from: string
-  url_to: string
-  anchor: string | null
-  page_from_rank: number | null
-  domain_from_rank: number | null
-  dofollow: boolean
+type SpamRating = {
+  target: string
+  spam_score: number | null
+}
+
+type Summary = {
+  backlinks: number | null
+  referring_domains: number | null
+  rank: number | null
+  referring_ips: number | null
+  referring_subnets: number | null
+  broken_backlinks: number | null
+}
+
+type DomainRow = {
+  domain: string
+  backlinks: number | null
+  rank: number | null
+  spam_score: number | null
   first_seen: string | null
-  last_seen: string | null
+  is_lost: boolean
 }
 
 type AnchorRow = {
   anchor: string
   backlinks: number | null
   referring_domains: number | null
+  dofollow: number | null
   first_seen: string | null
 }
 
-type Data = { backlinks: BacklinkRow[]; anchors: AnchorRow[] }
+type TimeseriesPoint = {
+  date: string
+  new_backlinks: number
+  lost_backlinks: number
+}
+
+type NetworkRow = {
+  network_address: string
+  referring_domains: number | null
+  backlinks: number | null
+}
+
+type Data = {
+  spam: SpamRating
+  summary: Summary
+  domains: DomainRow[]
+  anchors: AnchorRow[]
+  timeseries: TimeseriesPoint[]
+  networks: NetworkRow[]
+}
+
+// Twelve months back, day 1, for the timeseries window.
+function twelveMonthsAgo(): string {
+  const now = new Date()
+  const d = new Date(Date.UTC(now.getUTCFullYear() - 1, now.getUTCMonth(), 1))
+  return d.toISOString().slice(0, 10)
+}
 
 export async function POST(request: Request) {
   return runTool<typeof Input, Data>(request, Input, async (input, { dfs }) => {
-    const backlinksBody = [
+    const target = input.target
+
+    const spamBody = [{ targets: [target] }]
+    const summaryBody = [
       {
-        target: input.target,
-        mode: input.mode,
-        limit: input.limit,
+        target,
+        internal_list_limit: 10,
         backlinks_status_type: "live",
+      },
+    ]
+    const domainsBody = [
+      {
+        target,
+        limit: 25,
+        backlinks_status_type: "live",
+        order_by: ["backlinks_spam_score,desc"],
       },
     ]
     const anchorsBody = [
       {
-        target: input.target,
-        limit: input.limit,
+        target,
+        limit: 25,
+        backlinks_status_type: "live",
+        order_by: ["backlinks,desc"],
+      },
+    ]
+    const timeseriesBody = [
+      {
+        target,
+        group_range: "month",
+        date_from: twelveMonthsAgo(),
+      },
+    ]
+    const networksBody = [
+      {
+        target,
+        limit: 10,
+        network_address_type: "subnet",
         backlinks_status_type: "live",
       },
     ]
 
-    const [backlinksEnv, anchorsEnv] = await Promise.all([
-      dfs("/v3/backlinks/backlinks/live", backlinksBody),
+    const [
+      spamEnv,
+      summaryEnv,
+      domainsEnv,
+      anchorsEnv,
+      timeseriesEnv,
+      networksEnv,
+    ] = await Promise.all([
+      dfs("/v3/backlinks/bulk_spam_score/live", spamBody),
+      dfs("/v3/backlinks/summary/live", summaryBody),
+      dfs("/v3/backlinks/referring_domains/live", domainsBody),
       dfs("/v3/backlinks/anchors/live", anchorsBody),
+      dfs("/v3/backlinks/timeseries_new_lost_summary/live", timeseriesBody),
+      dfs("/v3/backlinks/referring_networks/live", networksBody),
     ])
 
-    const backlinks: BacklinkRow[] = dfsItems<{
-      url_from?: string
-      url_to?: string
-      anchor?: string | null
-      page_from_rank?: number | null
-      domain_from_rank?: number | null
-      dofollow?: boolean
+    const spamItems = dfsItems<{ target?: string; spam_score?: number | null }>(
+      spamEnv,
+    )
+    const spam: SpamRating = {
+      target,
+      spam_score: spamItems[0]?.spam_score ?? null,
+    }
+
+    // summary/live nests one row per task directly under result, not under
+    // items (.tasks[i].result[0] === the row). dfsItems would miss it.
+    const summaryEnvShape = summaryEnv as {
+      tasks?: {
+        result?:
+          | {
+              backlinks?: number | null
+              referring_domains?: number | null
+              referring_main_domains?: number | null
+              rank?: number | null
+              referring_ips?: number | null
+              referring_subnets?: number | null
+              broken_backlinks?: number | null
+            }[]
+          | null
+      }[]
+    }
+    const summaryRaw = summaryEnvShape.tasks?.[0]?.result?.[0] ?? {}
+    const summary: Summary = {
+      backlinks: summaryRaw.backlinks ?? null,
+      referring_domains:
+        summaryRaw.referring_main_domains ??
+        summaryRaw.referring_domains ??
+        null,
+      rank: summaryRaw.rank ?? null,
+      referring_ips: summaryRaw.referring_ips ?? null,
+      referring_subnets: summaryRaw.referring_subnets ?? null,
+      broken_backlinks: summaryRaw.broken_backlinks ?? null,
+    }
+
+    const domains: DomainRow[] = dfsItems<{
+      domain?: string
+      backlinks?: number | null
+      rank?: number | null
+      backlinks_spam_score?: number | null
       first_seen?: string | null
-      last_seen?: string | null
-    }>(backlinksEnv).map((it) => ({
-      url_from: it.url_from ?? "",
-      url_to: it.url_to ?? "",
-      anchor: it.anchor ?? null,
-      page_from_rank: it.page_from_rank ?? null,
-      domain_from_rank: it.domain_from_rank ?? null,
-      dofollow: Boolean(it.dofollow),
+      is_lost?: boolean
+      lost_date?: string | null
+    }>(domainsEnv).map((it) => ({
+      domain: it.domain ?? "",
+      backlinks: it.backlinks ?? null,
+      rank: it.rank ?? null,
+      spam_score: it.backlinks_spam_score ?? null,
       first_seen: it.first_seen ?? null,
-      last_seen: it.last_seen ?? null,
+      is_lost: typeof it.is_lost === "boolean" ? it.is_lost : Boolean(it.lost_date),
     }))
 
     const anchors: AnchorRow[] = dfsItems<{
       anchor?: string
       backlinks?: number | null
       referring_domains?: number | null
+      dofollow?: number | null
       first_seen?: string | null
     }>(anchorsEnv).map((it) => ({
       anchor: it.anchor ?? "",
       backlinks: it.backlinks ?? null,
       referring_domains: it.referring_domains ?? null,
+      dofollow: it.dofollow ?? null,
       first_seen: it.first_seen ?? null,
     }))
 
+    const timeseries: TimeseriesPoint[] = dfsItems<{
+      date?: string
+      new_backlinks?: number | null
+      lost_backlinks?: number | null
+    }>(timeseriesEnv)
+      .filter((it): it is { date: string; new_backlinks?: number | null; lost_backlinks?: number | null } => Boolean(it.date))
+      .map((it) => ({
+        date: it.date.slice(0, 10),
+        new_backlinks: it.new_backlinks ?? 0,
+        lost_backlinks: it.lost_backlinks ?? 0,
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date))
+
+    const networks: NetworkRow[] = dfsItems<{
+      network_address?: string
+      referring_domains?: number | null
+      backlinks?: number | null
+    }>(networksEnv).map((it) => ({
+      network_address: it.network_address ?? "",
+      referring_domains: it.referring_domains ?? null,
+      backlinks: it.backlinks ?? null,
+    }))
+
     return {
-      data: { backlinks, anchors },
+      data: { spam, summary, domains, anchors, timeseries, networks },
       endpoints: [
-        "/v3/backlinks/backlinks/live",
+        "/v3/backlinks/bulk_spam_score/live",
+        "/v3/backlinks/summary/live",
+        "/v3/backlinks/referring_domains/live",
         "/v3/backlinks/anchors/live",
+        "/v3/backlinks/timeseries_new_lost_summary/live",
+        "/v3/backlinks/referring_networks/live",
       ],
-      costUsd: dfsCost(backlinksEnv, anchorsEnv),
+      costUsd: dfsCost(
+        spamEnv,
+        summaryEnv,
+        domainsEnv,
+        anchorsEnv,
+        timeseriesEnv,
+        networksEnv,
+      ),
     }
   })
 }
