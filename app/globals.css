@@ -243,6 +243,44 @@
 }
 
 /* ─────────────────────────────────────────────────────────────────────
+   Generic "keep my background color when printing" helper. Applied via
+   the `print-color-exact` class on KPI tiles, pills, and chart bars in
+   the AI Snapshot dashboard. Safe to use on any colored element that
+   should survive Save-as-PDF.
+   ───────────────────────────────────────────────────────────────── */
+.print-color-exact {
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   Print styles for the AI Snapshot dashboard (`/ai/snapshot`).
+
+   Browser-native PDF export: user clicks "Export PDF", we trigger
+   window.print(), and these rules normalize the layout for letter-size
+   paper. Form chrome and the Run/Export buttons hide; backgrounds and
+   bar fills survive via print-color-adjust.
+   ───────────────────────────────────────────────────────────────── */
+@media print {
+  /* Only apply these rules when an AI Snapshot is on the page — keeps
+     the audit-specific print rules below from clobbering it. */
+  .ai-snapshot {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .ai-snapshot section {
+    page-break-inside: auto;
+  }
+  .ai-snapshot section > div > div {
+    break-inside: avoid;
+  }
+  .ai-snapshot h2,
+  .ai-snapshot h3 {
+    break-after: avoid;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────
    Print styles for the audit dashboard (`/audits/[id]`).
 
    Rules: expand every collapsed section, hide interactive controls

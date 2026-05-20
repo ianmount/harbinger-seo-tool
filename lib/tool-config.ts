@@ -342,56 +342,21 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
     icon: Bot,
     tools: [
       {
-        slug: "visibility",
+        slug: "snapshot",
         category: "ai",
-        label: "Visibility Overview",
+        label: "AI Snapshot",
         description:
-          "Aggregated LLM mention metrics and top domains / pages for a keyword.",
-        href: "/ai/visibility",
-        endpoints: [
-          "/v3/ai_optimization/llm_mentions/aggregated_metrics/live",
-          "/v3/ai_optimization/llm_mentions/top_domains/live",
-          "/v3/ai_optimization/llm_mentions/top_pages/live",
-        ],
-      },
-      {
-        slug: "competitor-research",
-        category: "ai",
-        label: "Competitor Research",
-        description:
-          "Compare LLM mention metrics across multiple brands.",
-        href: "/ai/competitor-research",
-        endpoints: [
-          "/v3/ai_optimization/llm_mentions/cross_aggregated_metrics/live",
-          "/v3/ai_optimization/llm_mentions/aggregated_metrics/live",
-        ],
-      },
-      {
-        slug: "prompt-research",
-        category: "ai",
-        label: "Prompt Research",
-        description:
-          "AI search volume for a prompt plus actual responses from ChatGPT / Claude / Gemini / Perplexity.",
-        href: "/ai/prompt-research",
+          "Live prospect dashboard: how often a brand surfaces in LLM responses and Google's AI Overview, who its AI-search competitors are, and what sources LLMs cite when answering category questions.",
+        href: "/ai/snapshot",
         endpoints: [
           "/v3/ai_optimization/ai_keyword_data/keywords_search_volume/live",
+          "/v3/ai_optimization/llm_mentions/aggregated_metrics/live",
+          "/v3/ai_optimization/llm_mentions/cross_aggregated_metrics/live",
+          "/v3/ai_optimization/llm_mentions/top_domains/live",
+          "/v3/ai_optimization/llm_mentions/top_pages/live",
           "/v3/ai_optimization/llm_mentions/search/live",
           "/v3/ai_optimization/chat_gpt/llm_responses/live",
-          "/v3/ai_optimization/claude/llm_responses/live",
-          "/v3/ai_optimization/gemini/llm_responses/live",
-          "/v3/ai_optimization/perplexity/llm_responses/live",
-        ],
-      },
-      {
-        slug: "brand-performance",
-        category: "ai",
-        label: "Brand Performance",
-        description:
-          "Aggregate LLM mention metrics for a brand, plus raw mention rows.",
-        href: "/ai/brand-performance",
-        endpoints: [
-          "/v3/ai_optimization/llm_mentions/aggregated_metrics/live",
-          "/v3/ai_optimization/llm_mentions/search/live",
+          "/v3/serp/google/organic/live/advanced",
         ],
       },
     ],
