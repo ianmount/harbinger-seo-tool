@@ -5,10 +5,12 @@ import { Download, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { LocationAutocomplete } from "@/components/LocationAutocomplete"
 import { ToolShell } from "@/components/tool/ToolShell"
 import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 import { cn } from "@/lib/utils"
+import type { DfsLabsLocation } from "@/lib/types"
 
 type TopLine = {
   aiMentionRatePct: number | null
@@ -105,7 +107,7 @@ function truncate(text: string, max = 280): string {
 export default function AiSnapshotPage() {
   const tool = findToolByPathname("/ai/snapshot")!
   const [domain, setDomain] = useState("")
-  const [geo, setGeo] = useState("")
+  const [geo, setGeo] = useState<DfsLabsLocation | null>(null)
   const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/ai/snapshot",
   )
@@ -113,20 +115,24 @@ export default function AiSnapshotPage() {
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     const d = domain.trim()
-    const g = geo.trim()
     if (!d) {
       setError("Enter a target domain.")
       return
     }
-    if (!g) {
-      setError("Enter a target geo (city, state, or country).")
+    if (!geo) {
+      setError("Pick a target geo from the dropdown.")
       return
     }
     await run({
       domain: d.replace(/^https?:\/\//i, "").replace(/\/+$/, ""),
-      geo: g,
+      locationCode: geo.location_code,
+      locationName: geo.location_name,
     })
   }
+
+  // LocationAutocomplete is built for multi-select; for a snapshot the user
+  // picks exactly one geo, so a pick replaces whatever was selected before.
+  const selectedGeo = useMemo(() => (geo ? [geo] : []), [geo])
 
   return (
     <ToolShell
@@ -138,33 +144,34 @@ export default function AiSnapshotPage() {
       form={
         <form
           onSubmit={onSubmit}
-          className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end"
+          className="space-y-4"
           data-print-hide
         >
-          <div className="space-y-1.5">
-            <Label htmlFor="snapshot-domain">Target domain</Label>
-            <Input
-              id="snapshot-domain"
-              value={domain}
-              onChange={(e) => setDomain(e.target.value)}
-              placeholder="princecpagroup.com"
-              disabled={loading}
-            />
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto] md:items-end">
+            <div className="space-y-1.5">
+              <Label htmlFor="snapshot-domain">Target domain</Label>
+              <Input
+                id="snapshot-domain"
+                value={domain}
+                onChange={(e) => setDomain(e.target.value)}
+                placeholder="princecpagroup.com"
+                disabled={loading}
+              />
+            </div>
+            <Button type="submit" disabled={loading}>
+              {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Run snapshot
+            </Button>
           </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="snapshot-geo">Target geo</Label>
-            <Input
-              id="snapshot-geo"
-              value={geo}
-              onChange={(e) => setGeo(e.target.value)}
-              placeholder="Atlanta, GA"
-              disabled={loading}
-            />
-          </div>
-          <Button type="submit" disabled={loading}>
-            {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-            Run snapshot
-          </Button>
+          <LocationAutocomplete
+            inputId="snapshot-geo"
+            label="Target geo"
+            selected={selectedGeo}
+            onAdd={(loc) => setGeo(loc)}
+            onRemove={() => setGeo(null)}
+            disabled={loading}
+            helpText="Pick the city, state, or country to scope the SERP / AI-search-volume probes. For national B2B, pick &quot;United States.&quot;"
+          />
         </form>
       }
       results={

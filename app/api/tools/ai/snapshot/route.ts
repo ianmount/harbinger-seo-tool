@@ -43,7 +43,10 @@ const SUGGESTION_KEYWORDS_FOR_RANKING = 5
 
 const Input = z.object({
   domain: z.string().min(1),
-  geo: z.string().min(1),
+  /** DFS location_code chosen via LocationAutocomplete. Always present. */
+  locationCode: z.number().int().positive(),
+  /** Display-only name echoed back into the dashboard header. */
+  locationName: z.string().min(1),
 })
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -149,41 +152,16 @@ function llmDisplayName(key: string): string {
 }
 
 /**
- * Look up the geo string against DataForSEO's Google Ads locations. Returns
- * the matched location if any. Picks the most specific (City > County >
- * State > Country) shortest match by name length.
+ * Look up a DataForSEO location row by its numeric `location_code`. The
+ * client picker (LocationAutocomplete) hands us a validated code; we
+ * round-trip through the cached locations list to recover the full row
+ * (parent chain, location_type) needed for `resolveCountryFor`.
  */
-async function resolveGeo(geo: string): Promise<DfsLabsLocation | null> {
-  const q = geo.trim().toLowerCase()
-  if (!q) return null
+async function lookupLocationByCode(
+  code: number,
+): Promise<DfsLabsLocation | null> {
   const all = await listLabsLocations("US")
-  const matches: { loc: DfsLabsLocation; tier: number }[] = []
-  for (const loc of all) {
-    const name = loc.location_name.toLowerCase()
-    let tier: number
-    if (name === q) tier = 0
-    else if (name.startsWith(`${q},`) || name.startsWith(`${q} `)) tier = 1
-    else if (name.startsWith(q)) tier = 2
-    else if (name.includes(q)) tier = 3
-    else continue
-    matches.push({ loc, tier })
-  }
-  if (matches.length === 0) return null
-  const TYPE_RANK: Record<string, number> = {
-    City: 0,
-    County: 1,
-    Region: 2,
-    State: 3,
-    Country: 4,
-  }
-  matches.sort((a, b) => {
-    if (a.tier !== b.tier) return a.tier - b.tier
-    const tA = TYPE_RANK[a.loc.location_type] ?? 99
-    const tB = TYPE_RANK[b.loc.location_type] ?? 99
-    if (tA !== tB) return tA - tB
-    return a.loc.location_name.length - b.loc.location_name.length
-  })
-  return matches[0]?.loc ?? null
+  return all.find((l) => l.location_code === code) ?? null
 }
 
 /**
@@ -314,23 +292,25 @@ export async function POST(request: Request) {
       const warnings: string[] = []
       const startedAt = Date.now()
       const domain = stripDomain(input.domain)
-      const geoRaw = input.geo.trim()
 
       // ── Geo resolution ────────────────────────────────────────────────
-      // Two location buckets here:
-      //   • `geoParams` — the specific city/state the user entered. Used by
-      //     SERP (which accepts and benefits from city granularity).
-      //   • `countryParams` — the country that contains the resolved geo,
-      //     or US by default. Used by AI Optimization endpoints (the
-      //     `ai_keyword_data/keywords_search_volume` endpoint specifically),
-      //     which only meaningfully accept country-level location_codes.
+      // The client side LocationAutocomplete forwards a DFS-validated
+      // `location_code`. We re-fetch the full row so we have the parent
+      // chain (needed for `resolveCountryFor`). Two location buckets:
+      //   • `geoParams` — the city/state code the user picked. Used by
+      //     SERP, which benefits from city-level granularity.
+      //   • `countryParams` — the country that contains it (US default).
+      //     Used by `keywords_search_volume`, which only meaningfully
+      //     accepts country-level codes.
       // The `llm_mentions/*` endpoints don't accept location params at all
       // (40501 "Invalid Field: 'location_name'" / 'location_code') — they
       // run global.
-      const geoLoc = await resolveGeo(geoRaw).catch(() => null)
+      const geoLoc = await lookupLocationByCode(input.locationCode).catch(
+        () => null,
+      )
       if (!geoLoc) {
         throw new Error(
-          `Geo "${geoRaw}" could not be matched to a DataForSEO location. Try a more standard format like "Atlanta, Georgia" or "United States".`,
+          `DataForSEO location_code ${input.locationCode} could not be looked up. Re-pick the geo from the dropdown.`,
         )
       }
       const resolvedGeo = geoLoc.location_name
@@ -754,7 +734,7 @@ export async function POST(request: Request) {
         data: {
           prospect: {
             domain,
-            geo: geoRaw,
+            geo: input.locationName,
             resolvedGeo,
             promptCount: promptList.length,
             llmCount: KNOWN_LLM_KEYS.length,
