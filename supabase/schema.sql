@@ -271,3 +271,143 @@ end;
 $$;
 
 drop table if exists public.crawl_subscriptions;
+
+-- ── partners ───────────────────────────────────────────────────────────────
+--
+-- Source of truth for the tool's partner records. Replaces the
+-- previous Airtable-based read path; Airtable is no longer consulted at
+-- runtime. The one-shot migration script
+-- (scripts/migrate-airtable-partners.ts) seeds this table from Airtable
+-- the first time and preserves the original Airtable record id in
+-- `airtable_id` so the migration block lower in this file can rewrite
+-- partner_id columns in background_jobs / crawl_runs / task_schedules.
+--
+-- gsc_account / ga4_account record which Google identity owns this
+-- partner's integrations (the same two-account split as
+-- GOOGLE_REFRESH_TOKEN_PARTNERS vs _ASSESSMENTS). gsc_site_url and
+-- ga4_property_id are explicit overrides — when null, the existing
+-- auto-detect helpers in lib/gsc-site-match.ts / lib/ga4-site-match.ts
+-- still run.
+
+create table if not exists public.partners (
+  id                  uuid primary key default gen_random_uuid(),
+  name                text not null,
+  website             text not null,
+  services            text not null default '',
+  service_areas       text not null default '',
+  partner_goals       text,
+  target_audience     text,
+  content_marketing   text,
+  industry_knowledge  text,
+  -- Explicit overrides for the two Google APIs. NULL means "auto-detect".
+  gsc_site_url        text,
+  gsc_account         text check (gsc_account in ('partners', 'assessments')),
+  ga4_property_id     text,
+  ga4_account         text check (ga4_account in ('partners', 'assessments')),
+  -- Migration-only: original Airtable record id, preserved so existing
+  -- rows in background_jobs / crawl_runs / task_schedules can be rewritten
+  -- to the new UUID. NULL for partners onboarded via the tool itself.
+  airtable_id         text unique,
+  -- Free-form flag list (e.g. "services" if the Services field still
+  -- holds the Airtable template boilerplate). Mirrors the Partner type's
+  -- `unfilledContext` field; nullable.
+  unfilled_context    text[],
+  created_at          timestamptz not null default now(),
+  updated_at          timestamptz not null default now()
+);
+
+create index if not exists partners_name_idx on public.partners (lower(name));
+create index if not exists partners_website_idx on public.partners (lower(website));
+
+create or replace function public.partners_set_updated_at()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at := now();
+  return new;
+end;
+$$;
+
+drop trigger if exists partners_updated_at on public.partners;
+create trigger partners_updated_at
+  before update on public.partners
+  for each row execute function public.partners_set_updated_at();
+
+-- ── partner_artifacts ──────────────────────────────────────────────────────
+--
+-- Polymorphic "folder" for each partner. Every tool output that the user
+-- saves to a partner lives here. `kind` is a free-form text column —
+-- the TypeScript PartnerArtifactKind union in lib/types.ts enforces
+-- valid kinds at write time. New kinds don't require a migration.
+--
+-- `data` is the canonical JSON payload (small) and `blob_url` points at
+-- Vercel Blob for large payloads (PDF reports, full crawl exports).
+-- `created_by_session` mirrors background_jobs.session_id semantics so
+-- the UI can show "you saved this" vs "another session saved this".
+
+create table if not exists public.partner_artifacts (
+  id                  uuid primary key default gen_random_uuid(),
+  partner_id          uuid not null references public.partners(id) on delete cascade,
+  kind                text not null,
+  title               text not null,
+  data                jsonb not null default '{}'::jsonb,
+  blob_url            text,
+  -- Optional pointer to the background_jobs row that produced this
+  -- artifact (audits, crawls, etc.). NULL for synchronously-saved
+  -- outputs like a keyword list the user clicked "Save".
+  job_id              uuid references public.background_jobs(id) on delete set null,
+  created_by_session  text,
+  created_at          timestamptz not null default now()
+);
+
+create index if not exists partner_artifacts_partner_kind_idx
+  on public.partner_artifacts (partner_id, kind, created_at desc);
+
+create index if not exists partner_artifacts_kind_idx
+  on public.partner_artifacts (kind, created_at desc);
+
+-- ── 2026-05-22: rewrite partner_id columns from Airtable id → uuid ────────
+--
+-- Existing rows in background_jobs, crawl_runs, and task_schedules were
+-- written when partners lived in Airtable, so their `partner_id text`
+-- columns hold Airtable record ids like "recXXXXXXXXX". After the
+-- migration script has populated `partners.airtable_id`, this block
+-- rewrites every such row to the new Supabase UUID.
+--
+-- Idempotent on three fronts:
+--   1) Rows already holding a UUID (already migrated) don't match the
+--      `recXXXX` substring filter, so they're left alone.
+--   2) Rows whose Airtable id has no corresponding partners row (deleted
+--      Airtable record) are left untouched — they'll surface as "Unknown
+--      partner" in the UI rather than getting orphaned.
+--   3) Re-running after the migration finds no `rec`-prefixed ids to
+--      rewrite, so it's a no-op.
+
+do $$
+begin
+  -- background_jobs.partner_id (denormalized in `input` jsonb, not a column)
+  -- and the snapshot route both look at jobs by airtable id elsewhere — we
+  -- don't touch the jsonb input blob here. Only top-level partner_id
+  -- columns get rewritten.
+
+  if to_regclass('public.background_jobs') is not null then
+    -- background_jobs doesn't have a top-level partner_id column today;
+    -- partner is referenced inside input jsonb. Tasks read partner via
+    -- lib/partners.getPartner(uuid) after the input parser normalizes.
+    -- No-op here.
+    null;
+  end if;
+
+  update public.crawl_runs cr
+  set partner_id = p.id::text
+  from public.partners p
+  where cr.partner_id is not null
+    and cr.partner_id like 'rec%'
+    and p.airtable_id = cr.partner_id;
+
+  update public.task_schedules ts
+  set partner_id = p.id::text
+  from public.partners p
+  where ts.partner_id like 'rec%'
+    and p.airtable_id = ts.partner_id;
+end;
+$$;

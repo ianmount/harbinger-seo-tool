@@ -9,7 +9,7 @@ import {
 } from "@/lib/audit-cost"
 import { renderAuditPdf } from "@/lib/audit-pdf"
 import { buildGscAnalyses } from "@/lib/audit-analyses"
-import { getPartner } from "@/lib/airtable"
+import { getPartner } from "@/lib/partners"
 import { crawlSite } from "@/lib/audit-crawl"
 import {
   backlinkProfile,

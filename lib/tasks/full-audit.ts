@@ -1,6 +1,6 @@
 import "server-only"
 import { z } from "zod"
-import { getPartner } from "@/lib/airtable"
+import { getPartner } from "@/lib/partners"
 import type { TaskRunner } from "@/lib/inngest/functions"
 import { runAuditPipeline, type AuditInput } from "@/lib/tasks/audit"
 import type { Partner, TargetMarket } from "@/lib/types"

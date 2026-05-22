@@ -1,6 +1,6 @@
 import "server-only"
 import { z } from "zod"
-import { getPartner } from "@/lib/airtable"
+import { getPartner } from "@/lib/partners"
 import { crawlSite, CrawlError } from "@/lib/audit-crawl"
 import {
   GSCError,

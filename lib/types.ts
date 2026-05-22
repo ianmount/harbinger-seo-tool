@@ -32,7 +32,10 @@ export type PartnerContextField =
   | "contentMarketing"
   | "industryKnowledge"
 
+export type GoogleAccountSlug = "partners" | "assessments"
+
 export interface Partner {
+  /** Supabase UUID. (Legacy Airtable record ids were migrated to UUIDs.) */
   id: string
   name: string
   services: string
@@ -43,13 +46,55 @@ export interface Partner {
   contentMarketing?: string
   industryKnowledge?: string
   /**
-   * GA4 property identifier from Airtable. Stored as either a bare numeric ID
+   * GA4 property identifier. Stored as either a bare numeric ID
    * ("123456789") or the full resource name ("properties/123456789"). Callers
    * should pass the raw value through `normalizePropertyId` in `lib/ga4.ts`
    * before sending it to the GA4 API.
    */
   ga4PropertyId?: string
+  /** Which Google account owns this partner's GA4 property. */
+  ga4Account?: GoogleAccountSlug
+  /**
+   * Explicit GSC siteUrl override (sc-domain: or https://… form). When
+   * unset, lib/gsc-site-match.ts auto-detects from the partner website.
+   */
+  gscSiteUrl?: string
+  /** Which Google account owns this partner's GSC site. */
+  gscAccount?: GoogleAccountSlug
+  /** Original Airtable record id if this partner was migrated from Airtable. */
+  airtableId?: string
   unfilledContext?: PartnerContextField[]
+}
+
+/**
+ * Kinds of saved tool outputs that live in a partner's folder. The DB
+ * column is free-form text; this union is enforced at the API boundary so
+ * adding a new kind doesn't require a SQL migration.
+ */
+export type PartnerArtifactKind =
+  | "keyword_list"
+  | "faq_research"
+  | "strategy"
+  | "content_brief"
+  | "content_copy"
+  | "backlink_prospects"
+  | "outreach_drafts"
+  | "report"
+  | "technical_crawl"
+  | "competitive_analysis"
+  | "audit"
+
+export interface PartnerArtifact {
+  id: string
+  partnerId: string
+  kind: PartnerArtifactKind
+  title: string
+  /** Canonical small JSON payload. Large payloads spill to blobUrl. */
+  data: unknown
+  blobUrl?: string
+  jobId?: string
+  createdBySession?: string
+  createdAt: string
 }
 
 /**

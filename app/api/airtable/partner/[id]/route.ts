@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { getPartner } from "@/lib/airtable"
+import { getPartner } from "@/lib/partners"
 
 export const dynamic = "force-dynamic"
 

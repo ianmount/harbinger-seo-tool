@@ -1,6 +1,6 @@
 import "server-only"
 import { z } from "zod"
-import { getPartner } from "@/lib/airtable"
+import { getPartner } from "@/lib/partners"
 import {
   computeTechnicalCrawlAttention,
   markJobAttention,
