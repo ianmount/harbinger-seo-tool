@@ -6,73 +6,14 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
-  ResultsTable,
-  type ResultColumn,
-} from "@/components/tool/ResultsTable"
+  BacklinkTrendsView,
+  type BacklinkTrendsData,
+} from "@/components/tool/backlinks/BacklinkTrendsView"
 import { ToolShell } from "@/components/tool/ToolShell"
 import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 
-type Row = {
-  date: string
-  backlinks: number | null
-  referring_domains: number | null
-  new_backlinks: number | null
-  lost_backlinks: number | null
-  new_referring_domains: number | null
-  lost_referring_domains: number | null
-}
-
-type Data = { rows: Row[] }
-
-const formatNum = (n: number | null) =>
-  n == null ? "—" : n.toLocaleString()
-
-const COLUMNS: ResultColumn<Row>[] = [
-  { key: "date", label: "Date", accessor: (r) => r.date },
-  {
-    key: "backlinks",
-    label: "Backlinks",
-    numeric: true,
-    accessor: (r) => r.backlinks,
-    format: (r) => formatNum(r.backlinks),
-  },
-  {
-    key: "referring_domains",
-    label: "Ref. Domains",
-    numeric: true,
-    accessor: (r) => r.referring_domains,
-    format: (r) => formatNum(r.referring_domains),
-  },
-  {
-    key: "new_backlinks",
-    label: "New Links",
-    numeric: true,
-    accessor: (r) => r.new_backlinks,
-    format: (r) => formatNum(r.new_backlinks),
-  },
-  {
-    key: "lost_backlinks",
-    label: "Lost Links",
-    numeric: true,
-    accessor: (r) => r.lost_backlinks,
-    format: (r) => formatNum(r.lost_backlinks),
-  },
-  {
-    key: "new_referring_domains",
-    label: "New Domains",
-    numeric: true,
-    accessor: (r) => r.new_referring_domains,
-    format: (r) => formatNum(r.new_referring_domains),
-  },
-  {
-    key: "lost_referring_domains",
-    label: "Lost Domains",
-    numeric: true,
-    accessor: (r) => r.lost_referring_domains,
-    format: (r) => formatNum(r.lost_referring_domains),
-  },
-]
+type Data = BacklinkTrendsData
 
 export default function BacklinksTrendsPage() {
   const tool = findToolByPathname("/backlinks/trends")!
@@ -129,11 +70,7 @@ export default function BacklinksTrendsPage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable
-            rows={data?.rows ?? []}
-            columns={COLUMNS}
-            filename="backlink-trends"
-          />
+          <BacklinkTrendsView data={data ?? { rows: [] }} />
         )
       }
     />

@@ -13,37 +13,14 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import {
-  ResultsTable,
-  type ResultColumn,
-} from "@/components/tool/ResultsTable"
+  LighthouseView,
+  type LighthouseData,
+} from "@/components/tool/technical/LighthouseView"
 import { ToolShell } from "@/components/tool/ToolShell"
 import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
 import { findToolByPathname } from "@/lib/tool-config"
 
-type Row = {
-  category: string
-  score: number | null
-  display_value: string | null
-}
-type Data = { rows: Row[] }
-
-const COLUMNS: ResultColumn<Row>[] = [
-  { key: "category", label: "Metric", accessor: (r) => r.category },
-  {
-    key: "score",
-    label: "Score",
-    numeric: true,
-    accessor: (r) => r.score,
-    format: (r) =>
-      r.score == null ? "—" : `${Math.round(r.score * 100)} / 100`,
-  },
-  {
-    key: "display_value",
-    label: "Value",
-    accessor: (r) => r.display_value,
-    format: (r) => r.display_value ?? "—",
-  },
-]
+type Data = LighthouseData
 
 export default function LighthousePage() {
   const tool = findToolByPathname("/technical/lighthouse")!
@@ -117,7 +94,7 @@ export default function LighthousePage() {
         error ? (
           <ToolError message={error} />
         ) : (
-          <ResultsTable rows={data?.rows ?? []} columns={COLUMNS} filename="lighthouse" />
+          <LighthouseView data={data ?? { rows: [] }} />
         )
       }
     />

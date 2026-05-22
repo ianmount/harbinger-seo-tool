@@ -12,7 +12,27 @@ import {
 import { toast } from "sonner"
 import { PageHeader } from "@/components/PageHeader"
 import { KeywordListView } from "@/components/partner-workspace/KeywordListView"
+import {
+  BacklinkTrendsView,
+  type BacklinkTrendsData,
+} from "@/components/tool/backlinks/BacklinkTrendsView"
+import {
+  BacklinksListView,
+  type BacklinksListData,
+} from "@/components/tool/backlinks/BacklinksListView"
+import {
+  LinkBuildingView,
+  type LinkBuildingData,
+} from "@/components/tool/backlinks/LinkBuildingView"
+import {
+  ReferringDomainsView,
+  type ReferringDomainsData,
+} from "@/components/tool/backlinks/ReferringDomainsView"
 import { OnpageAuditView } from "@/components/tool/onpage/OnpageAuditView"
+import {
+  LighthouseView,
+  type LighthouseData,
+} from "@/components/tool/technical/LighthouseView"
 import type { AuditReport } from "@/lib/onpage-audit"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
@@ -256,8 +276,10 @@ export default function ArtifactDetailPage({
 }
 
 function ArtifactBody({ artifact }: { artifact: PartnerArtifact }) {
-  // Per-kind rendering. Each branch returns either the rich view + a
-  // collapsible raw-JSON panel, or falls through to the JSON-only view.
+  // Per-kind rendering. Each branch wraps its rich view with a
+  // collapsible raw-JSON panel so power users can still inspect the
+  // payload. Falls through to JSON-only when the saved data doesn't
+  // match the expected shape.
   if (artifact.kind === "keyword_list") {
     return (
       <>
@@ -277,7 +299,99 @@ function ArtifactBody({ artifact }: { artifact: PartnerArtifact }) {
       )
     }
   }
+  if (artifact.kind === "lighthouse_audit") {
+    const parsed = pickShape<LighthouseData>(artifact.data, (o) =>
+      Array.isArray(o.rows),
+    )
+    if (parsed) {
+      return (
+        <>
+          <LighthouseView data={parsed} />
+          <RawDataDetails value={artifact.data} />
+        </>
+      )
+    }
+  }
+  if (artifact.kind === "backlink_prospects") {
+    // /backlinks/list save: { target, capturedAt, backlinks, anchors }
+    const parsed = pickShape<BacklinksListData>(
+      artifact.data,
+      (o) => Array.isArray(o.backlinks) && Array.isArray(o.anchors),
+    )
+    if (parsed) {
+      return (
+        <>
+          <BacklinksListView data={parsed} />
+          <RawDataDetails value={artifact.data} />
+        </>
+      )
+    }
+  }
+  if (artifact.kind === "referring_domains") {
+    const parsed = pickShape<ReferringDomainsData>(
+      artifact.data,
+      (o) => Array.isArray(o.domains) && Array.isArray(o.networks),
+    )
+    if (parsed) {
+      return (
+        <>
+          <ReferringDomainsView data={parsed} />
+          <RawDataDetails value={artifact.data} />
+        </>
+      )
+    }
+  }
+  if (artifact.kind === "backlink_trends") {
+    const parsed = pickShape<BacklinkTrendsData>(artifact.data, (o) =>
+      Array.isArray(o.rows),
+    )
+    if (parsed) {
+      return (
+        <>
+          <BacklinkTrendsView data={parsed} />
+          <RawDataDetails value={artifact.data} />
+        </>
+      )
+    }
+  }
+  if (artifact.kind === "outreach_drafts") {
+    // /backlinks/link-building save shape.
+    const parsed = pickShape<LinkBuildingData>(
+      artifact.data,
+      (o) =>
+        Array.isArray(o.competitors) &&
+        Array.isArray(o.domainIntersection) &&
+        Array.isArray(o.pageIntersection),
+    )
+    if (parsed) {
+      return (
+        <>
+          <LinkBuildingView data={parsed} />
+          <RawDataDetails value={artifact.data} />
+        </>
+      )
+    }
+  }
   return <JsonView value={artifact.data} />
+}
+
+/**
+ * Narrow a saved JSON payload back into a tool's input type. Returns
+ * the value cast to T when the shape predicate accepts it; null
+ * otherwise so callers fall through to the raw-JSON view.
+ *
+ * The save specs wrap each tool's `data` with metadata fields
+ * (`target` / `capturedAt` / etc.) and spread the result in, so the
+ * predicate just checks for the field set the view component needs.
+ */
+function pickShape<T>(
+  value: unknown,
+  pred: (obj: Record<string, unknown>) => boolean,
+): T | null {
+  if (typeof value !== "object" || value === null) return null
+  const obj = value as Record<string, unknown>
+  if (!pred(obj)) return null
+  return obj as unknown as T
 }
 
 function RawDataDetails({ value }: { value: unknown }) {
