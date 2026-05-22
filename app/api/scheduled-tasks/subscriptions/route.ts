@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
-import { getPartner } from "@/lib/airtable"
+import { getPartner } from "@/lib/partners"
 import {
   computeNextRunAt,
   type Frequency,

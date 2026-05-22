@@ -74,9 +74,13 @@ const REQUIRED_KEYS = [
   "DATAFORSEO_PASSWORD",
   "GOOGLE_CLIENT_ID",
   "GOOGLE_CLIENT_SECRET",
-  "AIRTABLE_PAT",
-  "AIRTABLE_BASE_ID",
-  "AIRTABLE_PARTNERS_TABLE",
+  // Supabase is now the source of truth for partners (replaces the
+  // Airtable read path). Without these, partner listing / detail / artifact
+  // routes all fail. Airtable env vars are only needed by the one-shot
+  // migration script (scripts/migrate-airtable-partners.mjs), so they're
+  // not required at runtime anymore.
+  "SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
   "APP_PASSWORD",
   "APP_AUTH_SECRET",
 ] as const satisfies ReadonlyArray<keyof Env>

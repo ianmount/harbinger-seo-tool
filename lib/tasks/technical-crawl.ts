@@ -1,6 +1,6 @@
 import "server-only"
 import { z } from "zod"
-import { getPartner } from "@/lib/airtable"
+import { getPartner, saveArtifact } from "@/lib/partners"
 import {
   computeTechnicalCrawlAttention,
   markJobAttention,
@@ -62,7 +62,7 @@ export const runTechnicalCrawlTask: TaskRunner = async ({ jobId, job }) => {
   if (parsed.data.partnerId) {
     const partner = await getPartner(parsed.data.partnerId).catch(() => null)
     if (!partner) {
-      throw new Error(`Partner ${parsed.data.partnerId} not found in Airtable`)
+      throw new Error(`Partner ${parsed.data.partnerId} not found`)
     }
     partnerId = partner.id
     partnerName = partner.name
@@ -170,6 +170,27 @@ export const runTechnicalCrawlTask: TaskRunner = async ({ jobId, job }) => {
   }
 
   await markJobAttention(jobId, computeTechnicalCrawlAttention(result))
+
+  if (partnerId) {
+    await saveArtifact({
+      partnerId,
+      kind: "technical_crawl",
+      title: `${partnerName ?? domain} — Technical crawl`,
+      data: {
+        crawlId,
+        domain,
+        finishedAt: result.finishedAt,
+        durationSeconds: result.durationSeconds,
+        costUsd: result.costUsd,
+      },
+      jobId,
+    }).catch((err) => {
+      console.warn(
+        `[technical-crawl] failed to save artifact for partner ${partnerId}:`,
+        err,
+      )
+    })
+  }
 
   return {
     result: { runId: crawlId, run: update.data },

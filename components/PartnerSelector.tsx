@@ -31,7 +31,7 @@ export function PartnerSelector() {
 
     async function load() {
       try {
-        const response = await fetch("/api/airtable/partners", {
+        const response = await fetch("/api/partners", {
           signal: abort.signal,
         })
         const body = (await response.json().catch(() => ({}))) as {

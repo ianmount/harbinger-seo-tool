@@ -1,8 +1,15 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import Link from "next/link"
 import type { DateRange } from "react-day-picker"
-import { CalendarIcon, RefreshCwIcon, SearchIcon, XIcon } from "lucide-react"
+import {
+  CalendarIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  SearchIcon,
+  XIcon,
+} from "lucide-react"
 import { PageHeader } from "@/components/PageHeader"
 import { PartnerTile } from "@/components/partner-dashboard/PartnerTile"
 import { Button } from "@/components/ui/button"
@@ -155,20 +162,30 @@ export default function PartnerDashboardPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        eyebrow="Ongoing / Partner Dashboard"
-        title="Partner Dashboard"
-        tail="— health at a glance."
-        subtitle={
-          <>
-            SEO health snapshot for all partners. Click any tile to view{" "}
-            <b className="font-sans font-extrabold not-italic text-foreground">
-              detailed metrics
-            </b>
-            , run DataForSEO actions, or generate a report.
-          </>
-        }
-      />
+      <div className="flex items-start justify-between gap-4">
+        <PageHeader
+          eyebrow="Partners / All"
+          title="Partners"
+          tail="— health at a glance."
+          subtitle={
+            <>
+              SEO health snapshot for every partner in the tool. Click any
+              tile to open that partner&rsquo;s{" "}
+              <b className="font-sans font-extrabold not-italic text-foreground">
+                folder
+              </b>{" "}
+              — saved keyword lists, strategies, content briefs, backlink
+              prospects, reports, and crawls live there.
+            </>
+          }
+        />
+        <Button asChild className="mt-2 shrink-0">
+          <Link href="/partners/new">
+            <PlusIcon className="mr-1.5 size-4" />
+            Onboard Partner
+          </Link>
+        </Button>
+      </div>
 
       {/* Controls */}
       <div className="flex flex-wrap items-center gap-3">
@@ -299,7 +316,17 @@ export default function PartnerDashboardPage() {
       )}
 
       {state.status === "done" && state.snapshots.length === 0 && (
-        <p className="text-sm text-muted-foreground">No partners found in Airtable.</p>
+        <div className="rounded-xl border border-dashed border-border p-8 text-center">
+          <p className="text-sm text-muted-foreground">
+            No partners yet. Onboard your first partner to get started.
+          </p>
+          <Button asChild className="mt-3">
+            <Link href="/partners/new">
+              <PlusIcon className="mr-1.5 size-4" />
+              Onboard Partner
+            </Link>
+          </Button>
+        </div>
       )}
 
       {state.status === "done" &&

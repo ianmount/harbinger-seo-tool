@@ -87,7 +87,7 @@ export function SchedulePipeline() {
     setError(null)
     try {
       const [partnersRes, subsRes] = await Promise.all([
-        fetch("/api/airtable/partners"),
+        fetch("/api/partners"),
         fetch("/api/scheduled-tasks/subscriptions"),
       ])
       const partnersBody = (await partnersRes.json()) as {

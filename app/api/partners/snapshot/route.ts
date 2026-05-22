@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { getPartners } from "@/lib/airtable"
+import { getPartners } from "@/lib/partners"
 import { getDailyClicks, GSCError, listSites } from "@/lib/gsc"
 import { findBestGscSite } from "@/lib/gsc-site-match"
 import { GA4Error, getSeoReport, listProperties } from "@/lib/ga4"

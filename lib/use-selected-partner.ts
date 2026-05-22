@@ -42,7 +42,7 @@ export function useSelectedPartner(): UseSelectedPartnerResult {
     async function load() {
       try {
         const response = await fetch(
-          `/api/airtable/partner/${encodeURIComponent(partnerId!)}`,
+          `/api/partners/${encodeURIComponent(partnerId!)}`,
           { signal: abort.signal },
         )
         const body = (await response.json().catch(() => ({}))) as {
