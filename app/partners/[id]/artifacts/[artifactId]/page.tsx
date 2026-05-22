@@ -11,6 +11,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/PageHeader"
+import { GenericDashboardView } from "@/components/partner-workspace/GenericDashboardView"
 import { KeywordListView } from "@/components/partner-workspace/KeywordListView"
 import {
   BacklinkTrendsView,
@@ -372,7 +373,15 @@ function ArtifactBody({ artifact }: { artifact: PartnerArtifact }) {
       )
     }
   }
-  return <JsonView value={artifact.data} />
+  // No dedicated view yet — generic dashboard auto-renders the payload
+  // as KPI cards + tables. Individual kinds can opt out by adding a
+  // dedicated branch above.
+  return (
+    <>
+      <GenericDashboardView data={artifact.data} />
+      <RawDataDetails value={artifact.data} />
+    </>
+  )
 }
 
 /**
@@ -434,23 +443,4 @@ function parseAuditReport(value: unknown): AuditReport | null {
     return null
   }
   return obj as unknown as AuditReport
-}
-
-function JsonView({ value }: { value: unknown }) {
-  let pretty: string
-  try {
-    pretty = JSON.stringify(value, null, 2)
-  } catch {
-    pretty = String(value)
-  }
-  return (
-    <div>
-      <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-        Raw data
-      </p>
-      <pre className="max-h-[600px] overflow-auto rounded-lg border border-border bg-muted/30 p-4 text-xs leading-relaxed">
-        {pretty}
-      </pre>
-    </div>
-  )
 }
