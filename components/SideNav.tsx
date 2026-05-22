@@ -15,7 +15,7 @@ import { cn } from "@/lib/utils"
  *
  *   ┌──── primary ─────┬──── secondary ──────┐
  *   │ [icon] Keywords  │ ▸ Keyword Overview  │
- *   │ [icon] Backlinks │ ▸ Keyword Magic     │
+ *   │ [icon] Backlinks │ ▸ Keyword Research  │
  *   │ …                │                     │
  *   └──────────────────┴─────────────────────┘
  *

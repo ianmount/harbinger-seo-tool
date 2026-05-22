@@ -365,9 +365,9 @@ export default function KeywordMagicPage() {
           width: 10,
         },
       ],
-      "Keyword Magic",
+      "Keyword Research",
     )
-    await downloadWorkbook(wb, `keyword-magic-${Date.now()}.xlsx`)
+    await downloadWorkbook(wb, `keyword-research-${Date.now()}.xlsx`)
   }
 
   const seedHeader = data ? (
@@ -759,7 +759,7 @@ export default function KeywordMagicPage() {
               />
               <Button type="submit" disabled={loading} className="mt-auto">
                 {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                Run Keyword Magic
+                Run Keyword Research
               </Button>
             </div>
           </div>

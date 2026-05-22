@@ -21,7 +21,7 @@ const TAB_LABELS: Record<string, string> = {
   "/keywords": "Keywords",
   "/backlinks": "Backlinks",
   "/technical": "Technical",
-  "/competitive": "Competitive Analysis",
+  "/competitive": "Analysis",
   "/local": "Local",
   "/ai": "AI",
   "/partners": "Partner Dashboard",

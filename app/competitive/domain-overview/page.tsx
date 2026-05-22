@@ -123,7 +123,7 @@ export default function DomainOverviewPage() {
 
   return (
     <ToolShell
-      category="Competitive Analysis"
+      category="Analysis"
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}

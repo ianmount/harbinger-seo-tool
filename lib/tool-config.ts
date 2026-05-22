@@ -77,7 +77,7 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
       {
         slug: "magic",
         category: "keywords",
-        label: "Keyword Magic Tool",
+        label: "Keyword Research",
         description:
           "Discover keyword ideas, suggestions, and related terms from a seed keyword.",
         href: "/keywords/magic",
@@ -183,18 +183,6 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
     icon: Globe,
     tools: [
       {
-        slug: "domain-analytics",
-        category: "technical",
-        label: "Domain Analytics",
-        description:
-          "Tech stack fingerprint and WHOIS overview for a domain.",
-        href: "/technical/domain-analytics",
-        endpoints: [
-          "/v3/domain_analytics/technologies/domain_technologies/live",
-          "/v3/domain_analytics/whois/overview/live",
-        ],
-      },
-      {
         slug: "onpage",
         category: "technical",
         label: "OnPage SEO Checker",
@@ -225,40 +213,11 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
           "/v3/on_page/lighthouse/task_post",
         ],
       },
-      {
-        slug: "content-analysis",
-        category: "technical",
-        label: "Content Analysis",
-        description:
-          "Citation count, sentiment, and rating distribution for a keyword across the open web.",
-        href: "/technical/content-analysis",
-        endpoints: [
-          "/v3/content_analysis/search/live",
-          "/v3/content_analysis/summary/live",
-          "/v3/content_analysis/sentiment_analysis/live",
-          "/v3/content_analysis/rating_distribution/live",
-          "/v3/content_analysis/phrase_trends/live",
-          "/v3/content_analysis/category_trends/live",
-        ],
-      },
-      {
-        slug: "entity-mentions",
-        category: "technical",
-        label: "Entity / Brand Mentions",
-        description:
-          "Surface mentions of an entity across the open web and LLM responses.",
-        href: "/technical/entity-mentions",
-        endpoints: [
-          "/v3/content_analysis/search/live",
-          "/v3/ai_optimization/llm_mentions/search/live",
-          "/v3/ai_optimization/llm_mentions/aggregated_metrics/live",
-        ],
-      },
     ],
   },
   {
     slug: "competitive",
-    label: "Competitive Analysis",
+    label: "Analysis",
     icon: TrendingUp,
     tools: [
       {
@@ -300,34 +259,6 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
     label: "Local",
     icon: MapPin,
     tools: [
-      {
-        slug: "gbp",
-        category: "local",
-        label: "GBP Coverage",
-        description:
-          "Google Business Profile info, listings, and Q&A for a business.",
-        href: "/local/gbp",
-        endpoints: [
-          "/v3/business_data/google/my_business_info/live",
-          "/v3/business_data/google/reviews/task_post",
-          "/v3/business_data/google/extended_reviews/task_post",
-          "/v3/business_data/google/questions_and_answers/live",
-          "/v3/business_data/business_listings/search/live",
-        ],
-      },
-      {
-        slug: "reviews",
-        category: "local",
-        label: "Review Velocity + Sentiment",
-        description:
-          "Sentiment, rating distribution, and phrase trends across reviews for a keyword.",
-        href: "/local/reviews",
-        endpoints: [
-          "/v3/content_analysis/sentiment_analysis/live",
-          "/v3/content_analysis/rating_distribution/live",
-          "/v3/content_analysis/phrase_trends/live",
-        ],
-      },
       {
         slug: "gbp-heatmap",
         category: "local",
