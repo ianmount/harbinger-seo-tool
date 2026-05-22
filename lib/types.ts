@@ -34,6 +34,18 @@ export type PartnerContextField =
 
 export type GoogleAccountSlug = "partners" | "assessments"
 
+/** One GSC site bound to one of the two authorized Google accounts. */
+export interface GscSiteRef {
+  siteUrl: string
+  account: GoogleAccountSlug
+}
+
+/** One GA4 property bound to one of the two authorized Google accounts. */
+export interface Ga4PropertyRef {
+  propertyId: string
+  account: GoogleAccountSlug
+}
+
 export interface Partner {
   /** Supabase UUID. (Legacy Airtable record ids were migrated to UUIDs.) */
   id: string
@@ -46,20 +58,33 @@ export interface Partner {
   contentMarketing?: string
   industryKnowledge?: string
   /**
-   * GA4 property identifier. Stored as either a bare numeric ID
-   * ("123456789") or the full resource name ("properties/123456789"). Callers
-   * should pass the raw value through `normalizePropertyId` in `lib/ga4.ts`
-   * before sending it to the GA4 API.
+   * Full list of GA4 properties bound to this partner. New since
+   * 2026-05-22 (multi-property support). When a partner has multiple
+   * brands/sub-brands each with its own GA4 property, every one lives
+   * here. The legacy `ga4PropertyId` / `ga4Account` scalar fields below
+   * mirror `ga4Properties[0]` and stay populated for backward
+   * compatibility with existing readers (snapshot route, report
+   * section, audit pipeline).
+   */
+  ga4Properties?: Ga4PropertyRef[]
+  /**
+   * GA4 property identifier (first entry of `ga4Properties`, for legacy
+   * readers). Stored as either a bare numeric ID ("123456789") or the
+   * full resource name ("properties/123456789"). Pass through
+   * `normalizePropertyId` in `lib/ga4.ts` before hitting the GA4 API.
    */
   ga4PropertyId?: string
-  /** Which Google account owns this partner's GA4 property. */
+  /** Which Google account owns the first GA4 property. */
   ga4Account?: GoogleAccountSlug
   /**
-   * Explicit GSC siteUrl override (sc-domain: or https://… form). When
-   * unset, lib/gsc-site-match.ts auto-detects from the partner website.
+   * Full list of GSC sites bound to this partner. Same multi-property
+   * semantics as `ga4Properties`. Each entry pairs a siteUrl
+   * (sc-domain: or https://… form) with the Google account that owns it.
    */
+  gscSites?: GscSiteRef[]
+  /** Explicit GSC siteUrl (first entry of `gscSites`, for legacy readers). */
   gscSiteUrl?: string
-  /** Which Google account owns this partner's GSC site. */
+  /** Which Google account owns the first GSC site. */
   gscAccount?: GoogleAccountSlug
   /** Original Airtable record id if this partner was migrated from Airtable. */
   airtableId?: string

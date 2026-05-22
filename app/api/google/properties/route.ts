@@ -26,11 +26,17 @@ export async function GET(request: Request) {
   const forceRefresh = url.searchParams.get("refresh") === "1"
   const properties: Ga4PropertyForAccount[] = []
   const errors: { account: GoogleAccountSlug; message: string }[] = []
+  const summary: Record<GoogleAccountSlug, { ok: boolean; count: number; error?: string }> = {
+    partners: { ok: false, count: 0 },
+    assessments: { ok: false, count: 0 },
+  }
 
   await Promise.all(
     accounts.map(async (account) => {
       if (!hasRefreshToken(account)) {
-        errors.push({ account, message: "No refresh token configured" })
+        const message = `${account}: no refresh token configured (set GOOGLE_REFRESH_TOKEN_${account.toUpperCase()})`
+        errors.push({ account, message })
+        summary[account].error = "no refresh token"
         return
       }
       try {
@@ -38,6 +44,7 @@ export async function GET(request: Request) {
         for (const property of accountProperties) {
           properties.push({ account, property })
         }
+        summary[account] = { ok: true, count: accountProperties.length }
       } catch (error) {
         const message =
           error instanceof GA4Error
@@ -46,6 +53,7 @@ export async function GET(request: Request) {
               ? error.message
               : "Unknown GA4 error"
         errors.push({ account, message })
+        summary[account].error = message
       }
     }),
   )
@@ -53,5 +61,10 @@ export async function GET(request: Request) {
   properties.sort((a, b) =>
     a.property.displayName.localeCompare(b.property.displayName),
   )
-  return NextResponse.json({ properties, errors })
+
+  console.log(
+    `[api/google/properties] partners=${summary.partners.count}${summary.partners.error ? ` (err: ${summary.partners.error})` : ""}, assessments=${summary.assessments.count}${summary.assessments.error ? ` (err: ${summary.assessments.error})` : ""}, forceRefresh=${forceRefresh}`,
+  )
+
+  return NextResponse.json({ properties, errors, summary })
 }

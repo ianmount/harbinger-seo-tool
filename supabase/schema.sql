@@ -411,3 +411,45 @@ begin
     and p.airtable_id = ts.partner_id;
 end;
 $$;
+
+-- 2026-05-22 (later that day): multi-property support for partners.
+--
+-- The original schema gave each partner ONE gsc_site_url + ONE
+-- ga4_property_id. In practice partners can own multiple GSC sites
+-- (apex + www variants, sc-domain entries, regional subdomains) and
+-- multiple GA4 properties (one per brand/sub-brand), and the onboarding
+-- form needs to capture all of them.
+--
+-- Schema change: add jsonb array columns alongside the existing scalars.
+-- Each entry is `{ siteUrl | propertyId, account }`. The scalar columns
+-- stay around and hold the FIRST entry of the array — that preserves
+-- ~8 existing call sites that read partner.gscSiteUrl / .ga4PropertyId
+-- as a single value. New code can read the full list off the array
+-- columns. Writers (lib/partners.ts) keep both in sync.
+--
+-- Idempotent: both ALTER and the backfill UPDATE are no-ops on re-run.
+
+alter table public.partners
+  add column if not exists gsc_sites jsonb;
+
+alter table public.partners
+  add column if not exists ga4_properties jsonb;
+
+-- Backfill arrays from the legacy scalar columns wherever the array is
+-- null and the scalar is set. Only runs once per row.
+
+update public.partners
+set gsc_sites = jsonb_build_array(
+  jsonb_build_object('siteUrl', gsc_site_url, 'account', gsc_account)
+)
+where gsc_sites is null
+  and gsc_site_url is not null
+  and gsc_account is not null;
+
+update public.partners
+set ga4_properties = jsonb_build_array(
+  jsonb_build_object('propertyId', ga4_property_id, 'account', ga4_account)
+)
+where ga4_properties is null
+  and ga4_property_id is not null
+  and ga4_account is not null;
