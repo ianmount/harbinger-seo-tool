@@ -23,7 +23,8 @@ An internal tool for Harbinger Marketing's SEO engineer to run the full 6-month 
 2. **DataForSEO** — keyword research (volume, difficulty, suggestions), SERP data, backlink research. Basic Auth with login+password.
 3. **Google Search Console** — query performance data per partner site. OAuth 2.0 via googleapis. Scope: `webmasters.readonly`.
 4. **Google Analytics 4** — behavioral/conversion data (sessions, users, conversions, landing pages, traffic sources) per partner property. Shares the same OAuth client + refresh token as GSC. Scope: `analytics.readonly` (also covers the GA4 Admin API for property enumeration). Wrapped by `lib/ga4.ts`.
-5. **Airtable** — source of truth for partner info (name, services, location, site URL, GA4 property ID, GSC siteUrl format). Read-only for MVP.
+5. **Airtable** — *legacy* partner data. Used by the one-shot migration script (`scripts/migrate-airtable-partners.mjs`) to seed Supabase. As of 2026-05-22, Supabase is the runtime source of truth for partners; Airtable is no longer consulted by the app. `AIRTABLE_*` env vars stay around only so the migration script can be re-run if new partners land in Airtable from outside the tool.
+6. **Supabase** — source of truth for everything that needs to persist. Three tables drive the tool: `partners` (canonical partner records, replaces Airtable), `partner_artifacts` (the SEMRush-style folder system — saved tool outputs per partner, polymorphic via `kind text`), and the existing `background_jobs` / `crawl_runs` / `task_schedules` from the Scheduled Tasks pipeline. Schema lives in `supabase/schema.sql` (idempotent — safe to re-run on existing projects). Server-only client in `lib/supabase.ts`.
 
 ### Libraries added for the Audit tab
 - **DataForSEO On-Page API** — site crawl (replaces the old cheerio + native-fetch crawler, which was being defeated by Cloudflare-class WAFs that returned stripped 200 challenge bodies). Auto-detects whether JS rendering is needed via `/v3/on_page/instant_pages`; static crawls run as-is, JS-rendered crawls add the surcharge. See `lib/dataforseo-onpage.ts`.
@@ -34,7 +35,9 @@ An internal tool for Harbinger Marketing's SEO engineer to run the full 6-month 
 
 ## Folder Structure
 - `app/` — Next.js pages and API routes
-  - `app/api/airtable/` — Airtable reads
+  - `app/api/partners/` — Partner CRUD + per-partner artifacts (Supabase-backed source of truth)
+  - `app/api/google/` — GSC sites + GA4 properties aggregated across both authorized accounts (drives the Onboard Partner dropdowns)
+  - `app/api/airtable/` — *legacy* Airtable proxies. Still exist but delegate to `lib/partners`; safe to delete in a cleanup pass.
   - `app/api/dataforseo/` — DataForSEO proxy (keeps keys server-side)
   - `app/api/gsc/` — GSC OAuth and search analytics
   - `app/api/ga4/` — GA4 Data API proxy (report + conversions-by-page)
@@ -85,26 +88,35 @@ Six tabs:
 5. Backlinks — competitor domains → DataForSEO backlinks → Claude-categorized prospects + outreach drafts
 6. Reporting — partner + date range → GSC data + Claude narrative report
 
-Note: `Prospect` (Audit tab, in-memory only) is distinct from `Partner` (Airtable-backed, used by tabs 2–6).
+Note: `Prospect` (Audit tab, in-memory only) is distinct from `Partner` (Supabase-backed since 2026-05-22, used by tabs 2–6 and the per-partner workspace).
 
 ## MVP Scope — What's NOT Included
-- No database / persistent storage in the tool itself. Outputs that need to survive sessions are written to Airtable.
 - No technical SEO auditing (site crawling, canonical checks, etc.)
 - No Google Business Profile integration
 - No multi-user authentication — single engineer, single machine
 - No outreach email sending — drafts only
 
+## Partners system (SEMRush-style folders)
+- **Top-level "Partners" category** in the sidebar (`lib/tool-config.ts`). Two entries: **All Partners** (`/partners`, the tile dashboard) and **Onboard Partner** (`/partners/new`).
+- **`/partners/[id]` is a workspace** with three tabs (state in `?tab=` query): Overview (existing performance / scheduled tasks / DfSEO / report panels), Artifacts (saved tool outputs), Settings (edit profile + swap GSC/GA4).
+- **Partner records live in Supabase `partners`** (see `lib/partners.ts` for the typed reader/writer). Fields mirror the legacy `Partner` interface plus `gscAccount` / `ga4Account` (`'partners' | 'assessments'`) so the right Google identity is used for each integration.
+- **Onboarding** uses the existing two-account OAuth — no new Google consent. The Onboard Partner form's GSC + GA4 dropdowns are populated by `/api/google/sites` and `/api/google/properties`, both of which aggregate results across the partners + assessments refresh tokens and label each option with its source account.
+- **`partner_artifacts` is the folder system.** One polymorphic row per saved output: `kind` (text, no DB enum — TypeScript `PartnerArtifactKind` enforces the union at the API boundary), `title`, `data` (jsonb), optional `blob_url`, optional `job_id` linking back to the background job that produced it. Listed in the Artifacts tab grouped by kind.
+- **Two save paths.** (a) Manual: `<SaveToPartnerButton kind="…" defaultTitle="…" getData={() => …} />` on any tool output. Drops a Save → dialog that POSTs to `/api/partners/:id/artifacts`. Wired into `/keywords/magic` as the first example. (b) Auto: the three partner-scoped background tasks (`lib/tasks/technical-crawl.ts`, `lib/tasks/full-audit.ts`, `lib/tasks/initial-strategy.ts`) write an artifact row when they finish — best-effort, swallowed errors so a save failure doesn't fail the job.
+- **Adding a new artifact kind:** (1) extend the `PartnerArtifactKind` union in `lib/types.ts`, (2) add the kind to the `KINDS` const in `/api/partners/[id]/artifacts/route.ts`, (3) extend `KIND_OPTIONS` + `KIND_LABEL` in `components/partner-workspace/ArtifactsPanel.tsx`. No SQL migration needed — the DB column is free-form text.
+- **Migration from Airtable:** `scripts/migrate-airtable-partners.mjs` is the one-shot tool. Idempotent (upserts by `airtable_id`). After it runs, re-paste `supabase/schema.sql` in the Supabase SQL editor so the tail migration block rewrites legacy `partner_id text` columns in `crawl_runs` and `task_schedules` from Airtable record ids to the new UUIDs (matches by `airtable_id`).
+
 ## GA4 conventions
-- **Property resolution is hybrid: auto-detect first, Airtable override second.** The default flow is `listProperties()` in `lib/ga4.ts` → for every GA4 property the authed account can see, fetch its web data streams and record the `webStreamData.defaultUri`. `lib/ga4-site-match.ts` then matches the partner's `website` hostname against each stream URL. For 95% of partners this resolves the property automatically with zero Airtable work.
-- **Airtable `GA4 Property ID` field is an explicit override.** Populate it only when (a) the partner has multiple GA4 properties and auto-detect picks the wrong one, (b) the web stream's `defaultUri` doesn't match the public website (e.g. staging domain mapped to prod), or (c) Admin API enumeration is failing and you need to force a specific property. Values may be stored as a bare numeric ID (`"123456789"`) or the canonical resource name (`"properties/123456789"`) — both flow through `normalizePropertyId()` in `lib/ga4.ts`.
+- **Property resolution is hybrid: auto-detect first, explicit override second.** The default flow is `listProperties()` in `lib/ga4.ts` → for every GA4 property the authed account can see, fetch its web data streams and record the `webStreamData.defaultUri`. `lib/ga4-site-match.ts` then matches the partner's `website` hostname against each stream URL. For 95% of partners this resolves the property automatically.
+- **`partners.ga4_property_id` is the explicit override.** Set on the per-partner Settings tab (or at Onboard Partner time). Populate it only when (a) the partner has multiple GA4 properties and auto-detect picks the wrong one, (b) the web stream's `defaultUri` doesn't match the public website (e.g. staging domain mapped to prod), or (c) Admin API enumeration is failing and you need to force a specific property. Values may be stored as a bare numeric ID (`"123456789"`) or the canonical resource name (`"properties/123456789"`) — both flow through `normalizePropertyId()` in `lib/ga4.ts`. Companion column `partners.ga4_account` records whether the property lives under the partners or assessments refresh token.
 - **Property list is cached for 10 minutes** per serverless instance (`PROPERTY_CACHE_TTL_MS`). The first request pays the N+1 cost of enumerating streams across all properties (concurrency-capped at 10); subsequent requests are instant. Hit `/api/ga4/properties?refresh=1` to bust the cache after provisioning a new property.
 - **Integration is optional per partner.** Code paths that use GA4 (`app/reporting`, `app/keyword-research`) must handle the "no match, no override" case gracefully: the Reporting tab shows a "GA4 not configured" badge and generates a GSC-only report; the Keyword Research tab skips the high-converting-page signal entirely.
 - **No partner-side coordination needed.** The SEO Ops Google account that's authorized for GSC has Viewer access to every partner's GA4 property. The same OAuth refresh token drives both APIs; changing GA4 scope requires re-consent (see Auth / Deployment notes below).
-- **Partner onboarding checklist** when adding a new partner record to Airtable:
-  1. Profile, Services, Service Areas, Website populated.
-  2. Partner Goals / Target Audience / Industry Knowledge populated (the record-template boilerplate starts with `**Template**` and is flagged in `Partner.unfilledContext`).
-  3. Confirm the SEO Ops Google account has been granted Viewer on the GA4 property (usually already true, but check for new partners).
-  4. After the first report generation, check the "GA4 property" dropdown on the Reporting tab: if it shows "auto-detected" with the right property, you're done. If it shows "GA4 not configured" or picks the wrong property, paste the property ID into Airtable's `GA4 Property ID` field as an explicit override.
+- **Partner onboarding checklist** — go to `/partners/new` in the app:
+  1. Name, website, services, service areas filled in.
+  2. (Optional) Partner Goals / Target Audience / Content Marketing / Industry Knowledge populated.
+  3. Confirm one of the two SEO Ops Google accounts has been granted access to the partner's GSC + GA4 — pick the matching site and property from the form's dropdowns. The form labels each option with `partners account` vs `assessments account`.
+  4. After the first report generation, check the "GA4 property" dropdown on the Reporting tab: if it shows "auto-detected" with the right property, you're done. If it shows "GA4 not configured" or picks the wrong property, set the override on the partner's Settings tab.
 
 ## Background Jobs
 - **What it is.** Long-running tasks (Audit, Comp Analysis, Initial Strategy, Technical Crawl, Alt Tags) run as durable background jobs via **Inngest** instead of synchronously inside the HTTP handler. The user can navigate away from the tab, get an email when the job finishes, and come back to view results. Status surfaces in a "Jobs" bell tray in the header (`components/JobsTray.tsx`) and on a generic `/jobs/[id]` landing page.
