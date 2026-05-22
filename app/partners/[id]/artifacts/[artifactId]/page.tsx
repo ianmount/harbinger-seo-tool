@@ -11,8 +11,29 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/PageHeader"
+import { GenericDashboardView } from "@/components/partner-workspace/GenericDashboardView"
 import { KeywordListView } from "@/components/partner-workspace/KeywordListView"
+import {
+  BacklinkTrendsView,
+  type BacklinkTrendsData,
+} from "@/components/tool/backlinks/BacklinkTrendsView"
+import {
+  BacklinksListView,
+  type BacklinksListData,
+} from "@/components/tool/backlinks/BacklinksListView"
+import {
+  LinkBuildingView,
+  type LinkBuildingData,
+} from "@/components/tool/backlinks/LinkBuildingView"
+import {
+  ReferringDomainsView,
+  type ReferringDomainsData,
+} from "@/components/tool/backlinks/ReferringDomainsView"
 import { OnpageAuditView } from "@/components/tool/onpage/OnpageAuditView"
+import {
+  LighthouseView,
+  type LighthouseData,
+} from "@/components/tool/technical/LighthouseView"
 import type { AuditReport } from "@/lib/onpage-audit"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
@@ -129,6 +150,27 @@ export default function ArtifactDetailPage({
     }
   }
 
+  function handlePrintPdf() {
+    if (state.status !== "ready") return
+    // Hint the browser's print dialog to suggest a sensible filename. The
+    // CSS in globals.css under `body[data-printing-artifact="1"]` hides
+    // every non-artifact element so what prints matches the rendered view.
+    const originalTitle = document.title
+    document.title = state.artifact.title
+    document.body.setAttribute("data-printing-artifact", "1")
+    const reset = () => {
+      document.body.removeAttribute("data-printing-artifact")
+      document.title = originalTitle
+      window.removeEventListener("afterprint", reset)
+    }
+    window.addEventListener("afterprint", reset)
+    try {
+      window.print()
+    } catch {
+      reset()
+    }
+  }
+
   if (state.status === "loading") {
     return (
       <div className="space-y-6">
@@ -201,10 +243,14 @@ export default function ArtifactDetailPage({
             </a>
           </Button>
         )}
-        {exports.map((spec, i) => (
+        <Button variant="outline" onClick={handlePrintPdf}>
+          <DownloadIcon className="mr-1.5 size-4" />
+          Save as PDF
+        </Button>
+        {exports.map((spec) => (
           <Button
             key={spec.format}
-            variant={i === 0 ? "outline" : "ghost"}
+            variant="outline"
             onClick={() => handleExport(spec)}
           >
             <DownloadIcon className="mr-1.5 size-4" />
@@ -223,14 +269,18 @@ export default function ArtifactDetailPage({
 
       <Separator />
 
-      <ArtifactBody artifact={artifact} />
+      <div className="artifact-print-root">
+        <ArtifactBody artifact={artifact} />
+      </div>
     </div>
   )
 }
 
 function ArtifactBody({ artifact }: { artifact: PartnerArtifact }) {
-  // Per-kind rendering. Each branch returns either the rich view + a
-  // collapsible raw-JSON panel, or falls through to the JSON-only view.
+  // Per-kind rendering. Each branch wraps its rich view with a
+  // collapsible raw-JSON panel so power users can still inspect the
+  // payload. Falls through to JSON-only when the saved data doesn't
+  // match the expected shape.
   if (artifact.kind === "keyword_list") {
     return (
       <>
@@ -250,7 +300,107 @@ function ArtifactBody({ artifact }: { artifact: PartnerArtifact }) {
       )
     }
   }
-  return <JsonView value={artifact.data} />
+  if (artifact.kind === "lighthouse_audit") {
+    const parsed = pickShape<LighthouseData>(artifact.data, (o) =>
+      Array.isArray(o.rows),
+    )
+    if (parsed) {
+      return (
+        <>
+          <LighthouseView data={parsed} />
+          <RawDataDetails value={artifact.data} />
+        </>
+      )
+    }
+  }
+  if (artifact.kind === "backlink_prospects") {
+    // /backlinks/list save: { target, capturedAt, backlinks, anchors }
+    const parsed = pickShape<BacklinksListData>(
+      artifact.data,
+      (o) => Array.isArray(o.backlinks) && Array.isArray(o.anchors),
+    )
+    if (parsed) {
+      return (
+        <>
+          <BacklinksListView data={parsed} />
+          <RawDataDetails value={artifact.data} />
+        </>
+      )
+    }
+  }
+  if (artifact.kind === "referring_domains") {
+    const parsed = pickShape<ReferringDomainsData>(
+      artifact.data,
+      (o) => Array.isArray(o.domains) && Array.isArray(o.networks),
+    )
+    if (parsed) {
+      return (
+        <>
+          <ReferringDomainsView data={parsed} />
+          <RawDataDetails value={artifact.data} />
+        </>
+      )
+    }
+  }
+  if (artifact.kind === "backlink_trends") {
+    const parsed = pickShape<BacklinkTrendsData>(artifact.data, (o) =>
+      Array.isArray(o.rows),
+    )
+    if (parsed) {
+      return (
+        <>
+          <BacklinkTrendsView data={parsed} />
+          <RawDataDetails value={artifact.data} />
+        </>
+      )
+    }
+  }
+  if (artifact.kind === "outreach_drafts") {
+    // /backlinks/link-building save shape.
+    const parsed = pickShape<LinkBuildingData>(
+      artifact.data,
+      (o) =>
+        Array.isArray(o.competitors) &&
+        Array.isArray(o.domainIntersection) &&
+        Array.isArray(o.pageIntersection),
+    )
+    if (parsed) {
+      return (
+        <>
+          <LinkBuildingView data={parsed} />
+          <RawDataDetails value={artifact.data} />
+        </>
+      )
+    }
+  }
+  // No dedicated view yet — generic dashboard auto-renders the payload
+  // as KPI cards + tables. Individual kinds can opt out by adding a
+  // dedicated branch above.
+  return (
+    <>
+      <GenericDashboardView data={artifact.data} />
+      <RawDataDetails value={artifact.data} />
+    </>
+  )
+}
+
+/**
+ * Narrow a saved JSON payload back into a tool's input type. Returns
+ * the value cast to T when the shape predicate accepts it; null
+ * otherwise so callers fall through to the raw-JSON view.
+ *
+ * The save specs wrap each tool's `data` with metadata fields
+ * (`target` / `capturedAt` / etc.) and spread the result in, so the
+ * predicate just checks for the field set the view component needs.
+ */
+function pickShape<T>(
+  value: unknown,
+  pred: (obj: Record<string, unknown>) => boolean,
+): T | null {
+  if (typeof value !== "object" || value === null) return null
+  const obj = value as Record<string, unknown>
+  if (!pred(obj)) return null
+  return obj as unknown as T
 }
 
 function RawDataDetails({ value }: { value: unknown }) {
@@ -293,23 +443,4 @@ function parseAuditReport(value: unknown): AuditReport | null {
     return null
   }
   return obj as unknown as AuditReport
-}
-
-function JsonView({ value }: { value: unknown }) {
-  let pretty: string
-  try {
-    pretty = JSON.stringify(value, null, 2)
-  } catch {
-    pretty = String(value)
-  }
-  return (
-    <div>
-      <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-        Raw data
-      </p>
-      <pre className="max-h-[600px] overflow-auto rounded-lg border border-border bg-muted/30 p-4 text-xs leading-relaxed">
-        {pretty}
-      </pre>
-    </div>
-  )
 }

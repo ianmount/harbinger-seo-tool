@@ -281,6 +281,36 @@
 }
 
 /* ─────────────────────────────────────────────────────────────────────
+   Print styles for the partner-folder artifact viewer
+   (`/partners/[id]/artifacts/[artifactId]`).
+
+   The user clicks "Save as PDF" and the browser print dialog opens with
+   only the artifact body rendered — the surrounding chrome (nav, action
+   bar, raw-data disclosure, etc.) is hidden. Backgrounds and chart fills
+   survive via print-color-adjust.
+   ───────────────────────────────────────────────────────────────── */
+@media print {
+  body {
+    background: #ffffff;
+  }
+  body[data-printing-artifact="1"] {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  body[data-printing-artifact="1"] *:not(.artifact-print-root):not(.artifact-print-root *) {
+    display: none !important;
+  }
+  body[data-printing-artifact="1"] .artifact-print-root {
+    display: block !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  body[data-printing-artifact="1"] .artifact-print-root details {
+    display: none !important;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────
    Print styles for the audit dashboard (`/audits/[id]`).
 
    Rules: expand every collapsed section, hide interactive controls
