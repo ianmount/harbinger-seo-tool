@@ -1,13 +1,32 @@
 "use client"
 
 import type { ReactNode } from "react"
+import { useSearchParams } from "next/navigation"
 import { Card } from "@/components/ui/card"
 import type { ToolRunMeta } from "@/components/tool/use-tool-run"
+import { SaveToPartnerButton } from "@/components/SaveToPartnerButton"
+import type { PartnerArtifactKind } from "@/lib/types"
+
+export interface ToolSaveSpec {
+  /** Which artifact kind this tool's output maps to. */
+  kind: PartnerArtifactKind
+  /** Lazy default title for the Save dialog. */
+  getDefaultTitle: () => string
+  /** Lazy payload captured at click time. Return null/undefined to disable. */
+  getData: () => unknown | Promise<unknown>
+  /**
+   * When false, the Save button is hidden. Tools set this based on
+   * whether their `useToolRun` has data yet.
+   */
+  enabled: boolean
+}
 
 /**
  * Standard layout wrapper for every tool page. Tools render their input
  * form into `form` and their results into `results`. The shell takes
- * care of heading, description, and the card-around-form chrome.
+ * care of heading, description, the card-around-form chrome, and an
+ * optional "Save to partner" button that appears above the results
+ * area whenever the tool declares `save` with `enabled: true`.
  *
  * The footer reports the DFSEO endpoints from `tool-config.ts` (what
  * the tool is *supposed* to hit) and, once a run has completed, the
@@ -21,6 +40,7 @@ export function ToolShell({
   form,
   results,
   meta,
+  save,
 }: {
   category: string
   title: string
@@ -29,6 +49,7 @@ export function ToolShell({
   form: ReactNode
   results: ReactNode
   meta?: ToolRunMeta | null
+  save?: ToolSaveSpec
 }) {
   return (
     <div className="space-y-6">
@@ -43,6 +64,8 @@ export function ToolShell({
       </header>
 
       <Card className="p-5">{form}</Card>
+
+      {save?.enabled && <ToolShellSaveBar save={save} />}
 
       <div className="space-y-6" aria-label="Results">
         {results}
@@ -66,6 +89,28 @@ export function ToolShell({
           </p>
         ) : null}
       </footer>
+    </div>
+  )
+}
+
+/**
+ * Tiny client-only strip that holds the Save button. Reads the
+ * currently-selected partner from the URL (`?partnerId=…`) so the
+ * dialog's partner dropdown is pre-filled when the user navigated here
+ * from a partner workspace.
+ */
+function ToolShellSaveBar({ save }: { save: ToolSaveSpec }) {
+  const params = useSearchParams()
+  const partnerId = params.get("partnerId")
+  return (
+    <div className="flex items-center justify-end">
+      <SaveToPartnerButton
+        kind={save.kind}
+        defaultTitle={save.getDefaultTitle()}
+        getData={save.getData}
+        partnerId={partnerId}
+        variant="outline"
+      />
     </div>
   )
 }

@@ -201,6 +201,21 @@ export default function FaqResearchPage() {
       description={tool.description}
       endpoints={tool.endpoints}
       meta={meta}
+      save={{
+        kind: "faq_research",
+        enabled: data != null,
+        getDefaultTitle: () =>
+          seeds.length > 0
+            ? `FAQ research — ${seeds[0]}${seeds.length > 1 ? ` +${seeds.length - 1}` : ""}`
+            : "FAQ research",
+        getData: () => ({
+          seeds,
+          market: market?.location_name ?? null,
+          paaTopN,
+          capturedAt: new Date().toISOString(),
+          ...data,
+        }),
+      }}
       form={
         <form onSubmit={onSubmit} className="space-y-4">
           <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_280px]">

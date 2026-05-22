@@ -275,15 +275,25 @@ function buildTechnicalCrawlMd(artifact: PartnerArtifact): string {
 
 const KIND_LABEL: Record<PartnerArtifactKind, string> = {
   keyword_list: "Keyword list",
+  keyword_overview: "Keyword overview",
   faq_research: "FAQ research",
   strategy: "Strategy",
   content_brief: "Content brief",
   content_copy: "Content copy",
   backlink_prospects: "Backlink prospects",
+  backlinks_overview: "Backlinks overview",
+  referring_domains: "Referring domains",
+  backlink_trends: "Backlink trends",
   outreach_drafts: "Outreach drafts",
   report: "Report",
   technical_crawl: "Technical crawl",
+  onpage_audit: "On-page audit",
+  lighthouse_audit: "Lighthouse audit",
   competitive_analysis: "Competitive analysis",
+  organic_rankings: "Organic rankings",
+  domain_overview: "Domain overview",
+  gbp_heatmap: "GBP heatmap",
+  ai_snapshot: "AI snapshot",
   audit: "Audit",
 }
 
@@ -311,7 +321,10 @@ export function getArtifactExports(
 
     case "faq_research":
     case "backlink_prospects":
-    case "competitive_analysis": {
+    case "referring_domains":
+    case "backlink_trends":
+    case "competitive_analysis":
+    case "organic_rankings": {
       const rows = pickRowArray(asObject(artifact.data))
       const exports: ArtifactExport[] = []
       if (rows.length > 0) {
@@ -332,7 +345,12 @@ export function getArtifactExports(
     case "content_copy":
     case "outreach_drafts":
     case "report":
-    case "audit": {
+    case "audit":
+    case "keyword_overview":
+    case "backlinks_overview":
+    case "domain_overview":
+    case "onpage_audit":
+    case "lighthouse_audit": {
       return [
         {
           format: "md",
@@ -353,6 +371,22 @@ export function getArtifactExports(
           filename: safeFilename(artifact.title, "md"),
           mimeType: "text/markdown;charset=utf-8",
           build: () => buildTechnicalCrawlMd(artifact),
+        },
+        json,
+      ]
+    }
+
+    case "gbp_heatmap":
+    case "ai_snapshot": {
+      // Dashboard snapshots: structured JSON is the canonical artifact;
+      // a rough MD summary helps for pasting into reports.
+      return [
+        {
+          format: "md",
+          label: "Download Markdown",
+          filename: safeFilename(artifact.title, "md"),
+          mimeType: "text/markdown;charset=utf-8",
+          build: () => buildNarrativeMd(artifact, kindLabel),
         },
         json,
       ]

@@ -111,6 +111,16 @@ export default function ReferringDomainsPage() {
       description={tool.description}
       endpoints={tool.endpoints}
       meta={meta}
+      save={{
+        kind: "referring_domains",
+        enabled: data != null,
+        getDefaultTitle: () => `${target || "Domain"} — Referring domains`,
+        getData: () => ({
+          target,
+          capturedAt: new Date().toISOString(),
+          ...data,
+        }),
+      }}
       form={
         <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
           <div className="grow space-y-1.5 min-w-[260px]">
