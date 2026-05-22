@@ -1,8 +1,15 @@
 "use client"
 
-import { useMemo, useState } from "react"
-import { CheckIcon, ChevronDownIcon, Loader2Icon, XIcon } from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  Loader2Icon,
+  SearchIcon,
+  XIcon,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 import type { GoogleAccountSlug } from "@/lib/types"
@@ -15,8 +22,10 @@ import type { GoogleAccountSlug } from "@/lib/types"
  *
  * UX:
  *   • Trigger button shows "Select <kind>" or "N selected".
- *   • Popover lists every available option grouped by account, with a
- *     checkmark next to selected ones. Clicking toggles inclusion.
+ *   • Popover opens with a search input at the top; typing filters every
+ *     visible option by label + sublabel (case-insensitive substring).
+ *   • Filtered options stay grouped by account, with a checkmark next to
+ *     the selected ones. Clicking toggles inclusion.
  *   • Selected chips render below the trigger with × buttons.
  */
 
@@ -60,6 +69,13 @@ export function GoogleMultiSelect({
   helperText,
 }: GoogleMultiSelectProps) {
   const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState("")
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
+
+  // Reset search query when the popover closes so reopening always starts fresh.
+  useEffect(() => {
+    if (!open) setQuery("")
+  }, [open])
 
   const selectedKeys = useMemo(() => {
     const s = new Set<string>()
@@ -67,14 +83,23 @@ export function GoogleMultiSelect({
     return s
   }, [value])
 
+  const filteredOptions = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return options
+    return options.filter((opt) => {
+      const hay = `${opt.label} ${opt.sublabel ?? ""}`.toLowerCase()
+      return hay.includes(q)
+    })
+  }, [options, query])
+
   const optionsByAccount = useMemo(() => {
     const out: Record<GoogleAccountSlug, GoogleMultiSelectOption[]> = {
       partners: [],
       assessments: [],
     }
-    for (const opt of options) out[opt.account].push(opt)
+    for (const opt of filteredOptions) out[opt.account].push(opt)
     return out
-  }, [options])
+  }, [filteredOptions])
 
   const labelByKey = useMemo(() => {
     const m = new Map<string, GoogleMultiSelectOption>()
@@ -131,11 +156,45 @@ export function GoogleMultiSelect({
         <PopoverContent
           className="w-[--radix-popover-trigger-width] p-0"
           align="start"
+          onOpenAutoFocus={(e) => {
+            // Autofocus the search input instead of the first list item so
+            // the user can start typing immediately.
+            e.preventDefault()
+            searchInputRef.current?.focus()
+          }}
         >
+          <div className="relative border-b border-border">
+            <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              ref={searchInputRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={`Search ${itemNounPlural}…`}
+              className="h-9 rounded-none border-0 pl-8 pr-8 text-sm focus-visible:ring-0"
+              aria-label={`Search ${itemNounPlural}`}
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => {
+                  setQuery("")
+                  searchInputRef.current?.focus()
+                }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded text-muted-foreground hover:text-foreground"
+                aria-label="Clear search"
+              >
+                <XIcon className="size-3.5" />
+              </button>
+            )}
+          </div>
           <div className="max-h-[320px] overflow-y-auto py-1">
             {options.length === 0 ? (
               <p className="px-3 py-4 text-sm text-muted-foreground">
                 No {itemNounPlural} available.
+              </p>
+            ) : filteredOptions.length === 0 ? (
+              <p className="px-3 py-4 text-sm text-muted-foreground">
+                No {itemNounPlural} match &ldquo;{query}&rdquo;.
               </p>
             ) : (
               (["partners", "assessments"] as const).map((account) => {
