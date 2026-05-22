@@ -12,6 +12,8 @@ import {
 import { toast } from "sonner"
 import { PageHeader } from "@/components/PageHeader"
 import { KeywordListView } from "@/components/partner-workspace/KeywordListView"
+import { OnpageAuditView } from "@/components/tool/onpage/OnpageAuditView"
+import type { AuditReport } from "@/lib/onpage-audit"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import {
@@ -227,11 +229,70 @@ export default function ArtifactDetailPage({
 }
 
 function ArtifactBody({ artifact }: { artifact: PartnerArtifact }) {
-  // Per-kind rendering. Falls back to a formatted JSON dump.
+  // Per-kind rendering. Each branch returns either the rich view + a
+  // collapsible raw-JSON panel, or falls through to the JSON-only view.
   if (artifact.kind === "keyword_list") {
-    return <KeywordListView data={artifact.data} />
+    return (
+      <>
+        <KeywordListView data={artifact.data} />
+        <RawDataDetails value={artifact.data} />
+      </>
+    )
+  }
+  if (artifact.kind === "onpage_audit") {
+    const report = parseAuditReport(artifact.data)
+    if (report) {
+      return (
+        <>
+          <OnpageAuditView data={report} />
+          <RawDataDetails value={artifact.data} />
+        </>
+      )
+    }
   }
   return <JsonView value={artifact.data} />
+}
+
+function RawDataDetails({ value }: { value: unknown }) {
+  let pretty: string
+  try {
+    pretty = JSON.stringify(value, null, 2)
+  } catch {
+    pretty = String(value)
+  }
+  return (
+    <details className="group mt-6">
+      <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground">
+        Raw data (click to expand)
+      </summary>
+      <pre className="mt-2 max-h-[400px] overflow-auto rounded-lg border border-border bg-muted/30 p-4 text-xs leading-relaxed">
+        {pretty}
+      </pre>
+    </details>
+  )
+}
+
+/**
+ * The on-page audit save spec wraps the raw `AuditReport` with a couple
+ * of metadata fields (`target`, `capturedAt`) and then spreads the
+ * report. This narrows the saved blob back to an `AuditReport` shape
+ * for the view component. Returns null if the payload looks unusable
+ * so we fall back to the raw JSON view.
+ */
+function parseAuditReport(value: unknown): AuditReport | null {
+  if (typeof value !== "object" || value === null) return null
+  const obj = value as Record<string, unknown>
+  if (
+    typeof obj.health !== "number" ||
+    typeof obj.totals !== "object" ||
+    !Array.isArray(obj.byCategory) ||
+    !Array.isArray(obj.topIssues) ||
+    !Array.isArray(obj.perUrl) ||
+    !Array.isArray(obj.schema)
+  ) {
+    return null
+  }
+  return obj as unknown as AuditReport
 }
 
 function JsonView({ value }: { value: unknown }) {
