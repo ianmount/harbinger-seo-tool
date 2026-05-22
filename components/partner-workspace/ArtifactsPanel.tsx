@@ -1,7 +1,14 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
-import { FileTextIcon, Loader2Icon, TrashIcon } from "lucide-react"
+import Link from "next/link"
+import {
+  ChevronRightIcon,
+  ExternalLinkIcon,
+  FileTextIcon,
+  Loader2Icon,
+  TrashIcon,
+} from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import {
@@ -11,6 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { getArtifactExternalPath } from "@/lib/partner-artifact-paths"
 import type { PartnerArtifact, PartnerArtifactKind } from "@/lib/types"
 
 interface KindOption {
@@ -183,40 +191,70 @@ export function ArtifactsPanel({ partnerId }: { partnerId: string }) {
                 {KIND_LABEL[kind] ?? kind} · {items.length}
               </h3>
               <ul className="divide-y divide-border rounded-lg border border-border">
-                {items.map((a) => (
-                  <li
-                    key={a.id}
-                    className="flex items-center justify-between px-4 py-3"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium">{a.title}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {new Date(a.createdAt).toLocaleString()}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {a.blobUrl && (
-                        <Button asChild variant="outline" size="sm">
-                          <a
-                            href={a.blobUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            Open
-                          </a>
-                        </Button>
-                      )}
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleDelete(a.id, a.title)}
-                        aria-label={`Delete ${a.title}`}
+                {items.map((a) => {
+                  const externalPath = getArtifactExternalPath(a)
+                  const detailHref = `/partners/${encodeURIComponent(partnerId)}/artifacts/${encodeURIComponent(a.id)}`
+                  return (
+                    <li
+                      key={a.id}
+                      className="group flex items-center gap-2 transition-colors hover:bg-muted/30"
+                    >
+                      <Link
+                        href={detailHref}
+                        className="flex min-w-0 flex-1 items-center gap-2 px-4 py-3"
                       >
-                        <TrashIcon className="size-4 text-muted-foreground" />
-                      </Button>
-                    </div>
-                  </li>
-                ))}
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium">
+                            {a.title}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {new Date(a.createdAt).toLocaleString()}
+                          </p>
+                        </div>
+                        <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+                      </Link>
+                      <div className="flex items-center gap-1 px-2">
+                        {externalPath && (
+                          <Button
+                            asChild
+                            variant="ghost"
+                            size="sm"
+                            title="Open full result"
+                          >
+                            <Link href={externalPath}>
+                              <ExternalLinkIcon className="size-4 text-muted-foreground" />
+                            </Link>
+                          </Button>
+                        )}
+                        {a.blobUrl && !externalPath && (
+                          <Button
+                            asChild
+                            variant="ghost"
+                            size="sm"
+                            title="Open blob file"
+                          >
+                            <a
+                              href={a.blobUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              <ExternalLinkIcon className="size-4 text-muted-foreground" />
+                            </a>
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleDelete(a.id, a.title)}
+                          aria-label={`Delete ${a.title}`}
+                          title="Delete"
+                        >
+                          <TrashIcon className="size-4 text-muted-foreground" />
+                        </Button>
+                      </div>
+                    </li>
+                  )
+                })}
               </ul>
             </div>
           ))}

@@ -1,0 +1,240 @@
+"use client"
+
+import { use, useEffect, useState } from "react"
+import Link from "next/link"
+import {
+  ArrowLeftIcon,
+  DownloadIcon,
+  ExternalLinkIcon,
+  Loader2Icon,
+  TrashIcon,
+} from "lucide-react"
+import { toast } from "sonner"
+import { PageHeader } from "@/components/PageHeader"
+import { KeywordListView } from "@/components/partner-workspace/KeywordListView"
+import { Button } from "@/components/ui/button"
+import { Separator } from "@/components/ui/separator"
+import {
+  ARTIFACT_KIND_LABEL,
+  getArtifactExternalPath,
+} from "@/lib/partner-artifact-paths"
+import type { Partner, PartnerArtifact } from "@/lib/types"
+
+type PageState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; artifact: PartnerArtifact; partner: Partner | null }
+
+export default function ArtifactDetailPage({
+  params,
+}: {
+  params: Promise<{ id: string; artifactId: string }>
+}) {
+  const { id: partnerId, artifactId } = use(params)
+  const [state, setState] = useState<PageState>({ status: "loading" })
+
+  useEffect(() => {
+    let cancelled = false
+    const ac = new AbortController()
+    async function load() {
+      try {
+        const [artifactRes, partnerRes] = await Promise.all([
+          fetch(`/api/partners/artifacts/${encodeURIComponent(artifactId)}`, {
+            signal: ac.signal,
+          }),
+          fetch(`/api/partners/${encodeURIComponent(partnerId)}`, {
+            signal: ac.signal,
+          }),
+        ])
+        const artifactBody = (await artifactRes.json()) as {
+          artifact?: PartnerArtifact
+          error?: string
+        }
+        if (!artifactRes.ok || !artifactBody.artifact) {
+          throw new Error(artifactBody.error ?? "Artifact not found")
+        }
+        const partnerBody = (await partnerRes.json().catch(() => ({}))) as {
+          partner?: Partner
+        }
+        if (!cancelled) {
+          setState({
+            status: "ready",
+            artifact: artifactBody.artifact,
+            partner: partnerBody.partner ?? null,
+          })
+        }
+      } catch (err: unknown) {
+        if (cancelled || (err instanceof Error && err.name === "AbortError"))
+          return
+        setState({
+          status: "error",
+          message: err instanceof Error ? err.message : "Failed to load",
+        })
+      }
+    }
+    load()
+    return () => {
+      cancelled = true
+      ac.abort()
+    }
+  }, [partnerId, artifactId])
+
+  async function handleDelete() {
+    if (state.status !== "ready") return
+    if (
+      !confirm(
+        `Delete "${state.artifact.title}"? This cannot be undone.`,
+      )
+    )
+      return
+    try {
+      const res = await fetch(
+        `/api/partners/artifacts/${encodeURIComponent(artifactId)}`,
+        { method: "DELETE" },
+      )
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(body.error ?? `HTTP ${res.status}`)
+      }
+      toast.success("Artifact deleted")
+      window.location.href = `/partners/${partnerId}?tab=artifacts`
+    } catch (err: unknown) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to delete artifact",
+      )
+    }
+  }
+
+  function handleDownload() {
+    if (state.status !== "ready") return
+    const blob = new Blob([JSON.stringify(state.artifact.data, null, 2)], {
+      type: "application/json",
+    })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `${state.artifact.title.replace(/[^a-z0-9-_]+/gi, "_")}.json`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  if (state.status === "loading") {
+    return (
+      <div className="space-y-6">
+        <div className="h-6 w-40 animate-pulse rounded bg-muted" />
+        <div className="h-32 animate-pulse rounded-lg border bg-muted/30" />
+      </div>
+    )
+  }
+
+  if (state.status === "error") {
+    return (
+      <div className="space-y-4">
+        <Button asChild variant="ghost" size="sm" className="-ml-2">
+          <Link href={`/partners/${partnerId}?tab=artifacts`}>
+            <ArrowLeftIcon className="mr-1.5 size-4" />
+            Back to artifacts
+          </Link>
+        </Button>
+        <p className="text-sm text-destructive">{state.message}</p>
+      </div>
+    )
+  }
+
+  const { artifact, partner } = state
+  const externalPath = getArtifactExternalPath(artifact)
+  const kindLabel = ARTIFACT_KIND_LABEL[artifact.kind] ?? artifact.kind
+
+  return (
+    <div className="space-y-6">
+      <Button asChild variant="ghost" size="sm" className="-ml-2">
+        <Link href={`/partners/${partnerId}?tab=artifacts`}>
+          <ArrowLeftIcon className="mr-1.5 size-4" />
+          {partner ? `${partner.name} · Artifacts` : "Back to artifacts"}
+        </Link>
+      </Button>
+
+      <PageHeader
+        eyebrow={`Partners / Artifacts / ${kindLabel}`}
+        title={artifact.title}
+        subtitle={
+          <span className="text-sm text-muted-foreground">
+            Saved{" "}
+            {new Date(artifact.createdAt).toLocaleString(undefined, {
+              dateStyle: "medium",
+              timeStyle: "short",
+            })}
+          </span>
+        }
+      />
+
+      <div className="flex flex-wrap items-center gap-2">
+        {externalPath && (
+          <Button asChild>
+            <Link href={externalPath}>
+              <ExternalLinkIcon className="mr-1.5 size-4" />
+              Open full result
+            </Link>
+          </Button>
+        )}
+        {artifact.blobUrl && (
+          <Button asChild variant="outline">
+            <a
+              href={artifact.blobUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <ExternalLinkIcon className="mr-1.5 size-4" />
+              Open blob file
+            </a>
+          </Button>
+        )}
+        <Button variant="outline" onClick={handleDownload}>
+          <DownloadIcon className="mr-1.5 size-4" />
+          Download JSON
+        </Button>
+        <Button
+          variant="ghost"
+          onClick={handleDelete}
+          className="text-destructive hover:text-destructive"
+        >
+          <TrashIcon className="mr-1.5 size-4" />
+          Delete
+        </Button>
+      </div>
+
+      <Separator />
+
+      <ArtifactBody artifact={artifact} />
+    </div>
+  )
+}
+
+function ArtifactBody({ artifact }: { artifact: PartnerArtifact }) {
+  // Per-kind rendering. Falls back to a formatted JSON dump.
+  if (artifact.kind === "keyword_list") {
+    return <KeywordListView data={artifact.data} />
+  }
+  return <JsonView value={artifact.data} />
+}
+
+function JsonView({ value }: { value: unknown }) {
+  let pretty: string
+  try {
+    pretty = JSON.stringify(value, null, 2)
+  } catch {
+    pretty = String(value)
+  }
+  return (
+    <div>
+      <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        Raw data
+      </p>
+      <pre className="max-h-[600px] overflow-auto rounded-lg border border-border bg-muted/30 p-4 text-xs leading-relaxed">
+        {pretty}
+      </pre>
+    </div>
+  )
+}
