@@ -23,8 +23,10 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { MarketPicker } from "@/components/tool/MarketPicker"
+import { SaveToPartnerButton } from "@/components/SaveToPartnerButton"
 import { ToolShell } from "@/components/tool/ToolShell"
 import { ToolError, useToolRun } from "@/components/tool/use-tool-run"
+import { useSelectedPartner } from "@/lib/use-selected-partner"
 import { buildRowsWorkbook, downloadWorkbook } from "@/lib/tool-xlsx"
 import { findToolByPathname } from "@/lib/tool-config"
 import type { DfsLabsLocation } from "@/lib/types"
@@ -197,6 +199,7 @@ export default function KeywordMagicPage() {
   const { data, meta, loading, error, run, setError } = useToolRun<Data>(
     "/api/tools/keywords/magic",
   )
+  const { partner: selectedPartner } = useSelectedPartner()
 
   // ── UI state for the results pane ─────────────────────────────────────
   const [activeMarketKey, setActiveMarketKey] = useState<MarketKey>("national")
@@ -686,6 +689,29 @@ export default function KeywordMagicPage() {
           <Download className="mr-1.5 h-3.5 w-3.5" />
           Export to xlsx
         </Button>
+        {data && (
+          <SaveToPartnerButton
+            kind="keyword_list"
+            defaultTitle={
+              selected.size > 0
+                ? `${data.seed} — ${selected.size} keywords`
+                : `${data.seed} — keyword research`
+            }
+            partner={selectedPartner ?? null}
+            getData={() => ({
+              seed: data.seed,
+              markets: data.markets,
+              stats: data.stats,
+              counts: data.counts,
+              selectedKeywords:
+                selected.size > 0
+                  ? data.rows.filter((r) => selected.has(r.keyword))
+                  : null,
+              rows: data.rows,
+              capturedAt: new Date().toISOString(),
+            })}
+          />
+        )}
         <Button
           type="button"
           variant="outline"

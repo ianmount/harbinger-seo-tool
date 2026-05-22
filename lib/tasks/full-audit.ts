@@ -1,6 +1,6 @@
 import "server-only"
 import { z } from "zod"
-import { getPartner } from "@/lib/partners"
+import { getPartner, saveArtifact } from "@/lib/partners"
 import type { TaskRunner } from "@/lib/inngest/functions"
 import { runAuditPipeline, type AuditInput } from "@/lib/tasks/audit"
 import type { Partner, TargetMarket } from "@/lib/types"
@@ -114,9 +114,7 @@ export const runFullAuditTask: TaskRunner = async ({ jobId, job }) => {
   }
   const partner = await getPartner(parsed.data.partnerId).catch(() => null)
   if (!partner) {
-    throw new Error(
-      `Partner ${parsed.data.partnerId} not found in Airtable`,
-    )
+    throw new Error(`Partner ${parsed.data.partnerId} not found`)
   }
   if (!partner.website || !partner.website.trim()) {
     throw new Error(
@@ -124,5 +122,25 @@ export const runFullAuditTask: TaskRunner = async ({ jobId, job }) => {
     )
   }
   const input = buildAuditInput(partner)
-  return runAuditPipeline(jobId, input)
+  const outcome = await runAuditPipeline(jobId, input)
+
+  await saveArtifact({
+    partnerId: partner.id,
+    kind: "audit",
+    title: `${partner.name} — Full audit`,
+    data: {
+      generatedAt: outcome.result.audit.generatedAt,
+      durationSeconds: outcome.result.audit.durationSeconds,
+      costUsd: outcome.result.costUsd,
+      warnings: outcome.result.audit.warnings,
+    },
+    jobId,
+  }).catch((err) => {
+    console.warn(
+      `[full-audit] failed to save artifact for partner ${partner.id}:`,
+      err,
+    )
+  })
+
+  return outcome
 }

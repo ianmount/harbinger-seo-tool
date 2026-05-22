@@ -1,6 +1,6 @@
 import "server-only"
 import { z } from "zod"
-import { getPartner } from "@/lib/partners"
+import { getPartner, saveArtifact } from "@/lib/partners"
 import { crawlSite, CrawlError } from "@/lib/audit-crawl"
 import {
   GSCError,
@@ -331,6 +331,25 @@ export const runInitialStrategyTask: TaskRunner = async ({ jobId, job }) => {
     gscNotice,
     gscLookbackDays: GSC_LOOKBACK_DAYS,
   }
+
+  await saveArtifact({
+    partnerId: partner.id,
+    kind: "strategy",
+    title: `${partner.name} — Initial strategy`,
+    data: {
+      generatedAt: new Date().toISOString(),
+      gscEnabled,
+      gscLookbackDays: GSC_LOOKBACK_DAYS,
+      keywordCount: keywords.length,
+      crawledUrlCount: crawledUrls.length,
+    },
+    jobId,
+  }).catch((err) => {
+    console.warn(
+      `[initial-strategy] failed to save artifact for partner ${partner.id}:`,
+      err,
+    )
+  })
 
   return {
     result: { strategy: fullOutput },

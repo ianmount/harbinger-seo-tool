@@ -2,14 +2,18 @@
 
 import { use, useEffect, useState } from "react"
 import Link from "next/link"
+import { useRouter, useSearchParams } from "next/navigation"
 import { ArrowLeftIcon, ExternalLinkIcon } from "lucide-react"
 import { DfseoActionsPanel } from "@/components/partner-dashboard/DfseoActionsPanel"
 import { PartnerPerformancePanel } from "@/components/partner-dashboard/PartnerPerformancePanel"
 import { PartnerReportSection } from "@/components/partner-dashboard/PartnerReportSection"
 import { ScheduledTaskHistory } from "@/components/partner-dashboard/ScheduledTaskHistory"
+import { ArtifactsPanel } from "@/components/partner-workspace/ArtifactsPanel"
+import { SettingsPanel } from "@/components/partner-workspace/SettingsPanel"
 import { PageHeader } from "@/components/PageHeader"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import type { Partner, PartnerSnapshot } from "@/lib/types"
 
 type PageState =
@@ -26,19 +30,31 @@ function iso(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
 }
 
+type TabValue = "overview" | "artifacts" | "settings"
+
+function isTab(v: string | null): v is TabValue {
+  return v === "overview" || v === "artifacts" || v === "settings"
+}
+
 export default function PartnerDetailPage({
   params,
 }: {
   params: Promise<{ id: string }>
 }) {
   const { id } = use(params)
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const tabParam = searchParams.get("tab")
+  const activeTab: TabValue = isTab(tabParam) ? tabParam : "overview"
+
   const [state, setState] = useState<PageState>({ status: "loading" })
 
   useEffect(() => {
+    let cancelled = false
     async function loadPartner() {
       try {
         const partnerRes = await fetch(
-          `/api/airtable/partner/${encodeURIComponent(id)}`,
+          `/api/partners/${encodeURIComponent(id)}`,
         )
         const partnerBody = (await partnerRes.json()) as {
           partner?: Partner
@@ -58,21 +74,23 @@ export default function PartnerDetailPage({
           `/api/partners/snapshot?startDate=${startDate}&endDate=${endDate}`,
           { cache: "no-store" },
         )
-        let gscSiteUrl: string | null = null
-        let ga4PropertyId: string | null = null
+        let gscSiteUrl: string | null = partner.gscSiteUrl ?? null
+        let ga4PropertyId: string | null = partner.ga4PropertyId ?? null
         if (snapRes.ok) {
           const snapBody = (await snapRes.json()) as {
             snapshots?: PartnerSnapshot[]
           }
           const snap = snapBody.snapshots?.find((s) => s.partner.id === id)
           if (snap) {
-            gscSiteUrl = snap.gscSiteUrl
-            ga4PropertyId = snap.ga4PropertyId
+            gscSiteUrl = snap.gscSiteUrl ?? gscSiteUrl
+            ga4PropertyId = snap.ga4PropertyId ?? ga4PropertyId
           }
         }
 
+        if (cancelled) return
         setState({ status: "done", partner, gscSiteUrl, ga4PropertyId })
       } catch (err) {
+        if (cancelled) return
         setState({
           status: "error",
           message: err instanceof Error ? err.message : "Failed to load partner",
@@ -80,7 +98,18 @@ export default function PartnerDetailPage({
       }
     }
     loadPartner()
+    return () => {
+      cancelled = true
+    }
   }, [id])
+
+  function handleTabChange(value: string) {
+    const params = new URLSearchParams(searchParams.toString())
+    if (value === "overview") params.delete("tab")
+    else params.set("tab", value)
+    const query = params.toString()
+    router.replace(query ? `?${query}` : `/partners/${id}`, { scroll: false })
+  }
 
   if (state.status === "loading") {
     return (
@@ -101,7 +130,7 @@ export default function PartnerDetailPage({
         <Button asChild variant="ghost" size="sm">
           <Link href="/partners">
             <ArrowLeftIcon className="mr-1.5 size-4" />
-            Back to Dashboard
+            All Partners
           </Link>
         </Button>
         <p className="text-sm text-destructive">{state.message}</p>
@@ -112,16 +141,16 @@ export default function PartnerDetailPage({
   const { partner, gscSiteUrl, ga4PropertyId } = state
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <Button asChild variant="ghost" size="sm" className="-ml-2">
         <Link href="/partners">
           <ArrowLeftIcon className="mr-1.5 size-4" />
-          Back to Dashboard
+          All Partners
         </Link>
       </Button>
 
       <PageHeader
-        eyebrow="Ongoing / Partner Dashboard"
+        eyebrow="Partners / Workspace"
         title={partner.name}
         subtitle={
           <a
@@ -140,22 +169,50 @@ export default function PartnerDetailPage({
         }
       />
 
-      <PartnerPerformancePanel
-        gscSiteUrl={gscSiteUrl}
-        ga4PropertyId={ga4PropertyId}
-      />
+      <Tabs value={activeTab} onValueChange={handleTabChange}>
+        <TabsList variant="line" className="w-full justify-start gap-4 border-b border-border">
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="artifacts">Artifacts</TabsTrigger>
+          <TabsTrigger value="settings">Settings</TabsTrigger>
+        </TabsList>
 
-      <Separator />
+        <TabsContent value="overview" className="space-y-8 pt-6">
+          <PartnerPerformancePanel
+            gscSiteUrl={gscSiteUrl}
+            ga4PropertyId={ga4PropertyId}
+          />
 
-      <ScheduledTaskHistory partnerId={partner.id} />
+          <Separator />
 
-      <Separator />
+          <ScheduledTaskHistory partnerId={partner.id} />
 
-      <DfseoActionsPanel partner={partner} />
+          <Separator />
 
-      <Separator />
+          <DfseoActionsPanel partner={partner} />
 
-      <PartnerReportSection partner={partner} />
+          <Separator />
+
+          <PartnerReportSection partner={partner} />
+        </TabsContent>
+
+        <TabsContent value="artifacts" className="pt-6">
+          <ArtifactsPanel partnerId={partner.id} />
+        </TabsContent>
+
+        <TabsContent value="settings" className="pt-6">
+          <SettingsPanel
+            partner={partner}
+            onUpdated={(updated) =>
+              setState({
+                status: "done",
+                partner: updated,
+                gscSiteUrl,
+                ga4PropertyId,
+              })
+            }
+          />
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

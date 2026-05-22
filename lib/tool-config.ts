@@ -20,10 +20,12 @@ import {
   MapPin,
   Search,
   TrendingUp,
+  Users,
   type LucideProps,
 } from "lucide-react"
 
 export type ToolCategorySlug =
+  | "partners"
   | "keywords"
   | "backlinks"
   | "technical"
@@ -51,6 +53,31 @@ export type ToolCategory = {
 }
 
 export const TOOL_CATEGORIES: readonly ToolCategory[] = [
+  {
+    slug: "partners",
+    label: "Partners",
+    icon: Users,
+    tools: [
+      {
+        slug: "list",
+        category: "partners",
+        label: "All Partners",
+        description:
+          "Every partner onboarded to the tool. Click a partner to open their workspace — saved keyword lists, strategies, content briefs, backlink prospects, reports, and technical crawls all live in their folder.",
+        href: "/partners",
+        endpoints: [],
+      },
+      {
+        slug: "onboard",
+        category: "partners",
+        label: "Onboard Partner",
+        description:
+          "Add a new partner to the tool. Collect their profile and link their Google Search Console site and GA4 property from one of the two authorized Google accounts.",
+        href: "/partners/new",
+        endpoints: [],
+      },
+    ],
+  },
   {
     slug: "keywords",
     label: "Keywords",
@@ -303,14 +330,6 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
     label: "Other",
     icon: FolderOpen,
     tools: [
-      {
-        slug: "partners",
-        category: "other",
-        label: "Partner Dashboard",
-        description: "Active partners and their integrations.",
-        href: "/partners",
-        endpoints: [],
-      },
       {
         slug: "audit",
         category: "other",
