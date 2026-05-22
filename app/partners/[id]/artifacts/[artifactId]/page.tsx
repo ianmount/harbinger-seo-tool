@@ -18,6 +18,10 @@ import {
   ARTIFACT_KIND_LABEL,
   getArtifactExternalPath,
 } from "@/lib/partner-artifact-paths"
+import {
+  getArtifactExports,
+  type ArtifactExport,
+} from "@/lib/partner-artifact-exports"
 import type { Partner, PartnerArtifact } from "@/lib/types"
 
 type PageState =
@@ -105,19 +109,22 @@ export default function ArtifactDetailPage({
     }
   }
 
-  function handleDownload() {
-    if (state.status !== "ready") return
-    const blob = new Blob([JSON.stringify(state.artifact.data, null, 2)], {
-      type: "application/json",
-    })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = `${state.artifact.title.replace(/[^a-z0-9-_]+/gi, "_")}.json`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
+  function handleExport(spec: ArtifactExport) {
+    try {
+      const blob = new Blob([spec.build()], { type: spec.mimeType })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = spec.filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch (err: unknown) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to build export",
+      )
+    }
   }
 
   if (state.status === "loading") {
@@ -146,6 +153,7 @@ export default function ArtifactDetailPage({
   const { artifact, partner } = state
   const externalPath = getArtifactExternalPath(artifact)
   const kindLabel = ARTIFACT_KIND_LABEL[artifact.kind] ?? artifact.kind
+  const exports = getArtifactExports(artifact)
 
   return (
     <div className="space-y-6">
@@ -191,10 +199,16 @@ export default function ArtifactDetailPage({
             </a>
           </Button>
         )}
-        <Button variant="outline" onClick={handleDownload}>
-          <DownloadIcon className="mr-1.5 size-4" />
-          Download JSON
-        </Button>
+        {exports.map((spec, i) => (
+          <Button
+            key={spec.format}
+            variant={i === 0 ? "outline" : "ghost"}
+            onClick={() => handleExport(spec)}
+          >
+            <DownloadIcon className="mr-1.5 size-4" />
+            {spec.label}
+          </Button>
+        ))}
         <Button
           variant="ghost"
           onClick={handleDelete}
