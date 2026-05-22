@@ -6,6 +6,16 @@ export const dynamic = "force-dynamic"
 
 const accountSlug = z.enum(["partners", "assessments"])
 
+const gscSiteRef = z.object({
+  siteUrl: z.string().min(1),
+  account: accountSlug,
+})
+
+const ga4PropertyRef = z.object({
+  propertyId: z.string().min(1),
+  account: accountSlug,
+})
+
 const updateSchema = z.object({
   name: z.string().min(1).optional(),
   website: z.string().min(1).optional(),
@@ -15,6 +25,10 @@ const updateSchema = z.object({
   targetAudience: z.string().optional(),
   contentMarketing: z.string().optional(),
   industryKnowledge: z.string().optional(),
+  // Preferred (multi):
+  gscSites: z.array(gscSiteRef).optional(),
+  ga4Properties: z.array(ga4PropertyRef).optional(),
+  // Legacy singulars — accepted but array form wins when both supplied.
   gscSiteUrl: z.string().optional(),
   gscAccount: accountSlug.optional(),
   ga4PropertyId: z.string().optional(),

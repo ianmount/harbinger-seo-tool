@@ -1,20 +1,12 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Loader2Icon } from "lucide-react"
 import { toast } from "sonner"
+import { GoogleMultiSelect } from "@/components/partner-workspace/GoogleMultiSelect"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import type {
   GA4PropertyInfo,
@@ -22,21 +14,6 @@ import type {
   GSCSiteInfo,
   Partner,
 } from "@/lib/types"
-
-const NONE_VALUE = "__none__"
-
-function selectionKey(account: GoogleAccountSlug, id: string): string {
-  return `${account}::${id}`
-}
-
-function parseSelection(
-  value: string,
-): { account: GoogleAccountSlug; id: string } | null {
-  if (!value || value === NONE_VALUE) return null
-  const [account, ...rest] = value.split("::")
-  if (account !== "partners" && account !== "assessments") return null
-  return { account, id: rest.join("::") }
-}
 
 interface GscSiteForAccount {
   account: GoogleAccountSlug
@@ -47,6 +24,8 @@ interface Ga4PropertyForAccount {
   account: GoogleAccountSlug
   property: GA4PropertyInfo
 }
+
+type Selection = { id: string; account: GoogleAccountSlug }
 
 export function SettingsPanel({
   partner,
@@ -69,20 +48,23 @@ export function SettingsPanel({
   const [industryKnowledge, setIndustryKnowledge] = useState(
     partner.industryKnowledge ?? "",
   )
-  const [gscSelection, setGscSelection] = useState<string>(
-    partner.gscSiteUrl && partner.gscAccount
-      ? selectionKey(partner.gscAccount, partner.gscSiteUrl)
-      : NONE_VALUE,
+  const [gscSelections, setGscSelections] = useState<Selection[]>(
+    (partner.gscSites ?? []).map((s) => ({
+      id: s.siteUrl,
+      account: s.account,
+    })),
   )
-  const [ga4Selection, setGa4Selection] = useState<string>(
-    partner.ga4PropertyId && partner.ga4Account
-      ? selectionKey(partner.ga4Account, partner.ga4PropertyId)
-      : NONE_VALUE,
+  const [ga4Selections, setGa4Selections] = useState<Selection[]>(
+    (partner.ga4Properties ?? []).map((p) => ({
+      id: p.propertyId,
+      account: p.account,
+    })),
   )
   const [submitting, setSubmitting] = useState(false)
 
   const [gscSites, setGscSites] = useState<GscSiteForAccount[]>([])
   const [ga4Properties, setGa4Properties] = useState<Ga4PropertyForAccount[]>([])
+  const [loadingGoogle, setLoadingGoogle] = useState(true)
 
   useEffect(() => {
     let cancelled = false
@@ -100,7 +82,10 @@ export function SettingsPanel({
           setGa4Properties(properties.properties)
       })
       .catch(() => {
-        // Non-fatal — the existing selection still shows; we just can't change it.
+        // Non-fatal — the existing chips still show; we just can't add new ones.
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingGoogle(false)
       })
     return () => {
       cancelled = true
@@ -108,11 +93,60 @@ export function SettingsPanel({
     }
   }, [])
 
+  // Merge "already-selected" entries with the freshly-loaded option set so
+  // selections survive even when the option isn't in the latest list (e.g.
+  // the user lost access in Google but we still want to display the chip).
+  const gscOptions = useMemo(() => {
+    const fromApi = gscSites.map((entry) => ({
+      id: entry.site.siteUrl,
+      account: entry.account,
+      label: entry.site.siteUrl,
+    }))
+    const seen = new Set(fromApi.map((o) => `${o.account}::${o.id}`))
+    for (const sel of gscSelections) {
+      const key = `${sel.account}::${sel.id}`
+      if (!seen.has(key)) {
+        fromApi.push({
+          id: sel.id,
+          account: sel.account,
+          label: sel.id,
+        })
+        seen.add(key)
+      }
+    }
+    return fromApi
+  }, [gscSites, gscSelections])
+
+  const ga4Options = useMemo(() => {
+    const fromApi: Array<{
+      id: string
+      account: GoogleAccountSlug
+      label: string
+      sublabel?: string
+    }> = ga4Properties.map((entry) => ({
+      id: entry.property.propertyId,
+      account: entry.account,
+      label: entry.property.displayName,
+      sublabel: entry.property.websiteUrl,
+    }))
+    const seen = new Set(fromApi.map((o) => `${o.account}::${o.id}`))
+    for (const sel of ga4Selections) {
+      const key = `${sel.account}::${sel.id}`
+      if (!seen.has(key)) {
+        fromApi.push({
+          id: sel.id,
+          account: sel.account,
+          label: sel.id,
+        })
+        seen.add(key)
+      }
+    }
+    return fromApi
+  }, [ga4Properties, ga4Selections])
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setSubmitting(true)
-    const gsc = parseSelection(gscSelection)
-    const ga4 = parseSelection(ga4Selection)
     try {
       const res = await fetch(
         `/api/partners/${encodeURIComponent(partner.id)}`,
@@ -128,10 +162,14 @@ export function SettingsPanel({
             targetAudience,
             contentMarketing,
             industryKnowledge,
-            gscSiteUrl: gsc?.id ?? "",
-            gscAccount: gsc?.account,
-            ga4PropertyId: ga4?.id ?? "",
-            ga4Account: ga4?.account,
+            gscSites: gscSelections.map((s) => ({
+              siteUrl: s.id,
+              account: s.account,
+            })),
+            ga4Properties: ga4Selections.map((s) => ({
+              propertyId: s.id,
+              account: s.account,
+            })),
           }),
         },
       )
@@ -169,15 +207,6 @@ export function SettingsPanel({
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to delete partner")
     }
-  }
-
-  const gscByAccount: Record<GoogleAccountSlug, GscSiteForAccount[]> = {
-    partners: gscSites.filter((s) => s.account === "partners"),
-    assessments: gscSites.filter((s) => s.account === "assessments"),
-  }
-  const ga4ByAccount: Record<GoogleAccountSlug, Ga4PropertyForAccount[]> = {
-    partners: ga4Properties.filter((p) => p.account === "partners"),
-    assessments: ga4Properties.filter((p) => p.account === "assessments"),
   }
 
   return (
@@ -233,78 +262,27 @@ export function SettingsPanel({
 
         <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
           <div className="space-y-2">
-            <Label htmlFor="gsc">GSC site</Label>
-            <Select value={gscSelection} onValueChange={setGscSelection}>
-              <SelectTrigger id="gsc" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={NONE_VALUE}>None</SelectItem>
-                {(["partners", "assessments"] as const).map((account) => {
-                  const items = gscByAccount[account]
-                  if (items.length === 0) return null
-                  return (
-                    <SelectGroup key={account}>
-                      <SelectLabel>
-                        {account === "partners"
-                          ? "Partners account"
-                          : "Assessments account"}
-                      </SelectLabel>
-                      {items.map((entry) => (
-                        <SelectItem
-                          key={selectionKey(entry.account, entry.site.siteUrl)}
-                          value={selectionKey(entry.account, entry.site.siteUrl)}
-                        >
-                          {entry.site.siteUrl}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  )
-                })}
-              </SelectContent>
-            </Select>
+            <Label>GSC sites</Label>
+            <GoogleMultiSelect
+              options={gscOptions}
+              value={gscSelections}
+              onChange={setGscSelections}
+              loading={loadingGoogle}
+              itemNoun="site"
+              itemNounPlural="sites"
+            />
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="ga4">GA4 property</Label>
-            <Select value={ga4Selection} onValueChange={setGa4Selection}>
-              <SelectTrigger id="ga4" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={NONE_VALUE}>None</SelectItem>
-                {(["partners", "assessments"] as const).map((account) => {
-                  const items = ga4ByAccount[account]
-                  if (items.length === 0) return null
-                  return (
-                    <SelectGroup key={account}>
-                      <SelectLabel>
-                        {account === "partners"
-                          ? "Partners account"
-                          : "Assessments account"}
-                      </SelectLabel>
-                      {items.map((entry) => (
-                        <SelectItem
-                          key={selectionKey(
-                            entry.account,
-                            entry.property.propertyId,
-                          )}
-                          value={selectionKey(
-                            entry.account,
-                            entry.property.propertyId,
-                          )}
-                        >
-                          {entry.property.displayName}
-                          {entry.property.websiteUrl
-                            ? ` — ${entry.property.websiteUrl}`
-                            : ""}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  )
-                })}
-              </SelectContent>
-            </Select>
+            <Label>GA4 properties</Label>
+            <GoogleMultiSelect
+              options={ga4Options}
+              value={ga4Selections}
+              onChange={setGa4Selections}
+              loading={loadingGoogle}
+              itemNoun="property"
+              itemNounPlural="properties"
+            />
           </div>
         </div>
 

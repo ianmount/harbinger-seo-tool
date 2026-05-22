@@ -1,7 +1,9 @@
 import "server-only"
 import { getSupabase } from "@/lib/supabase"
 import type {
+  Ga4PropertyRef,
   GoogleAccountSlug,
+  GscSiteRef,
   Partner,
   PartnerArtifact,
   PartnerArtifactKind,
@@ -32,12 +34,58 @@ interface PartnerRow {
   industry_knowledge: string | null
   gsc_site_url: string | null
   gsc_account: GoogleAccountSlug | null
+  gsc_sites: GscSiteRef[] | null
   ga4_property_id: string | null
   ga4_account: GoogleAccountSlug | null
+  ga4_properties: Ga4PropertyRef[] | null
   airtable_id: string | null
   unfilled_context: PartnerContextField[] | null
   created_at: string
   updated_at: string
+}
+
+function isGscRef(v: unknown): v is GscSiteRef {
+  if (typeof v !== "object" || v === null) return false
+  const r = v as Record<string, unknown>
+  return (
+    typeof r.siteUrl === "string" &&
+    (r.account === "partners" || r.account === "assessments")
+  )
+}
+
+function isGa4Ref(v: unknown): v is Ga4PropertyRef {
+  if (typeof v !== "object" || v === null) return false
+  const r = v as Record<string, unknown>
+  return (
+    typeof r.propertyId === "string" &&
+    (r.account === "partners" || r.account === "assessments")
+  )
+}
+
+/**
+ * Returns the full list of GSC sites for a partner row, deriving from
+ * the legacy scalar columns if the jsonb array isn't populated. This
+ * keeps multi-property support working for rows that haven't been
+ * migrated through a write path yet.
+ */
+function deriveGscSites(row: PartnerRow): GscSiteRef[] {
+  if (Array.isArray(row.gsc_sites) && row.gsc_sites.length > 0) {
+    return row.gsc_sites.filter(isGscRef)
+  }
+  if (row.gsc_site_url && row.gsc_account) {
+    return [{ siteUrl: row.gsc_site_url, account: row.gsc_account }]
+  }
+  return []
+}
+
+function deriveGa4Properties(row: PartnerRow): Ga4PropertyRef[] {
+  if (Array.isArray(row.ga4_properties) && row.ga4_properties.length > 0) {
+    return row.ga4_properties.filter(isGa4Ref)
+  }
+  if (row.ga4_property_id && row.ga4_account) {
+    return [{ propertyId: row.ga4_property_id, account: row.ga4_account }]
+  }
+  return []
 }
 
 interface PartnerArtifactRow {
@@ -53,6 +101,10 @@ interface PartnerArtifactRow {
 }
 
 function rowToPartner(row: PartnerRow): Partner {
+  const gscSites = deriveGscSites(row)
+  const ga4Properties = deriveGa4Properties(row)
+  const primaryGsc = gscSites[0]
+  const primaryGa4 = ga4Properties[0]
   return {
     id: row.id,
     name: row.name,
@@ -63,16 +115,71 @@ function rowToPartner(row: PartnerRow): Partner {
     targetAudience: row.target_audience ?? undefined,
     contentMarketing: row.content_marketing ?? undefined,
     industryKnowledge: row.industry_knowledge ?? undefined,
-    gscSiteUrl: row.gsc_site_url ?? undefined,
-    gscAccount: row.gsc_account ?? undefined,
-    ga4PropertyId: row.ga4_property_id ?? undefined,
-    ga4Account: row.ga4_account ?? undefined,
+    gscSites: gscSites.length > 0 ? gscSites : undefined,
+    gscSiteUrl: primaryGsc?.siteUrl ?? row.gsc_site_url ?? undefined,
+    gscAccount: primaryGsc?.account ?? row.gsc_account ?? undefined,
+    ga4Properties: ga4Properties.length > 0 ? ga4Properties : undefined,
+    ga4PropertyId:
+      primaryGa4?.propertyId ?? row.ga4_property_id ?? undefined,
+    ga4Account: primaryGa4?.account ?? row.ga4_account ?? undefined,
     airtableId: row.airtable_id ?? undefined,
     unfilledContext:
       row.unfilled_context && row.unfilled_context.length > 0
         ? row.unfilled_context
         : undefined,
   }
+}
+
+/**
+ * Build the DB column payload from optional `gscSites` / `ga4Properties`
+ * arrays. Always writes the scalar columns to mirror the first entry,
+ * which keeps existing readers of `gsc_site_url` / `ga4_property_id`
+ * working without changes.
+ */
+function buildIntegrationsPayload(input: {
+  gscSites?: GscSiteRef[]
+  ga4Properties?: Ga4PropertyRef[]
+  // Legacy singular fields (used as fallback when arrays not provided):
+  gscSiteUrl?: string
+  gscAccount?: GoogleAccountSlug
+  ga4PropertyId?: string
+  ga4Account?: GoogleAccountSlug
+}): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+
+  if (input.gscSites !== undefined) {
+    const normalized = input.gscSites
+      .map((s) => ({ siteUrl: s.siteUrl.trim(), account: s.account }))
+      .filter((s) => s.siteUrl.length > 0)
+    out.gsc_sites = normalized.length > 0 ? normalized : null
+    out.gsc_site_url = normalized[0]?.siteUrl ?? null
+    out.gsc_account = normalized[0]?.account ?? null
+  } else {
+    if (input.gscSiteUrl !== undefined) {
+      const trimmed = input.gscSiteUrl.trim()
+      out.gsc_site_url = trimmed || null
+      if (!trimmed) out.gsc_sites = null
+    }
+    if (input.gscAccount !== undefined) out.gsc_account = input.gscAccount
+  }
+
+  if (input.ga4Properties !== undefined) {
+    const normalized = input.ga4Properties
+      .map((p) => ({ propertyId: p.propertyId.trim(), account: p.account }))
+      .filter((p) => p.propertyId.length > 0)
+    out.ga4_properties = normalized.length > 0 ? normalized : null
+    out.ga4_property_id = normalized[0]?.propertyId ?? null
+    out.ga4_account = normalized[0]?.account ?? null
+  } else {
+    if (input.ga4PropertyId !== undefined) {
+      const trimmed = input.ga4PropertyId.trim()
+      out.ga4_property_id = trimmed || null
+      if (!trimmed) out.ga4_properties = null
+    }
+    if (input.ga4Account !== undefined) out.ga4_account = input.ga4Account
+  }
+
+  return out
 }
 
 function rowToArtifact(row: PartnerArtifactRow): PartnerArtifact {
@@ -130,6 +237,11 @@ export interface CreatePartnerInput {
   targetAudience?: string
   contentMarketing?: string
   industryKnowledge?: string
+  /** Preferred: full list of GSC sites. */
+  gscSites?: GscSiteRef[]
+  /** Preferred: full list of GA4 properties. */
+  ga4Properties?: Ga4PropertyRef[]
+  /** Legacy singular fields. Used as a fallback when arrays aren't supplied. */
   gscSiteUrl?: string
   gscAccount?: GoogleAccountSlug
   ga4PropertyId?: string
@@ -150,10 +262,7 @@ export async function createPartner(
       target_audience: input.targetAudience?.trim() || null,
       content_marketing: input.contentMarketing?.trim() || null,
       industry_knowledge: input.industryKnowledge?.trim() || null,
-      gsc_site_url: input.gscSiteUrl?.trim() || null,
-      gsc_account: input.gscAccount ?? null,
-      ga4_property_id: input.ga4PropertyId?.trim() || null,
-      ga4_account: input.ga4Account ?? null,
+      ...buildIntegrationsPayload(input),
     })
     .select("*")
     .single()
@@ -183,12 +292,8 @@ export async function updatePartner(
     patch.content_marketing = input.contentMarketing.trim() || null
   if (input.industryKnowledge !== undefined)
     patch.industry_knowledge = input.industryKnowledge.trim() || null
-  if (input.gscSiteUrl !== undefined)
-    patch.gsc_site_url = input.gscSiteUrl.trim() || null
-  if (input.gscAccount !== undefined) patch.gsc_account = input.gscAccount
-  if (input.ga4PropertyId !== undefined)
-    patch.ga4_property_id = input.ga4PropertyId.trim() || null
-  if (input.ga4Account !== undefined) patch.ga4_account = input.ga4Account
+
+  Object.assign(patch, buildIntegrationsPayload(input))
 
   if (Object.keys(patch).length === 0) {
     const existing = await getPartner(id)
@@ -237,11 +342,8 @@ export async function upsertPartnerByAirtableId(
         target_audience: input.targetAudience?.trim() || null,
         content_marketing: input.contentMarketing?.trim() || null,
         industry_knowledge: input.industryKnowledge?.trim() || null,
-        gsc_site_url: input.gscSiteUrl?.trim() || null,
-        gsc_account: input.gscAccount ?? null,
-        ga4_property_id: input.ga4PropertyId?.trim() || null,
-        ga4_account: input.ga4Account ?? null,
         unfilled_context: input.unfilledContext ?? null,
+        ...buildIntegrationsPayload(input),
       },
       { onConflict: "airtable_id" },
     )

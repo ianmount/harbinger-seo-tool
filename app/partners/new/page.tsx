@@ -6,20 +6,16 @@ import { useRouter } from "next/navigation"
 import { ArrowLeftIcon, Loader2Icon } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/PageHeader"
+import { GoogleMultiSelect } from "@/components/partner-workspace/GoogleMultiSelect"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
-import type { GA4PropertyInfo, GoogleAccountSlug, GSCSiteInfo } from "@/lib/types"
+import type {
+  GA4PropertyInfo,
+  GoogleAccountSlug,
+  GSCSiteInfo,
+} from "@/lib/types"
 
 interface GscSiteForAccount {
   account: GoogleAccountSlug
@@ -38,20 +34,7 @@ interface GoogleListState<T> {
   errorMessage?: string
 }
 
-const NONE_VALUE = "__none__"
-
-function selectionKey(account: GoogleAccountSlug, id: string): string {
-  return `${account}::${id}`
-}
-
-function parseSelection(
-  value: string,
-): { account: GoogleAccountSlug; id: string } | null {
-  if (!value || value === NONE_VALUE) return null
-  const [account, ...rest] = value.split("::")
-  if (account !== "partners" && account !== "assessments") return null
-  return { account, id: rest.join("::") }
-}
+type Selection = { id: string; account: GoogleAccountSlug }
 
 export default function OnboardPartnerPage() {
   const router = useRouter()
@@ -64,8 +47,8 @@ export default function OnboardPartnerPage() {
   const [targetAudience, setTargetAudience] = useState("")
   const [contentMarketing, setContentMarketing] = useState("")
   const [industryKnowledge, setIndustryKnowledge] = useState("")
-  const [gscSelection, setGscSelection] = useState<string>(NONE_VALUE)
-  const [ga4Selection, setGa4Selection] = useState<string>(NONE_VALUE)
+  const [gscSelections, setGscSelections] = useState<Selection[]>([])
+  const [ga4Selections, setGa4Selections] = useState<Selection[]>([])
 
   const [submitting, setSubmitting] = useState(false)
 
@@ -147,12 +130,26 @@ export default function OnboardPartnerPage() {
     }
   }, [])
 
-  const gscByAccount = useMemo(() => groupBy(gscState.items, (x) => x.account), [
-    gscState.items,
-  ])
-  const ga4ByAccount = useMemo(() => groupBy(ga4State.items, (x) => x.account), [
-    ga4State.items,
-  ])
+  const gscOptions = useMemo(
+    () =>
+      gscState.items.map((entry) => ({
+        id: entry.site.siteUrl,
+        account: entry.account,
+        label: entry.site.siteUrl,
+      })),
+    [gscState.items],
+  )
+
+  const ga4Options = useMemo(
+    () =>
+      ga4State.items.map((entry) => ({
+        id: entry.property.propertyId,
+        account: entry.account,
+        label: entry.property.displayName,
+        sublabel: entry.property.websiteUrl,
+      })),
+    [ga4State.items],
+  )
 
   const canSubmit =
     !submitting && name.trim().length > 0 && website.trim().length > 0
@@ -161,8 +158,6 @@ export default function OnboardPartnerPage() {
     e.preventDefault()
     if (!canSubmit) return
     setSubmitting(true)
-    const gsc = parseSelection(gscSelection)
-    const ga4 = parseSelection(ga4Selection)
     try {
       const res = await fetch("/api/partners", {
         method: "POST",
@@ -176,10 +171,14 @@ export default function OnboardPartnerPage() {
           targetAudience: targetAudience.trim() || undefined,
           contentMarketing: contentMarketing.trim() || undefined,
           industryKnowledge: industryKnowledge.trim() || undefined,
-          gscSiteUrl: gsc?.id,
-          gscAccount: gsc?.account,
-          ga4PropertyId: ga4?.id,
-          ga4Account: ga4?.account,
+          gscSites: gscSelections.map((s) => ({
+            siteUrl: s.id,
+            account: s.account,
+          })),
+          ga4Properties: ga4Selections.map((s) => ({
+            propertyId: s.id,
+            account: s.account,
+          })),
         }),
       })
       const body = (await res.json()) as {
@@ -217,13 +216,13 @@ export default function OnboardPartnerPage() {
         tail="— add a new partner to the tool."
         subtitle={
           <>
-            Profile fields drive every downstream tool. Pick the GSC site and
-            GA4 property from{" "}
+            Profile fields drive every downstream tool. Link as many GSC
+            sites and GA4 properties as the partner owns, pulled from{" "}
             <b className="font-sans font-extrabold not-italic text-foreground">
               either authorized Google account
             </b>
-            ; we record which account owns the integration so reports pull from
-            the right place.
+            ; we record which account owns each one so reports pull from the
+            right place.
           </>
         }
       />
@@ -277,103 +276,38 @@ export default function OnboardPartnerPage() {
 
         <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
           <div className="space-y-2">
-            <Label htmlFor="gsc">Google Search Console site</Label>
-            <Select value={gscSelection} onValueChange={setGscSelection}>
-              <SelectTrigger id="gsc" className="w-full">
-                <SelectValue
-                  placeholder={
-                    gscState.status === "loading"
-                      ? "Loading sites…"
-                      : "Select a site (optional)"
-                  }
+            <Label>Google Search Console sites</Label>
+            <GoogleMultiSelect
+              options={gscOptions}
+              value={gscSelections}
+              onChange={setGscSelections}
+              loading={gscState.status === "loading"}
+              itemNoun="site"
+              itemNounPlural="sites"
+              helperText={
+                <GoogleListWarnings
+                  state={gscState}
+                  emptyMessage="No GSC sites visible to either account."
                 />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={NONE_VALUE}>
-                  Skip — link later
-                </SelectItem>
-                {(["partners", "assessments"] as const).map((account) => {
-                  const items = gscByAccount[account] ?? []
-                  if (items.length === 0) return null
-                  return (
-                    <SelectGroup key={account}>
-                      <SelectLabel>
-                        {account === "partners"
-                          ? "Partners account"
-                          : "Assessments account"}
-                      </SelectLabel>
-                      {items.map((entry) => (
-                        <SelectItem
-                          key={selectionKey(entry.account, entry.site.siteUrl)}
-                          value={selectionKey(entry.account, entry.site.siteUrl)}
-                        >
-                          {entry.site.siteUrl}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  )
-                })}
-              </SelectContent>
-            </Select>
-            <GoogleListWarnings
-              state={gscState}
-              label="GSC"
-              emptyMessage="No GSC sites visible to either account."
+              }
             />
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="ga4">GA4 property</Label>
-            <Select value={ga4Selection} onValueChange={setGa4Selection}>
-              <SelectTrigger id="ga4" className="w-full">
-                <SelectValue
-                  placeholder={
-                    ga4State.status === "loading"
-                      ? "Loading properties…"
-                      : "Select a property (optional)"
-                  }
+            <Label>GA4 properties</Label>
+            <GoogleMultiSelect
+              options={ga4Options}
+              value={ga4Selections}
+              onChange={setGa4Selections}
+              loading={ga4State.status === "loading"}
+              itemNoun="property"
+              itemNounPlural="properties"
+              helperText={
+                <GoogleListWarnings
+                  state={ga4State}
+                  emptyMessage="No GA4 properties visible to either account."
                 />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={NONE_VALUE}>
-                  Skip — link later
-                </SelectItem>
-                {(["partners", "assessments"] as const).map((account) => {
-                  const items = ga4ByAccount[account] ?? []
-                  if (items.length === 0) return null
-                  return (
-                    <SelectGroup key={account}>
-                      <SelectLabel>
-                        {account === "partners"
-                          ? "Partners account"
-                          : "Assessments account"}
-                      </SelectLabel>
-                      {items.map((entry) => (
-                        <SelectItem
-                          key={selectionKey(
-                            entry.account,
-                            entry.property.propertyId,
-                          )}
-                          value={selectionKey(
-                            entry.account,
-                            entry.property.propertyId,
-                          )}
-                        >
-                          {entry.property.displayName}
-                          {entry.property.websiteUrl
-                            ? ` — ${entry.property.websiteUrl}`
-                            : ""}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  )
-                })}
-              </SelectContent>
-            </Select>
-            <GoogleListWarnings
-              state={ga4State}
-              label="GA4"
-              emptyMessage="No GA4 properties visible to either account."
+              }
             />
           </div>
         </div>
@@ -446,50 +380,35 @@ export default function OnboardPartnerPage() {
   )
 }
 
-function groupBy<T>(
-  items: T[],
-  keyFn: (item: T) => GoogleAccountSlug,
-): Record<GoogleAccountSlug, T[]> {
-  const out: Record<GoogleAccountSlug, T[]> = { partners: [], assessments: [] }
-  for (const item of items) {
-    out[keyFn(item)].push(item)
-  }
-  return out
-}
-
 function GoogleListWarnings<T>({
   state,
-  label,
   emptyMessage,
 }: {
   state: GoogleListState<T>
-  label: string
   emptyMessage: string
 }) {
   if (state.status === "error") {
     return (
-      <p className="text-xs text-destructive">
-        {label} unavailable: {state.errorMessage}
-      </p>
+      <span className="text-destructive">Unavailable: {state.errorMessage}</span>
     )
   }
   if (state.status === "ready") {
     if (state.items.length === 0 && state.errors.length > 0) {
       return (
-        <p className="text-xs text-amber-600">
+        <span className="text-amber-600">
           {emptyMessage} (
-          {state.errors.map((e) => e.account).join(" + ")} not configured)
-        </p>
+          {state.errors.map((e) => e.account).join(" + ")} reported errors)
+        </span>
       )
     }
     if (state.items.length === 0) {
-      return <p className="text-xs text-muted-foreground">{emptyMessage}</p>
+      return <span>{emptyMessage}</span>
     }
     if (state.errors.length > 0) {
       return (
-        <p className="text-xs text-amber-600">
+        <span className="text-amber-600">
           {state.errors.map((e) => `${e.account}: ${e.message}`).join(" • ")}
-        </p>
+        </span>
       )
     }
   }
