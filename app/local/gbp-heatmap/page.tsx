@@ -197,6 +197,16 @@ export default function GbpHeatmapPage() {
       description={tool.description}
       endpoints={tool.endpoints}
       meta={meta}
+      save={{
+        kind: "gbp_heatmap",
+        enabled: data != null,
+        getDefaultTitle: () => `${keyword || "Keyword"} — GBP heatmap`,
+        getData: () => ({
+          keyword,
+          capturedAt: new Date().toISOString(),
+          ...data,
+        }),
+      }}
       form={
         <form
           onSubmit={onSubmit}

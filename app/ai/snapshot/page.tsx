@@ -141,6 +141,16 @@ export default function AiSnapshotPage() {
       description={tool.description}
       endpoints={tool.endpoints}
       meta={meta}
+      save={{
+        kind: "ai_snapshot",
+        enabled: data != null,
+        getDefaultTitle: () => `${domain || "Brand"} — AI snapshot`,
+        getData: () => ({
+          domain,
+          capturedAt: new Date().toISOString(),
+          ...data,
+        }),
+      }}
       form={
         <form
           onSubmit={onSubmit}

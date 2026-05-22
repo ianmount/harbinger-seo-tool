@@ -69,6 +69,16 @@ export default function LighthousePage() {
       description={tool.description}
       endpoints={tool.endpoints}
       meta={meta}
+      save={{
+        kind: "lighthouse_audit",
+        enabled: data != null,
+        getDefaultTitle: () => `${url || "URL"} — Lighthouse`,
+        getData: () => ({
+          url,
+          capturedAt: new Date().toISOString(),
+          ...data,
+        }),
+      }}
       form={
         <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
           <div className="grow space-y-1.5 min-w-[260px]">

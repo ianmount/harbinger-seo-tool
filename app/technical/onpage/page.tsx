@@ -669,6 +669,16 @@ export default function OnPagePage() {
       description={tool.description}
       endpoints={tool.endpoints}
       meta={meta}
+      save={{
+        kind: "onpage_audit",
+        enabled: data != null,
+        getDefaultTitle: () => `${target || "Domain"} — On-page audit`,
+        getData: () => ({
+          target,
+          capturedAt: new Date().toISOString(),
+          ...data,
+        }),
+      }}
       form={
         <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
           <div className="grow space-y-1.5 min-w-[260px]">

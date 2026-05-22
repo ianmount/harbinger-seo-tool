@@ -122,6 +122,18 @@ export default function OrganicRankingsPage() {
       category="Analysis"
       title={tool.label}
       description={tool.description}
+      save={{
+        kind: "organic_rankings",
+        enabled: data != null,
+        getDefaultTitle: () =>
+          `${data?.target ?? target} — Organic rankings`,
+        getData: () => ({
+          target: data?.target,
+          cities: cities.map((c) => c.location_name ?? c.location_code),
+          capturedAt: new Date().toISOString(),
+          ...data,
+        }),
+      }}
       endpoints={tool.endpoints}
       meta={meta}
       form={

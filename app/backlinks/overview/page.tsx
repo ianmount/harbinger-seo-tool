@@ -394,6 +394,16 @@ export default function BacklinkOverviewPage() {
       description={tool.description}
       endpoints={tool.endpoints}
       meta={meta}
+      save={{
+        kind: "backlinks_overview",
+        enabled: data != null,
+        getDefaultTitle: () => `${target || "Domain"} — Backlinks overview`,
+        getData: () => ({
+          target,
+          capturedAt: new Date().toISOString(),
+          ...data,
+        }),
+      }}
       form={
         <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
           <div className="grow space-y-1.5 min-w-[260px]">

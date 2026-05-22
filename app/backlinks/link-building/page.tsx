@@ -134,6 +134,16 @@ export default function LinkBuildingPage() {
       description={tool.description}
       endpoints={tool.endpoints}
       meta={meta}
+      save={{
+        kind: "outreach_drafts",
+        enabled: data != null,
+        getDefaultTitle: () => `${target || "Domain"} — Link building`,
+        getData: () => ({
+          target,
+          capturedAt: new Date().toISOString(),
+          ...data,
+        }),
+      }}
       form={
         <form onSubmit={onSubmit} className="space-y-3">
           <div className="space-y-1.5">

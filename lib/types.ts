@@ -98,15 +98,25 @@ export interface Partner {
  */
 export type PartnerArtifactKind =
   | "keyword_list"
+  | "keyword_overview"
   | "faq_research"
   | "strategy"
   | "content_brief"
   | "content_copy"
   | "backlink_prospects"
+  | "backlinks_overview"
+  | "referring_domains"
+  | "backlink_trends"
   | "outreach_drafts"
   | "report"
   | "technical_crawl"
+  | "onpage_audit"
+  | "lighthouse_audit"
   | "competitive_analysis"
+  | "organic_rankings"
+  | "domain_overview"
+  | "gbp_heatmap"
+  | "ai_snapshot"
   | "audit"
 
 export interface PartnerArtifact {

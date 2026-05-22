@@ -435,6 +435,16 @@ export default function KeywordOverviewPage() {
       title={tool.label}
       description={tool.description}
       endpoints={tool.endpoints}
+      save={{
+        kind: "keyword_overview",
+        enabled: data != null,
+        getDefaultTitle: () => `${keyword || "Keyword"} — Overview`,
+        getData: () => ({
+          keyword,
+          capturedAt: new Date().toISOString(),
+          ...data,
+        }),
+      }}
       meta={meta}
       form={
         <form onSubmit={onSubmit} className="space-y-4">
