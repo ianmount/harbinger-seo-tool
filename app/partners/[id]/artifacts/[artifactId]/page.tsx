@@ -129,6 +129,27 @@ export default function ArtifactDetailPage({
     }
   }
 
+  function handlePrintPdf() {
+    if (state.status !== "ready") return
+    // Hint the browser's print dialog to suggest a sensible filename. The
+    // CSS in globals.css under `body[data-printing-artifact="1"]` hides
+    // every non-artifact element so what prints matches the rendered view.
+    const originalTitle = document.title
+    document.title = state.artifact.title
+    document.body.setAttribute("data-printing-artifact", "1")
+    const reset = () => {
+      document.body.removeAttribute("data-printing-artifact")
+      document.title = originalTitle
+      window.removeEventListener("afterprint", reset)
+    }
+    window.addEventListener("afterprint", reset)
+    try {
+      window.print()
+    } catch {
+      reset()
+    }
+  }
+
   if (state.status === "loading") {
     return (
       <div className="space-y-6">
@@ -201,10 +222,14 @@ export default function ArtifactDetailPage({
             </a>
           </Button>
         )}
-        {exports.map((spec, i) => (
+        <Button variant="outline" onClick={handlePrintPdf}>
+          <DownloadIcon className="mr-1.5 size-4" />
+          Save as PDF
+        </Button>
+        {exports.map((spec) => (
           <Button
             key={spec.format}
-            variant={i === 0 ? "outline" : "ghost"}
+            variant="outline"
             onClick={() => handleExport(spec)}
           >
             <DownloadIcon className="mr-1.5 size-4" />
@@ -223,7 +248,9 @@ export default function ArtifactDetailPage({
 
       <Separator />
 
-      <ArtifactBody artifact={artifact} />
+      <div className="artifact-print-root">
+        <ArtifactBody artifact={artifact} />
+      </div>
     </div>
   )
 }
