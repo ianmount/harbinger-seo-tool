@@ -453,3 +453,108 @@ set ga4_properties = jsonb_build_array(
 where ga4_properties is null
   and ga4_property_id is not null
   and ga4_account is not null;
+
+-- ── keyword_research_runs ────────────────────────────────────────────────────
+--
+-- 2026-06-08: city-level, per-seed keyword research (the "Keyword Research"
+-- tab). Ad-hoc (no partner linkage) and session-scoped exactly like
+-- background_jobs.session_id (auth cookie iat). One row per research run.
+--
+-- The run is a small state machine with two human-in-the-loop checkpoints:
+--
+--   seeds_review  → Claude proposed seeds; user edits/approves them
+--   generating    → candidates being pulled + curated (synchronous route)
+--   keywords_review → curated prospect list shown; user prunes + approves
+--   localizing    → the paid background job runs (city volume + SERP queue)
+--   completed | failed | cancelled
+--
+-- Big-ish JSON lives in columns:
+--   seeds      — [{ service, seeds: [{ seed, nationalVolume }] }] proposal,
+--                plus the user's approved list once confirmed.
+--   prospect   — curated candidate list awaiting (or after) manual prune.
+--   config     — { depth, targetPlanSize, market:{cities,states,extraAllow},
+--                  competitors:[], disableCategories:[] }.
+--   locations  — [{ slug, label, dfs, locationCode }] resolved up front.
+--   result     — { locations: { <slug>: { rows: [...], droppedNoVolume,
+--                  rankUnresolved } } } once the localize job finishes.
+--
+-- The localize phase is driven by a background_jobs row (kind
+-- 'keyword_research'); `job_id` links to it. SERP queue task ids are tracked
+-- in keyword_research_rank_tasks so polling survives instance recycles.
+
+create table if not exists public.keyword_research_runs (
+  id              uuid primary key default gen_random_uuid(),
+  session_id      text not null,
+  domain          text not null,
+  services        text[] not null default '{}',
+  status          text not null check (status in (
+                     'seeds_review', 'generating', 'keywords_review',
+                     'localizing', 'completed', 'failed', 'cancelled')),
+  config          jsonb not null default '{}'::jsonb,
+  locations       jsonb not null default '[]'::jsonb,
+  seeds           jsonb,
+  approved_seeds  text[],
+  prospect        jsonb,
+  approved_keywords text[],
+  result          jsonb,
+  error           text,
+  -- The background_jobs row that runs the localize phase. Null until the
+  -- user approves the curated list.
+  job_id          uuid references public.background_jobs(id) on delete set null,
+  cost_usd        numeric(10, 4),
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now(),
+  completed_at    timestamptz
+);
+
+create index if not exists keyword_research_runs_session_idx
+  on public.keyword_research_runs (session_id, created_at desc);
+
+create index if not exists keyword_research_runs_status_idx
+  on public.keyword_research_runs (status, updated_at desc);
+
+create or replace function public.keyword_research_runs_set_updated_at()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at := now();
+  return new;
+end;
+$$;
+
+drop trigger if exists keyword_research_runs_updated_at on public.keyword_research_runs;
+create trigger keyword_research_runs_updated_at
+  before update on public.keyword_research_runs
+  for each row execute function public.keyword_research_runs_set_updated_at();
+
+-- ── keyword_research_rank_tasks ──────────────────────────────────────────────
+--
+-- One row per (keyword × location) SERP lookup submitted to DataForSEO's
+-- Standard organic queue during the localize phase. Persisted so the Inngest
+-- poller can correlate `tasks_ready` ids back to (keyword, location) and
+-- resume across function recycles without re-submitting (and re-paying).
+--
+--   status: pending  — submitted to DFS, not yet collected
+--           done      — task_get returned; `rank` holds the target's position
+--                       (null = not in top depth)
+--           failed    — submit or fetch errored
+
+create table if not exists public.keyword_research_rank_tasks (
+  id              uuid primary key default gen_random_uuid(),
+  run_id          uuid not null references public.keyword_research_runs(id) on delete cascade,
+  location_slug   text not null,
+  location_code   integer not null,
+  keyword         text not null,
+  -- City-level Google Ads search volume for this (keyword, location). Persisted
+  -- here so the final CSV assembly reads everything from one table.
+  city_volume     integer,
+  dfs_task_id     text,
+  status          text not null default 'pending' check (status in ('pending', 'done', 'failed')),
+  rank            integer,
+  created_at      timestamptz not null default now()
+);
+
+create index if not exists keyword_research_rank_tasks_run_idx
+  on public.keyword_research_rank_tasks (run_id, status);
+
+create index if not exists keyword_research_rank_tasks_dfs_idx
+  on public.keyword_research_rank_tasks (dfs_task_id);

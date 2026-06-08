@@ -1,18 +1,12 @@
 import "server-only"
 import { z } from "zod"
 import { createCostAccumulator, withAuditCost } from "@/lib/audit-cost"
-import { callClaude, ClaudeApiError } from "@/lib/claude"
 import {
-  bulkKeywordDifficulty,
-  competitorsDomain,
-  DFS_LABS_COUNTRY_CODE_US,
-  keywordIdeasMulti,
-  rankedKeywords,
-  relatedKeywords,
-  searchIntent,
   searchVolume,
-  serpRankedDomains,
-  type SearchIntent,
+  serpTaskGet,
+  serpTaskPost,
+  serpTasksReady,
+  type SerpTaskHandle,
 } from "@/lib/dataforseo"
 import type { TaskRunner } from "@/lib/inngest/functions"
 import {
@@ -20,125 +14,55 @@ import {
   JobCancelledError,
   updateProgress,
 } from "@/lib/jobs"
+import {
+  completeRun,
+  getAllRankTasks,
+  getPendingRankTasks,
+  getRun,
+  insertRankTasks,
+  markRankTaskDone,
+  type NewRankTask,
+  setStatus,
+} from "@/lib/keyword-research-runs"
 import type {
-  CompetitionLevel,
-  DfsLabsLocation,
   DfsLocation,
+  KeywordResearchLocationResult,
+  KeywordResearchResult,
+  KeywordResearchResultRow,
+  KeywordSource,
 } from "@/lib/types"
 
 /**
- * Keyword Research task. Replaces the old synchronous /keyword-research
- * page flow with a four-phase background job:
+ * Keyword Research — localize phase (the paid background job).
  *
- *   Phase 1 — National data sweep (parallel). competitors_domain →
- *     ranked_keywords ×N (partner + competitors), keyword_ideas (from
- *     services), related_keywords (per service). Once the keyword union
- *     is deduped, fan out bulk_keyword_difficulty + search_volume +
- *     search_intent in parallel.
+ * The interactive part (seed proposal → approval → candidate generation →
+ * curation → manual prune) runs synchronously in the API routes. By the time
+ * this task fires, the run has an approved, pruned keyword list. This task
+ * does the expensive per-city work the skill's Steps 5-6 describe:
  *
- *   Phase 2 — Claude shortlist. Sends merged per-keyword rows + the
- *     user's selected `max_keywords` to Claude; expects an array of
- *     exactly `max_keywords` keyword strings. Truncated server-side if
- *     Claude over-returns.
+ *   1. City volume — google_ads/search_volume per location (accepts city
+ *      codes). Drop any keyword with no local volume; that's what makes each
+ *      market's list market-specific.
+ *   2. SERP rank — submit the kept keywords to DataForSEO's async Standard
+ *      organic queue (task_post, 100/call), poll tasks_ready, collect each
+ *      finished task, and record the target's organic position.
+ *   3. Assemble — one result block per location (the per-location CSV rows),
+ *      read back from keyword_research_rank_tasks.
  *
- *   Phase 3 — City SERP probes (async standard queue). One task per
- *     (keyword × city) submitted in batches of 100, polled on
- *     `tasks_ready` every 15s up to ~10 min, then fetched via
- *     task_get/advanced. Records partner_position, top competitor
- *     positions, and SERP features per (keyword, city). Returns partial
- *     results if the queue isn't done before the timeout.
- *
- *   Phase 4 — Output assembly. Per the user's spec the output schema is
- *     unchanged from the legacy tab: per-city tabs, each with
- *     KeywordRow[] (keyword / volume / cpc / competition_level /
- *     currentRanking). No extra Claude synthesis — just merge Phase 1
- *     stats with Phase 3 partner positions.
+ * Everything (city volume + rank) is persisted to the rank-tasks table so the
+ * assembly reads from one source and partial results survive a slow queue.
  */
 
-// ── Input ──────────────────────────────────────────────────────────────────
-
-const dfsLocationSchema = z.object({
-  location_code: z.number().int().positive(),
-  location_name: z.string().min(1),
-  location_code_parent: z.number().int().positive().nullable(),
-  country_iso_code: z.string().nullable(),
-  location_type: z.string().min(1),
+const KeywordResearchInputSchema = z.object({
+  runId: z.string().uuid(),
+  keywords: z.array(z.string().min(1)).min(1),
 })
 
-export const KeywordResearchInputSchema = z.object({
-  domain: z.string().min(3).max(200),
-  services: z.array(z.string().min(1).max(120)).min(1).max(20),
-  cities: z.array(dfsLocationSchema).min(1).max(10),
-  maxKeywords: z.number().int().min(10).max(100),
-  /**
-   * Optional manual competitor list (bare domains). When provided, we skip
-   * DFS's `competitors_domain` discovery — it returns domains with
-   * country-level keyword overlap which often pulls in irrelevant national
-   * sites (Home Depot, WikiHow) for a local-service business.
-   */
-  competitors: z.array(z.string().min(3).max(200)).max(10).optional(),
-})
-
-export type KeywordResearchInput = z.infer<typeof KeywordResearchInputSchema>
-
-// ── Output ─────────────────────────────────────────────────────────────────
-
-export interface KeywordRow {
-  keyword: string
-  search_volume?: number
-  cpc?: number
-  competition?: number
-  competition_level?: CompetitionLevel
-  keyword_difficulty?: number
-  intent?: SearchIntent
-  /** Partner's SERP position in this city (1-indexed). Undefined if not in top 20. */
-  currentRanking?: number
-}
-
-export interface CityResult {
-  location: DfsLabsLocation
-  rows: KeywordRow[]
-  /** True when SERP probes failed/timed-out for this city; rows still render volume etc. */
-  rankProbeFailed: boolean
-  /** Number of (keyword × this city) probes that didn't return a SERP before the poll timeout. */
-  unprobedKeywords: number
-}
-
-export interface KeywordResearchResult {
-  domain: string
-  services: string[]
-  competitors: string[]
-  cities: CityResult[]
-  shortlist: string[]
-  shortlistRationale: string
-  costUsd: number
-  durationSeconds: number
-  warnings: string[]
-}
-
-// ── Internals ──────────────────────────────────────────────────────────────
-
-const MODEL = "claude-sonnet-4-6"
 const SERP_DEPTH = 20
-const SERP_PROBE_CONCURRENCY = 8
-const MIN_RANKED_KEYWORDS_VOLUME = 50
-const RANKED_KEYWORDS_LIMIT = 500
-const KEYWORD_IDEAS_LIMIT = 200
-const RELATED_KEYWORDS_LIMIT = 100
-const COMPETITOR_LIMIT = 5
-
-type StatRow = {
-  keyword: string
-  search_volume?: number
-  cpc?: number
-  competition?: number
-  competition_level?: CompetitionLevel
-  keyword_difficulty?: number
-  intent?: SearchIntent
-  partnerPosition: number | null
-  competitorGap: boolean
-  isQuickWin: boolean
-}
+const POLL_INTERVAL_MS = 20_000
+const MAX_POLLS = 30 // ~10 minutes of polling after an initial settle delay
+const INITIAL_SETTLE_MS = 15_000
+const COLLECT_CONCURRENCY = 8
 
 function stripDomain(domain: string): string {
   return domain
@@ -148,640 +72,223 @@ function stripDomain(domain: string): string {
     .toLowerCase()
 }
 
-const COUNTRY_LOC: DfsLocation = { code: DFS_LABS_COUNTRY_CODE_US }
-
-async function loadCompetitors(
-  domain: string,
-  warnings: string[],
-): Promise<string[]> {
-  try {
-    const rows = await competitorsDomain(domain, COUNTRY_LOC, {
-      limit: COMPETITOR_LIMIT,
-    })
-    return rows.map((r) => stripDomain(r.domain)).filter(Boolean)
-  } catch (err) {
-    warnings.push(
-      `Competitor discovery failed: ${err instanceof Error ? err.message : "unknown"}. Continuing without competitor data.`,
-    )
-    return []
-  }
-}
-
-interface RankedRow {
-  keyword: string
-  position: number
-  searchVolume: number
-}
-
-async function loadDomainRankings(
-  target: string,
-  warnings: string[],
-  context: string,
-): Promise<RankedRow[]> {
-  try {
-    const rows = await rankedKeywords(target, COUNTRY_LOC, {
-      limit: RANKED_KEYWORDS_LIMIT,
-      minVolume: MIN_RANKED_KEYWORDS_VOLUME,
-    })
-    return rows.map((r) => ({
-      keyword: r.keyword,
-      position: r.position,
-      searchVolume: r.searchVolume,
-    }))
-  } catch (err) {
-    warnings.push(
-      `${context} ranked_keywords failed: ${err instanceof Error ? err.message : "unknown"}.`,
-    )
-    return []
-  }
-}
-
-async function loadKeywordIdeas(
-  services: string[],
-  warnings: string[],
-): Promise<string[]> {
-  try {
-    const rows = await keywordIdeasMulti(services, COUNTRY_LOC, {
-      limit: KEYWORD_IDEAS_LIMIT,
-    })
-    return rows.map((r) => r.keyword)
-  } catch (err) {
-    warnings.push(
-      `keyword_ideas failed: ${err instanceof Error ? err.message : "unknown"}.`,
-    )
-    return []
-  }
-}
-
-async function loadRelatedKeywords(
-  services: string[],
-  warnings: string[],
-): Promise<string[]> {
-  // One call per service. Settled-all so a single failure doesn't drop the
-  // whole bucket; record warnings per-failure.
-  const settled = await Promise.allSettled(
-    services.map((s) =>
-      relatedKeywords(s, COUNTRY_LOC, { limit: RELATED_KEYWORDS_LIMIT }),
-    ),
-  )
-  const out: string[] = []
-  settled.forEach((r, i) => {
-    if (r.status === "fulfilled") {
-      for (const kw of r.value) out.push(kw.keyword)
-    } else {
-      warnings.push(
-        `related_keywords for "${services[i]}" failed: ${
-          r.reason instanceof Error ? r.reason.message : String(r.reason)
-        }`,
-      )
-    }
-  })
-  return out
-}
-
-function dedupeStrings(values: string[]): string[] {
-  const seen = new Set<string>()
-  const out: string[] = []
-  for (const v of values) {
-    const k = v.trim().toLowerCase()
-    if (!k || seen.has(k)) continue
-    seen.add(k)
-    out.push(v.trim())
-  }
-  return out
-}
-
-function buildShortlistPrompt(
-  rows: StatRow[],
-  maxKeywords: number,
-): { system: string; prompt: string } {
-  const system =
-    "You are an SEO strategist scoring local-service keyword candidates. Return only the JSON object the schema asks for — no markdown, no commentary."
-
-  // Sort by a rough opportunity heuristic so the prompt's middle section
-  // surfaces the strongest candidates first when Claude scans top-down.
-  const ordered = rows.slice().sort((a, b) => {
-    const av = a.search_volume ?? 0
-    const bv = b.search_volume ?? 0
-    return bv - av
-  })
-
-  const lines: string[] = []
-  lines.push(`# Task`)
-  lines.push(
-    `Score and rank all keywords below, then select EXACTLY ${maxKeywords} keywords for city-level SERP checking.`,
-  )
-  lines.push("")
-  lines.push(`## Scoring inputs (per keyword)`)
-  lines.push(`- search_volume: monthly US searches (null/0 = no data).`)
-  lines.push(`- difficulty: 0–100 keyword difficulty (lower = easier).`)
-  lines.push(`- intent: informational | navigational | commercial | transactional.`)
-  lines.push(
-    `- partner_position: integer 1+ if partner ranks in DFS's top-N (volume >${MIN_RANKED_KEYWORDS_VOLUME}); null if partner doesn't show.`,
-  )
-  lines.push(
-    `- competitor_gap: true if a competitor ranks 1–20 and partner is null or >20. High-priority signal.`,
-  )
-  lines.push(
-    `- is_quick_win: true if partner_position is 11–30 (one tactical push could move them onto page 1).`,
-  )
-  lines.push("")
-  lines.push(`## Shortlist composition (must satisfy ALL)`)
-  lines.push(
-    `1. Quick wins included where they exist — every keyword with is_quick_win=true that also has solid volume should appear.`,
-  )
-  lines.push(
-    `2. Core service terms — terms that map directly to the partner's services (informational + commercial + transactional intent mix).`,
-  )
-  lines.push(
-    `3. Location variants — include keywords that already carry geo modifiers ("plumber atlanta") if they're in the pool.`,
-  )
-  lines.push(
-    `4. Mixed intent — at least 60% transactional/commercial; informational kept only when it fills a known content gap.`,
-  )
-  lines.push(
-    `5. Drop branded keywords (mentioning the partner or competitor brand) and obvious duplicates.`,
-  )
-  lines.push("")
-  lines.push(`## Output`)
-  lines.push(
-    `Return one JSON object: { "rationale": "<2–4 sentence summary of how you balanced the criteria>", "keywords": [<exactly ${maxKeywords} keyword strings, lowercase, no duplicates>] }.`,
-  )
-  lines.push("")
-  lines.push(`## Candidates (${ordered.length} total)`)
-  // Plain-text rows so Claude doesn't get tripped by oversized JSON. One
-  // candidate per line; pipe-separated columns; bools as 0/1.
-  for (const r of ordered) {
-    const cols = [
-      r.keyword,
-      r.search_volume ?? "",
-      r.keyword_difficulty ?? "",
-      r.intent ?? "",
-      r.partnerPosition ?? "",
-      r.competitorGap ? 1 : 0,
-      r.isQuickWin ? 1 : 0,
-    ]
-    lines.push(cols.join("|"))
-  }
-  return { system, prompt: lines.join("\n") }
-}
-
-const claudeShortlistResponseSchema = z.object({
-  rationale: z.string().trim().min(1),
-  keywords: z.array(z.string().trim().min(1)).min(1).max(120),
-})
-
-function stripCodeFences(text: string): string {
-  const t = text.trim()
-  const m = t.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i)
-  return m ? m[1].trim() : t
-}
-
-function extractJsonObject(text: string): string {
-  const stripped = stripCodeFences(text)
-  const first = stripped.indexOf("{")
-  const last = stripped.lastIndexOf("}")
-  if (first === -1 || last === -1 || last <= first) return stripped
-  return stripped.slice(first, last + 1)
-}
-
-async function callClaudeShortlist(
-  rows: StatRow[],
-  maxKeywords: number,
-): Promise<{ rationale: string; keywords: string[]; hallucinated: number }> {
-  const { system, prompt } = buildShortlistPrompt(rows, maxKeywords)
-  let text: string
-  try {
-    text = await callClaude(prompt, {
-      model: MODEL,
-      maxTokens: 4096,
-      system,
-    })
-  } catch (err) {
-    if (err instanceof ClaudeApiError) {
-      throw new Error(`Claude shortlist failed: ${err.message}`)
-    }
-    throw err
-  }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(extractJsonObject(text))
-  } catch (err) {
-    throw new Error(
-      `Claude returned invalid JSON: ${err instanceof Error ? err.message : "unknown"}`,
-    )
-  }
-  const result = claudeShortlistResponseSchema.safeParse(parsed)
-  if (!result.success) {
-    throw new Error(`Claude response shape invalid: ${result.error.message}`)
-  }
-  // Filter to keywords that actually exist in the input pool. Claude
-  // sometimes paraphrases or invents keyword strings; those would land in
-  // the result table without volume/cpc/intent because the downstream
-  // lookup misses them. We require exact (lowercase-trimmed) match.
-  const poolByKw = new Map(rows.map((r) => [r.keyword.toLowerCase(), r.keyword]))
-  const seen = new Set<string>()
-  const dedup: string[] = []
-  let hallucinated = 0
-  for (const kw of result.data.keywords) {
-    const k = kw.trim().toLowerCase()
-    if (!k || seen.has(k)) continue
-    seen.add(k)
-    const poolForm = poolByKw.get(k)
-    if (!poolForm) {
-      hallucinated++
-      continue
-    }
-    dedup.push(poolForm)
-    if (dedup.length >= maxKeywords) break
-  }
-  // If Claude under-delivered (hallucinated several or just returned fewer
-  // than requested), backfill from the highest-volume remaining pool
-  // keywords so the user still gets the full shortlist size.
-  if (dedup.length < maxKeywords) {
-    const used = new Set(dedup.map((k) => k.toLowerCase()))
-    const remaining = rows
-      .filter((r) => !used.has(r.keyword.toLowerCase()))
-      .sort((a, b) => (b.search_volume ?? 0) - (a.search_volume ?? 0))
-    for (const r of remaining) {
-      dedup.push(r.keyword)
-      if (dedup.length >= maxKeywords) break
-    }
-  }
-  return { rationale: result.data.rationale, keywords: dedup, hallucinated }
-}
-
-// ── Phase 3: SERP probes (synchronous, live/advanced) ─────────────────────
-//
-// We tried DFS's standard queue + tasks_ready polling first per the user's
-// spec — it failed silently in production (tasks submitted but never came
-// back ready, even at 15-min timeouts). Switched to live/advanced which
-// the Audit and Comp Analysis tabs already use successfully. Per-probe
-// cost is ~3× higher (~$0.002 vs ~$0.0006) but for a 50-keyword × 1-city
-// Standard run that's $0.10 vs $0.03 — negligible vs the value of actual
-// results.
-
-interface ProbeResult {
-  /** Map keyword.toLowerCase() → partner SERP position (1-indexed). Missing = not in top SERP_DEPTH. */
-  positions: Map<string, number>
-  /** Keywords where the SERP probe threw (network error, rate limit, etc.). */
-  unprobedKeywords: string[]
-  /** True iff every probe for this city errored. */
-  failed: boolean
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
 }
 
 async function mapWithConcurrency<T, R>(
   items: ReadonlyArray<T>,
   limit: number,
-  fn: (item: T, index: number) => Promise<R>,
+  fn: (item: T) => Promise<R>,
 ): Promise<R[]> {
   const results: R[] = new Array(items.length)
   let cursor = 0
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (true) {
-      const i = cursor++
-      if (i >= items.length) return
-      results[i] = await fn(items[i], i)
-    }
-  })
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (true) {
+        const i = cursor++
+        if (i >= items.length) return
+        results[i] = await fn(items[i])
+      }
+    },
+  )
   await Promise.all(workers)
   return results
 }
 
-async function probeCitySerps(
+async function runLocalizePipeline(
   jobId: string,
-  shortlist: string[],
-  city: DfsLabsLocation,
-  partnerDomain: string,
-  warnings: string[],
-): Promise<ProbeResult> {
-  if (shortlist.length === 0) {
-    return { positions: new Map(), unprobedKeywords: [], failed: true }
-  }
-  const target = stripDomain(partnerDomain)
-  const cityLoc: DfsLocation = { code: city.location_code }
-  const positions = new Map<string, number>()
-  const unprobed: string[] = []
-  let successes = 0
-
-  type ProbeOutcome =
-    | { kind: "ok"; keyword: string; partnerPos: number | null }
-    | { kind: "err"; keyword: string; message: string }
-
-  const outcomes = await mapWithConcurrency<string, ProbeOutcome>(
-    shortlist,
-    SERP_PROBE_CONCURRENCY,
-    async (kw) => {
-      if (await isCancelRequested(jobId)) {
-        throw new JobCancelledError(jobId)
-      }
-      try {
-        const results = await serpRankedDomains(kw, cityLoc, {
-          depth: SERP_DEPTH,
-        })
-        const hit = results.find((r) => stripDomain(r.domain) === target)
-        return {
-          kind: "ok",
-          keyword: kw,
-          partnerPos: hit ? hit.rankAbsolute : null,
-        }
-      } catch (err) {
-        return {
-          kind: "err",
-          keyword: kw,
-          message: err instanceof Error ? err.message : "unknown",
-        }
-      }
-    },
-  )
-
-  for (const o of outcomes) {
-    if (o.kind === "ok") {
-      successes++
-      if (o.partnerPos != null) positions.set(o.keyword.toLowerCase(), o.partnerPos)
-    } else {
-      unprobed.push(o.keyword)
-    }
-  }
-
-  if (unprobed.length > 0) {
-    warnings.push(
-      `${city.location_name}: ${unprobed.length}/${shortlist.length} SERP probes errored (rate limit, network, or DFS-side). Partial results shown.`,
-    )
-  }
-
-  return {
-    positions,
-    unprobedKeywords: unprobed,
-    failed: successes === 0,
-  }
-}
-
-// ── Pipeline ───────────────────────────────────────────────────────────────
-
-async function runKeywordResearchPipeline(
-  jobId: string,
-  input: KeywordResearchInput,
-): Promise<{
-  result: KeywordResearchResult
-  resultPath: string
-}> {
+  runId: string,
+  keywords: string[],
+): Promise<{ result: unknown; resultPath: string }> {
   const startedAt = Date.now()
   const warnings: string[] = []
   const cost = createCostAccumulator()
 
-  const writeProgress = (stage: string, detail?: string) =>
-    updateProgress(jobId, { stage, detail }).catch(() => {
-      /* progress writes are best-effort */
-    })
+  const run = await getRun(runId)
+  if (!run) throw new Error(`Keyword research run ${runId} not found`)
 
-  const stage = async (label: string, detail?: string) => {
-    await writeProgress(label, detail)
-    if (await isCancelRequested(jobId)) throw new JobCancelledError(jobId)
+  const target = stripDomain(run.domain)
+  const prospectByKw = new Map<string, { seed: string; source: KeywordSource }>()
+  for (const c of run.prospect ?? []) {
+    prospectByKw.set(c.keyword.toLowerCase(), { seed: c.seed, source: c.source })
   }
 
-  const result = await withAuditCost(cost, async () => {
-    const partnerDomain = stripDomain(input.domain)
+  const progress = (stage: string, detail?: string) =>
+    updateProgress(jobId, { stage, detail }).catch(() => {})
 
-    // ── Phase 1.0: resolve competitors. If the user provided a manual
-    // list on the form, use it as-is — DFS's competitors_domain returns
-    // domains with country-level keyword overlap, which for local-service
-    // businesses pulls in irrelevant national sites (Home Depot, WikiHow)
-    // alongside the actual local competitors. The manual list is almost
-    // always more accurate. We only fall back to discovery when the user
-    // doesn't provide one.
-    const manualCompetitors = (input.competitors ?? [])
-      .map(stripDomain)
-      .filter((d) => d.length > 0 && d !== partnerDomain)
-    let competitors: string[]
-    if (manualCompetitors.length > 0) {
-      await stage(
-        "Using provided competitors",
-        `${manualCompetitors.length} domain${manualCompetitors.length === 1 ? "" : "s"}`,
+  await withAuditCost(cost, async () => {
+    // ── Phase 1: city volume + drop + queue SERP tasks, per location. ──────
+    for (const loc of run.locations) {
+      if (await isCancelRequested(jobId)) throw new JobCancelledError(jobId)
+      await progress(
+        "Pricing local demand",
+        `${loc.label} (${keywords.length} keywords)`,
       )
-      competitors = manualCompetitors
-    } else {
-      await stage("Discovering competitors", `domain=${partnerDomain}`)
-      competitors = await loadCompetitors(partnerDomain, warnings)
-      if (competitors.length > 0) {
+      const cityLoc: DfsLocation = { code: loc.locationCode }
+      let volRows
+      try {
+        volRows = await searchVolume(keywords, cityLoc)
+      } catch (err) {
         warnings.push(
-          `Competitors auto-discovered via DataForSEO's competitors_domain endpoint. These are domains with country-level keyword overlap — for local-service businesses the list can include irrelevant national sites. Paste a manual competitor list on the form for sharper results.`,
+          `${loc.label}: city volume failed (${
+            err instanceof Error ? err.message : "unknown"
+          }). Skipping this market.`,
         )
+        continue
       }
-    }
-
-    // ── Phase 1.1: parallel data sweep. ─────────────────────────────
-    await stage(
-      "Pulling rankings + ideas + related",
-      `competitors=${competitors.length} services=${input.services.length}`,
-    )
-    const partnerRankPromise = loadDomainRankings(
-      partnerDomain,
-      warnings,
-      "partner",
-    )
-    const competitorRankPromises = competitors.map((c) =>
-      loadDomainRankings(c, warnings, `competitor:${c}`),
-    )
-    const ideasPromise = loadKeywordIdeas(input.services, warnings)
-    const relatedPromise = loadRelatedKeywords(input.services, warnings)
-
-    const [
-      partnerRanks,
-      competitorRanks,
-      ideaKeywords,
-      relatedKws,
-    ] = await Promise.all([
-      partnerRankPromise,
-      Promise.all(competitorRankPromises),
-      ideasPromise,
-      relatedPromise,
-    ])
-
-    if (await isCancelRequested(jobId)) throw new JobCancelledError(jobId)
-
-    // Build the deduped keyword universe from steps 2-5.
-    const universe = dedupeStrings([
-      ...partnerRanks.map((r) => r.keyword),
-      ...competitorRanks.flat().map((r) => r.keyword),
-      ...ideaKeywords,
-      ...relatedKws,
-    ])
-    if (universe.length === 0) {
-      throw new Error(
-        "No keywords surfaced from any source. Check that the domain ranks for something or that the services list is non-empty.",
-      )
-    }
-
-    // ── Phase 1.2: parallel difficulty + volume + intent. ───────────
-    await stage(
-      "Enriching with difficulty, volume, intent",
-      `keywords=${universe.length}`,
-    )
-    const [diffRows, volRows, intentMap] = await Promise.all([
-      bulkKeywordDifficulty(universe, COUNTRY_LOC).catch((err) => {
-        warnings.push(
-          `bulk_keyword_difficulty failed: ${err instanceof Error ? err.message : "unknown"}`,
-        )
-        return []
-      }),
-      searchVolume(universe, COUNTRY_LOC).catch((err) => {
-        warnings.push(
-          `search_volume failed: ${err instanceof Error ? err.message : "unknown"}`,
-        )
-        return []
-      }),
-      searchIntent(universe, COUNTRY_LOC).catch((err) => {
-        warnings.push(
-          `search_intent failed: ${err instanceof Error ? err.message : "unknown"}`,
-        )
-        return new Map<string, SearchIntent>()
-      }),
-    ])
-
-    if (await isCancelRequested(jobId)) throw new JobCancelledError(jobId)
-
-    // Merge into per-keyword stat rows.
-    const diffByKw = new Map(
-      diffRows.map((r) => [r.keyword.toLowerCase(), r.keyword_difficulty]),
-    )
-    const volByKw = new Map(
-      volRows.map((r) => [
-        r.keyword.toLowerCase(),
-        {
-          search_volume: r.search_volume,
-          cpc: r.cpc,
-          competition: r.competition,
-          competition_level: r.competition_level,
-        },
-      ]),
-    )
-    const partnerPosByKw = new Map(
-      partnerRanks.map((r) => [r.keyword.toLowerCase(), r.position]),
-    )
-    const competitorBestByKw = new Map<string, number>()
-    for (const list of competitorRanks) {
-      for (const r of list) {
-        const k = r.keyword.toLowerCase()
-        const prev = competitorBestByKw.get(k)
-        if (prev == null || r.position < prev) competitorBestByKw.set(k, r.position)
+      const volByKw = new Map<string, number>()
+      for (const r of volRows) {
+        if (typeof r.search_volume === "number") {
+          volByKw.set(r.keyword.toLowerCase(), r.search_volume)
+        }
       }
-    }
+      // Keep keywords with local demand; drop the rest (market-specificity).
+      const kept = keywords.filter((kw) => (volByKw.get(kw.toLowerCase()) ?? 0) > 0)
+      if (kept.length === 0) {
+        warnings.push(`${loc.label}: no keywords had local search volume.`)
+        continue
+      }
 
-    const statRows: StatRow[] = universe.map((kw) => {
-      const k = kw.toLowerCase()
-      const partnerPos = partnerPosByKw.get(k) ?? null
-      const competitorBest = competitorBestByKw.get(k)
-      const competitorGap =
-        competitorBest != null &&
-        competitorBest <= 20 &&
-        (partnerPos == null || partnerPos > 20)
-      const isQuickWin = partnerPos != null && partnerPos >= 11 && partnerPos <= 30
-      const vol = volByKw.get(k)
-      return {
+      await progress("Queueing SERP rank checks", loc.label)
+      let handles: SerpTaskHandle[] = []
+      try {
+        handles = await serpTaskPost(
+          kept.map((kw) => ({
+            keyword: kw,
+            locationCode: loc.locationCode,
+            locationLabel: loc.label,
+            depth: SERP_DEPTH,
+          })),
+        )
+      } catch (err) {
+        warnings.push(
+          `${loc.label}: SERP task submission failed (${
+            err instanceof Error ? err.message : "unknown"
+          }).`,
+        )
+        handles = []
+      }
+      const idByKw = new Map<string, string>()
+      for (const h of handles) idByKw.set(h.keyword.toLowerCase(), h.id)
+
+      const tasks: NewRankTask[] = kept.map((kw) => ({
+        locationSlug: loc.slug,
+        locationCode: loc.locationCode,
         keyword: kw,
-        search_volume: vol?.search_volume,
-        cpc: vol?.cpc,
-        competition: vol?.competition,
-        competition_level: vol?.competition_level,
-        keyword_difficulty: diffByKw.get(k) ?? undefined,
-        intent: intentMap.get(k),
-        partnerPosition: partnerPos,
-        competitorGap,
-        isQuickWin,
+        cityVolume: volByKw.get(kw.toLowerCase()) ?? null,
+        // Empty string sentinel for keywords that failed to submit — they
+        // still appear in the CSV with city volume but no rank.
+        dfsTaskId: idByKw.get(kw.toLowerCase()) ?? "",
+      }))
+      await insertRankTasks(runId, tasks)
+    }
+
+    // ── Phase 2: poll the Standard queue and collect ranks. ────────────────
+    // Give DFS a moment before the first poll — freshly-posted tasks aren't
+    // ready instantly.
+    await sleep(INITIAL_SETTLE_MS)
+    for (let poll = 0; poll < MAX_POLLS; poll++) {
+      if (await isCancelRequested(jobId)) throw new JobCancelledError(jobId)
+      const pending = (await getPendingRankTasks(runId)).filter(
+        (t) => t.dfs_task_id, // sentinel "" / null → never submitted, skip
+      )
+      if (pending.length === 0) break
+
+      let readyIds: Set<string>
+      try {
+        readyIds = new Set(await serpTasksReady())
+      } catch (err) {
+        warnings.push(
+          `tasks_ready poll failed (${
+            err instanceof Error ? err.message : "unknown"
+          }); retrying.`,
+        )
+        await sleep(POLL_INTERVAL_MS)
+        continue
       }
-    })
-
-    // ── Phase 2: Claude shortlists max_keywords. ────────────────────
-    await stage(
-      "Asking Claude to shortlist",
-      `pool=${statRows.length} target=${input.maxKeywords}`,
-    )
-    const { rationale, keywords: shortlistFromClaude } =
-      await callClaudeShortlist(statRows, input.maxKeywords)
-    const shortlist = shortlistFromClaude.slice(0, input.maxKeywords)
-    if (shortlist.length === 0) {
-      throw new Error("Claude returned an empty shortlist.")
-    }
-
-    if (await isCancelRequested(jobId)) throw new JobCancelledError(jobId)
-
-    // ── Phase 3: SERP probes per (keyword × city). ──────────────────
-    const probesByCity = new Map<string, ProbeResult>()
-    for (const city of input.cities) {
-      await stage(
-        "Probing city SERPs",
-        `${city.location_name} (${shortlist.length} keywords)`,
+      const collectable = pending.filter(
+        (t) => t.dfs_task_id && readyIds.has(t.dfs_task_id),
       )
-      const probe = await probeCitySerps(
-        jobId,
-        shortlist,
-        city,
-        partnerDomain,
-        warnings,
+
+      await progress(
+        "Collecting SERP results",
+        `${pending.length} pending, ${collectable.length} ready this round`,
       )
-      probesByCity.set(String(city.location_code), probe)
-    }
 
-    // Build per-keyword lookup for the merged stat rows.
-    const statByKw = new Map(statRows.map((r) => [r.keyword.toLowerCase(), r]))
-
-    // ── Phase 4: assemble per-city result tables. ───────────────────
-    await stage("Assembling results")
-    const cities: CityResult[] = input.cities.map((city) => {
-      const probe =
-        probesByCity.get(String(city.location_code)) ??
-        ({
-          positions: new Map(),
-          unprobedKeywords: shortlist.slice(),
-          failed: true,
-        } satisfies ProbeResult)
-      const rows: KeywordRow[] = shortlist.map((kw) => {
-        const k = kw.toLowerCase()
-        const stat = statByKw.get(k)
-        return {
-          keyword: kw,
-          search_volume: stat?.search_volume,
-          cpc: stat?.cpc,
-          competition: stat?.competition,
-          competition_level: stat?.competition_level,
-          keyword_difficulty: stat?.keyword_difficulty,
-          intent: stat?.intent,
-          currentRanking: probe.positions.get(k),
+      await mapWithConcurrency(collectable, COLLECT_CONCURRENCY, async (t) => {
+        try {
+          const serp = await serpTaskGet(t.dfs_task_id as string)
+          const hit = serp.organic.find((o) => stripDomain(o.domain) === target)
+          await markRankTaskDone(t.id, hit ? hit.position : null)
+        } catch {
+          // Leave the row pending; a later poll may pick it up. If it never
+          // resolves, it surfaces as rank-unresolved (blank rank).
         }
       })
+
+      await sleep(POLL_INTERVAL_MS)
+    }
+  })
+
+  // ── Phase 3: assemble per-location results from the rank-tasks table. ────
+  await progress("Assembling results")
+  const allTasks = await getAllRankTasks(runId)
+  const byLocation = new Map<string, typeof allTasks>()
+  for (const t of allTasks) {
+    const arr = byLocation.get(t.location_slug) ?? []
+    if (!byLocation.has(t.location_slug)) byLocation.set(t.location_slug, arr)
+    arr.push(t)
+  }
+
+  const locations: KeywordResearchLocationResult[] = run.locations.map((loc) => {
+    const tasks = byLocation.get(loc.slug) ?? []
+    const rows: KeywordResearchResultRow[] = tasks.map((t) => {
+      const meta = prospectByKw.get(t.keyword.toLowerCase())
       return {
-        location: city,
-        rows,
-        rankProbeFailed: probe.failed,
-        unprobedKeywords: probe.unprobedKeywords.length,
+        seed: meta?.seed ?? "",
+        keyword: t.keyword,
+        source: meta?.source ?? "suggestions",
+        cityVolume: t.city_volume,
+        currentRank: t.status === "done" ? t.rank : null,
       }
     })
-
+    const droppedNoVolume = Math.max(0, keywords.length - tasks.length)
+    const rankUnresolved = tasks.filter(
+      (t) => t.status !== "done" || !t.dfs_task_id,
+    ).length
     return {
-      domain: partnerDomain,
-      services: input.services,
-      competitors,
-      cities,
-      shortlist,
-      shortlistRationale: rationale,
-      costUsd: 0, // backfilled below
-      durationSeconds: 0, // backfilled below
-      warnings,
-    } satisfies KeywordResearchResult
+      slug: loc.slug,
+      label: loc.label,
+      rows,
+      droppedNoVolume,
+      rankUnresolved,
+    }
   })
 
   const totalCostUsd = cost.dataforseoUsd + cost.claudeUsd
-  result.costUsd = Number(totalCostUsd.toFixed(4))
-  result.durationSeconds = Math.round((Date.now() - startedAt) / 1000)
+  const result: KeywordResearchResult = {
+    locations,
+    costUsd: Number(totalCostUsd.toFixed(4)),
+    durationSeconds: Math.round((Date.now() - startedAt) / 1000),
+    warnings,
+  }
+
+  await completeRun(runId, result)
 
   console.log(
-    `[keyword-research:done] job=${jobId} domain=${result.domain} cities=${result.cities.length} shortlist=${result.shortlist.length} duration=${result.durationSeconds}s cost=$${totalCostUsd.toFixed(2)}`,
+    `[keyword-research:done] job=${jobId} run=${runId} domain=${target} locations=${locations.length} cost=$${totalCostUsd.toFixed(2)} duration=${result.durationSeconds}s`,
   )
 
   return {
-    result,
-    resultPath: `/keyword-research/${jobId}`,
+    result: {
+      runId,
+      locations: locations.length,
+      costUsd: result.costUsd,
+      durationSeconds: result.durationSeconds,
+    },
+    resultPath: `/keywords/research/${runId}`,
   }
 }
 
@@ -792,5 +299,24 @@ export const runKeywordResearchTask: TaskRunner = async ({ jobId, job }) => {
       `Invalid keyword research input: ${JSON.stringify(parsed.error.flatten())}`,
     )
   }
-  return runKeywordResearchPipeline(jobId, parsed.data)
+  const { runId, keywords } = parsed.data
+  try {
+    return await runLocalizePipeline(jobId, runId, keywords)
+  } catch (err) {
+    // Mirror the failure onto the run row so the tab reflects it. Cancellation
+    // is finalized as cancelled by the dispatcher; mark the run to match.
+    if (
+      err instanceof JobCancelledError ||
+      (err as { name?: string })?.name === "JobCancelledError"
+    ) {
+      await setStatus(runId, "cancelled").catch(() => {})
+    } else {
+      await setStatus(
+        runId,
+        "failed",
+        err instanceof Error ? err.message : String(err),
+      ).catch(() => {})
+    }
+    throw err
+  }
 }

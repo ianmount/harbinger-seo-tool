@@ -155,6 +155,16 @@ export interface KeywordResult {
   competition?: number
   competition_level?: CompetitionLevel
   keyword_difficulty?: number
+  /**
+   * DataForSEO's `keyword_properties.core_keyword` — the canonical form a
+   * group of phrasing variants collapses to. Captured by keyword_suggestions
+   * / related_keywords so the keyword-research curator can cluster variants
+   * ("roof leak repair" / "repair a roof leak") into one concept. Undefined
+   * on endpoints that don't surface it.
+   */
+  core_keyword?: string
+  /** `search_intent_info.main_intent` when the endpoint returns it. */
+  search_intent?: KeywordIntent
 }
 
 /**
@@ -1871,4 +1881,145 @@ export interface PartnerSnapshot {
   latestRun: PartnerSnapshotRun | null
   /** Non-fatal error message (e.g. GSC fetch failed). */
   error: string | null
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Keyword Research (city-level, per-seed) — the "Keyword Research" tab.
+//
+// A session-scoped, ad-hoc run that turns a domain + services into per-city
+// keyword CSVs. Mirrors the keyword-research skill: Claude proposes seeds →
+// user approves → candidates generated + curated → user prunes → paid city
+// volume + SERP rank passes → one CSV per location. Persisted in Supabase
+// (keyword_research_runs); see lib/keyword-research-runs.ts.
+
+export type KeywordResearchStatus =
+  | "seeds_review"
+  | "generating"
+  | "keywords_review"
+  | "localizing"
+  | "completed"
+  | "failed"
+  | "cancelled"
+
+/** Source endpoint a candidate keyword came from. suggestions > related. */
+export type KeywordSource = "suggestions" | "related"
+
+/** A target city resolved to its DataForSEO Google Ads location. */
+export interface KeywordResearchLocation {
+  /** URL-safe slug used for per-location files/result keys (e.g. "atlanta-ga"). */
+  slug: string
+  /** Human label shown in the UI (the city name the user typed). */
+  label: string
+  /** Canonical "City,Region,Country" string from the Google Ads taxonomy. */
+  dfs: string
+  /** Numeric Google Ads location_code (used by city volume + SERP queue). */
+  locationCode: number
+}
+
+/** Per-run knobs + market allowlist used by the curator. */
+export interface KeywordResearchConfig {
+  /** Candidates pulled/kept per seed during national generation. */
+  depth: number
+  /** Size of the curated prospect list, balanced across seeds. */
+  targetPlanSize: number
+  /** Market allowlist for the geo filter. */
+  market: {
+    /** In-market city/suburb names that survive the geo filter. */
+    cities: string[]
+    /** In-market state names + abbreviations (e.g. "Georgia", "GA"). */
+    states: string[]
+    /** Extra tokens to always allow through the geo filter. */
+    extraAllow: string[]
+  }
+  /** Competitor business names whose brand terms get denylisted. */
+  competitors: string[]
+  /** Negative-keyword categories to disable (e.g. "manufacturer_brands"). */
+  disableCategories: string[]
+}
+
+/** Claude's proposed seeds for one service, with national volume evidence. */
+export interface SeedProposalGroup {
+  service: string
+  seeds: { seed: string; nationalVolume: number | null }[]
+}
+
+/**
+ * One curated candidate keyword (post clustering/geo/negative filtering),
+ * carrying the national metrics captured during generation. The localize
+ * phase adds city volume + rank per location at CSV-build time.
+ */
+export interface KeywordCandidate {
+  seed: string
+  keyword: string
+  source: KeywordSource
+  /** core_keyword the variant cluster collapsed to (fallback: keyword). */
+  coreKeyword: string
+  /** How many phrasing variants this concept absorbed during clustering. */
+  variantCount: number
+  nationalVolume: number | null
+  keywordDifficulty: number | null
+  searchIntent: KeywordIntent | null
+  cpc: number | null
+  competition: number | null
+  competitionLevel: CompetitionLevel | null
+}
+
+/** A term the curator dropped, with the reason — surfaced for skimming. */
+export interface KeywordDrop {
+  keyword: string
+  seed: string
+  reason: string
+}
+
+/** One row in a per-location CSV (the deliverable). */
+export interface KeywordResearchResultRow {
+  seed: string
+  keyword: string
+  source: KeywordSource
+  /** City-level search volume from google_ads/search_volume. */
+  cityVolume: number | null
+  /** Target's organic rank in that city; null = not in top depth. */
+  currentRank: number | null
+}
+
+export interface KeywordResearchLocationResult {
+  slug: string
+  label: string
+  rows: KeywordResearchResultRow[]
+  /** How many prospect terms were dropped here for zero local volume. */
+  droppedNoVolume: number
+  /** How many kept terms never got a rank result before the poll timeout. */
+  rankUnresolved: number
+}
+
+export interface KeywordResearchResult {
+  locations: KeywordResearchLocationResult[]
+  costUsd: number
+  durationSeconds: number
+  warnings: string[]
+}
+
+/** Full run record as stored in Supabase + returned to the client. */
+export interface KeywordResearchRun {
+  id: string
+  domain: string
+  services: string[]
+  status: KeywordResearchStatus
+  config: KeywordResearchConfig
+  locations: KeywordResearchLocation[]
+  /** Claude's seed proposal (present from seeds_review onward). */
+  seedProposal: SeedProposalGroup[] | null
+  approvedSeeds: string[] | null
+  /** Curated candidate list (present from keywords_review onward). */
+  prospect: KeywordCandidate[] | null
+  /** Curator drop log (for skimming false positives). */
+  drops: KeywordDrop[] | null
+  approvedKeywords: string[] | null
+  result: KeywordResearchResult | null
+  error: string | null
+  jobId: string | null
+  costUsd: number | null
+  createdAt: string
+  updatedAt: string
+  completedAt: string | null
 }

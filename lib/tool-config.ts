@@ -102,17 +102,19 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
         ],
       },
       {
-        slug: "magic",
+        slug: "research",
         category: "keywords",
         label: "Keyword Research",
         description:
-          "Discover keyword ideas, suggestions, and related terms from a seed keyword.",
-        href: "/keywords/magic",
+          "City-level, per-seed keyword research. Enter a domain + services → Claude proposes seeds (you approve) → candidates are generated and curated (you prune) → city volume + SERP rank run in the background → download one CSV per location.",
+        href: "/keywords/research",
         endpoints: [
           "/v3/dataforseo_labs/google/keyword_suggestions/live",
-          "/v3/dataforseo_labs/google/keyword_ideas/live",
           "/v3/dataforseo_labs/google/related_keywords/live",
           "/v3/keywords_data/google_ads/search_volume/live",
+          "/v3/serp/google/organic/task_post",
+          "/v3/serp/google/organic/tasks_ready",
+          "/v3/serp/google/organic/task_get/advanced",
         ],
       },
       {

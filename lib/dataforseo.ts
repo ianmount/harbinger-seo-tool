@@ -11,6 +11,7 @@ import type {
   DfsLabsLocation,
   DfsLocation,
   DomainRankOverview,
+  KeywordResearchLocation,
   KeywordResult,
   ReferringDomain,
   ReferringDomainSample,
@@ -193,6 +194,14 @@ const labsItemSchema = z
     keyword_properties: z
       .object({
         keyword_difficulty: z.number().nullable().optional(),
+        core_keyword: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+    search_intent_info: z
+      .object({
+        main_intent: z.string().nullable().optional(),
       })
       .passthrough()
       .nullable()
@@ -231,6 +240,8 @@ function normalizeLabsItem(raw: unknown): KeywordResult {
     competition_level: toCompetitionLevel(info?.competition_level),
     keyword_difficulty:
       props?.keyword_difficulty ?? item.keyword_difficulty ?? undefined,
+    core_keyword: props?.core_keyword ?? undefined,
+    search_intent: toIntent(item.search_intent_info?.main_intent),
   }
 }
 
@@ -540,6 +551,112 @@ export async function listLabsLocations(
     `[dataforseo] cached ${locations.length} Google Ads locations for ${country}`,
   )
   return locations
+}
+
+// US state name ↔ abbreviation, used to interpret freeform "City, ST" inputs.
+const US_STATE_ABBREV_TO_NAME: Record<string, string> = {
+  AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California",
+  CO: "Colorado", CT: "Connecticut", DE: "Delaware", FL: "Florida", GA: "Georgia",
+  HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa",
+  KS: "Kansas", KY: "Kentucky", LA: "Louisiana", ME: "Maine", MD: "Maryland",
+  MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi",
+  MO: "Missouri", MT: "Montana", NE: "Nebraska", NV: "Nevada", NH: "New Hampshire",
+  NJ: "New Jersey", NM: "New Mexico", NY: "New York", NC: "North Carolina",
+  ND: "North Dakota", OH: "Ohio", OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania",
+  RI: "Rhode Island", SC: "South Carolina", SD: "South Dakota", TN: "Tennessee",
+  TX: "Texas", UT: "Utah", VT: "Vermont", VA: "Virginia", WA: "Washington",
+  WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming", DC: "District of Columbia",
+}
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/,?\s*united states$/i, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+}
+
+/** Parse a freeform "Atlanta, GA" / "Atlanta, Georgia" / "Atlanta" input. */
+function parseCityInput(raw: string): { city: string; state: string | null } {
+  const parts = raw
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean)
+  const city = (parts[0] ?? "").toLowerCase()
+  let state: string | null = null
+  if (parts[1]) {
+    const token = parts[1].trim()
+    const upper = token.toUpperCase()
+    if (US_STATE_ABBREV_TO_NAME[upper]) {
+      state = US_STATE_ABBREV_TO_NAME[upper].toLowerCase()
+    } else {
+      state = token.toLowerCase()
+    }
+  }
+  return { city, state }
+}
+
+/**
+ * Resolve freeform city inputs (e.g. "Atlanta, GA") to DataForSEO Google Ads
+ * locations — the `"City,Region,Country"` string + numeric `location_code`
+ * needed for city-level search volume and the SERP rank queue.
+ *
+ * Matches against the cached Google Ads location list, preferring
+ * location_type "City". When a state is supplied it must match; when it
+ * isn't, the single most-specific city match wins (and ambiguity surfaces by
+ * the caller showing the resolved label back to the user).
+ *
+ * Per the keyword-research guardrail, unresolved inputs are returned in
+ * `unresolved` rather than silently falling back to a national code — the
+ * caller stops and asks.
+ */
+export async function resolveCityLocations(
+  inputs: string[],
+  countryIsoCode = "US",
+): Promise<{ resolved: KeywordResearchLocation[]; unresolved: string[] }> {
+  const all = await listLabsLocations(countryIsoCode)
+  const cities = all.filter((l) => l.location_type === "City")
+  const resolved: KeywordResearchLocation[] = []
+  const unresolved: string[] = []
+  const seenCodes = new Set<number>()
+
+  for (const raw of inputs) {
+    const trimmed = raw.trim()
+    if (!trimmed) continue
+    const { city, state } = parseCityInput(trimmed)
+    if (!city) {
+      unresolved.push(trimmed)
+      continue
+    }
+
+    // location_name looks like "Atlanta,Georgia,United States". Compare the
+    // first comma-segment to the parsed city, and (if given) require the
+    // state segment to match.
+    const candidates = cities.filter((l) => {
+      const segs = l.location_name.split(",").map((s) => s.trim().toLowerCase())
+      if (segs[0] !== city) return false
+      if (state && !segs.slice(1).some((s) => s === state)) return false
+      return true
+    })
+
+    if (candidates.length === 0) {
+      unresolved.push(trimmed)
+      continue
+    }
+    // Prefer the shortest location_name (most direct "City,State,US" form).
+    candidates.sort((a, b) => a.location_name.length - b.location_name.length)
+    const match = candidates[0]
+    if (seenCodes.has(match.location_code)) continue
+    seenCodes.add(match.location_code)
+    resolved.push({
+      slug: slugify(match.location_name),
+      label: trimmed,
+      dfs: match.location_name,
+      locationCode: match.location_code,
+    })
+  }
+
+  return { resolved, unresolved }
 }
 
 
@@ -1421,6 +1538,14 @@ const relatedKeywordItemSchema = z
         keyword_properties: z
           .object({
             keyword_difficulty: z.number().nullable().optional(),
+            core_keyword: z.string().nullable().optional(),
+          })
+          .passthrough()
+          .nullable()
+          .optional(),
+        search_intent_info: z
+          .object({
+            main_intent: z.string().nullable().optional(),
           })
           .passthrough()
           .nullable()
@@ -1433,7 +1558,7 @@ const relatedKeywordItemSchema = z
 export async function relatedKeywords(
   seed: string,
   location: DfsLocation,
-  opts: { limit?: number } = {},
+  opts: { limit?: number; depth?: number } = {},
 ): Promise<KeywordResult[]> {
   const envelope = await dfsRequest(
     "/v3/dataforseo_labs/google/related_keywords/live",
@@ -1442,6 +1567,7 @@ export async function relatedKeywords(
         keyword: seed,
         ...locationAndLanguageParams(location),
         limit: opts.limit ?? 100,
+        ...(opts.depth != null ? { depth: opts.depth } : {}),
       },
     ],
   )
@@ -1457,6 +1583,8 @@ export async function relatedKeywords(
       competition: kd.keyword_info?.competition ?? undefined,
       competition_level: toCompetitionLevel(kd.keyword_info?.competition_level),
       keyword_difficulty: kd.keyword_properties?.keyword_difficulty ?? undefined,
+      core_keyword: kd.keyword_properties?.core_keyword ?? undefined,
+      search_intent: toIntent(kd.search_intent_info?.main_intent),
     })
   }
   return out
