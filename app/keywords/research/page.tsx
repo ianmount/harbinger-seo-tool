@@ -7,8 +7,13 @@ import { ArrowRight, Loader2, Plus, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { MarketPicker } from "@/components/tool/MarketPicker"
 import { findToolByPathname } from "@/lib/tool-config"
-import type { KeywordResearchRun, KeywordResearchStatus } from "@/lib/types"
+import type {
+  DfsLabsLocation,
+  KeywordResearchRun,
+  KeywordResearchStatus,
+} from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 const STATUS_LABEL: Record<KeywordResearchStatus, string> = {
@@ -56,7 +61,8 @@ function ChipInput({
     setDraft("")
   }
   function onKeyDown(e: KeyboardEvent<HTMLInputElement>) {
-    if (e.key === "Enter" || e.key === ",") {
+    // Only Enter commits — NOT comma, so "Atlanta, GA" can be typed whole.
+    if (e.key === "Enter") {
       e.preventDefault()
       commit()
     } else if (e.key === "Backspace" && !draft && values.length > 0) {
@@ -106,8 +112,8 @@ export default function KeywordResearchLauncher() {
 
   const [domain, setDomain] = useState("")
   const [services, setServices] = useState<string[]>([])
-  const [cities, setCities] = useState<string[]>([])
-  const [competitors, setCompetitors] = useState<string[]>([])
+  const [cityLocations, setCityLocations] = useState<DfsLabsLocation[]>([])
+  const [cityPicker, setCityPicker] = useState<DfsLabsLocation | null>(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [depth, setDepth] = useState("100")
   const [planSize, setPlanSize] = useState("400")
@@ -127,12 +133,23 @@ export default function KeywordResearchLauncher() {
       .catch(() => setRuns([]))
   }, [])
 
+  function addCity() {
+    if (!cityPicker) return
+    if (
+      !cityLocations.some((c) => c.location_code === cityPicker.location_code)
+    ) {
+      setCityLocations((prev) => [...prev, cityPicker])
+    }
+    setCityPicker(null)
+  }
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
     if (!domain.trim()) return setError("Enter a domain.")
     if (services.length === 0) return setError("Add at least one service.")
-    if (cities.length === 0) return setError("Add at least one target city.")
+    if (cityLocations.length === 0)
+      return setError("Add at least one target city.")
 
     setSubmitting(true)
     try {
@@ -142,19 +159,17 @@ export default function KeywordResearchLauncher() {
         body: JSON.stringify({
           domain: domain.trim(),
           services,
-          cities,
-          competitors,
+          cities: cityLocations.map((c) => ({
+            location_code: c.location_code,
+            location_name: c.location_name,
+          })),
           depth: Number(depth) || 100,
           targetPlanSize: Number(planSize) || 400,
         }),
       })
       const data = await res.json()
       if (!res.ok) {
-        if (data.error === "unresolved_locations") {
-          setError(data.message)
-        } else {
-          setError(data.error ?? `Request failed (${res.status})`)
-        }
+        setError(data.error ?? `Request failed (${res.status})`)
         return
       }
       router.push(`/keywords/research/${data.run.id}`)
@@ -204,23 +219,55 @@ export default function KeywordResearchLauncher() {
             disabled={submitting}
           />
 
-          <ChipInput
-            label="Target cities"
-            placeholder='"Atlanta, GA" then Enter'
-            helpText='One CSV per city. Use "City, ST". Unresolvable cities are reported so you can fix them.'
-            values={cities}
-            onChange={setCities}
-            disabled={submitting}
-          />
-
-          <ChipInput
-            label="Competitor business names (optional)"
-            placeholder="Your Roof Hero, then Enter"
-            helpText="Their brand terms get denylisted during curation."
-            values={competitors}
-            onChange={setCompetitors}
-            disabled={submitting}
-          />
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="min-w-[260px] flex-1">
+                <MarketPicker
+                  value={cityPicker}
+                  onChange={setCityPicker}
+                  label="Target cities"
+                  inputId="city-picker"
+                  disabled={submitting}
+                  helpText="Search and pick a real DataForSEO city (one CSV per city). Picking from the list keeps the run synced to the exact location code."
+                />
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={addCity}
+                disabled={!cityPicker || submitting}
+              >
+                <Plus className="mr-1 h-3.5 w-3.5" />
+                Add city
+              </Button>
+            </div>
+            {cityLocations.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {cityLocations.map((c) => (
+                  <span
+                    key={c.location_code}
+                    className="inline-flex items-center gap-1 rounded-md bg-secondary px-2 py-0.5 text-[12px]"
+                  >
+                    {c.location_name}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setCityLocations((prev) =>
+                          prev.filter(
+                            (x) => x.location_code !== c.location_code,
+                          ),
+                        )
+                      }
+                      aria-label={`Remove ${c.location_name}`}
+                      className="text-ink-3 hover:text-foreground"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
 
           <div className="border-t border-dashed border-line pt-3">
             <button

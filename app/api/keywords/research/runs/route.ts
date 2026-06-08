@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
-import { resolveCityLocations } from "@/lib/dataforseo"
 import { deriveSessionId } from "@/lib/jobs"
 import {
   createRun,
@@ -11,16 +10,41 @@ import type { KeywordResearchConfig, KeywordResearchLocation } from "@/lib/types
 
 export const maxDuration = 120
 
+// Cities arrive already resolved to a DataForSEO location (the form's city
+// picker hits /api/dataforseo/locations), so we trust the code the user
+// picked rather than re-resolving a freeform string. That keeps the run
+// synced to real DFSEO city codes.
+const CitySchema = z.object({
+  location_code: z.number().int().positive(),
+  location_name: z.string().trim().min(1).max(160),
+})
+
 const CreateSchema = z.object({
   domain: z.string().trim().min(3).max(200),
   services: z.array(z.string().trim().min(1).max(160)).min(1).max(25),
-  cities: z.array(z.string().trim().min(1).max(120)).min(1).max(10),
+  cities: z.array(CitySchema).min(1).max(10),
   depth: z.number().int().min(20).max(300).optional(),
   targetPlanSize: z.number().int().min(20).max(1000).optional(),
-  competitors: z.array(z.string().trim().min(1).max(120)).max(20).optional(),
   extraAllow: z.array(z.string().trim().min(1).max(60)).max(50).optional(),
   disableCategories: z.array(z.string().trim().min(1).max(60)).max(20).optional(),
 })
+
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/,?\s*united states$/i, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+}
+
+/** "Atlanta,Georgia,United States" → "Atlanta, Georgia" for display. */
+function cleanLabel(name: string): string {
+  return name
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s && s.toLowerCase() !== "united states")
+    .join(", ")
+}
 
 /** Derive the geo allowlist (cities + states) from resolved DFS locations. */
 function deriveMarket(
@@ -60,36 +84,25 @@ export async function POST(request: Request): Promise<Response> {
 
   const sessionId = await deriveSessionId()
 
-  // Resolve cities → DFS Google Ads locations. Stop and ask on any
-  // unresolved input (guardrail: never silently fall back to national).
-  let resolved: { resolved: KeywordResearchLocation[]; unresolved: string[] }
-  try {
-    resolved = await resolveCityLocations(input.cities)
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return NextResponse.json(
-      { error: `Location lookup failed: ${msg}` },
-      { status: 502 },
-    )
-  }
-  if (resolved.unresolved.length > 0) {
-    return NextResponse.json(
-      {
-        error: "unresolved_locations",
-        unresolved: resolved.unresolved,
-        message: `Could not resolve to a DataForSEO city: ${resolved.unresolved.join(
-          ", ",
-        )}. Try "City, ST" (e.g. "Atlanta, GA").`,
-      },
-      { status: 400 },
-    )
+  // Build locations directly from the picked DFSEO codes (deduped by code).
+  const seenCodes = new Set<number>()
+  const locations: KeywordResearchLocation[] = []
+  for (const c of input.cities) {
+    if (seenCodes.has(c.location_code)) continue
+    seenCodes.add(c.location_code)
+    locations.push({
+      slug: slugify(c.location_name),
+      label: cleanLabel(c.location_name),
+      dfs: c.location_name,
+      locationCode: c.location_code,
+    })
   }
 
   const config: KeywordResearchConfig = {
     depth: input.depth ?? 100,
     targetPlanSize: input.targetPlanSize ?? 400,
-    market: deriveMarket(resolved.resolved, input.extraAllow ?? []),
-    competitors: input.competitors ?? [],
+    market: deriveMarket(locations, input.extraAllow ?? []),
+    competitors: [],
     disableCategories: input.disableCategories ?? [],
   }
 
@@ -110,7 +123,7 @@ export async function POST(request: Request): Promise<Response> {
     domain: input.domain.trim(),
     services: input.services,
     config,
-    locations: resolved.resolved,
+    locations,
     seedProposal,
   })
 
@@ -122,3 +135,4 @@ export async function GET(): Promise<Response> {
   const runs = await listRunsForSession(sessionId)
   return NextResponse.json({ runs }, { headers: { "Cache-Control": "no-store" } })
 }
+
