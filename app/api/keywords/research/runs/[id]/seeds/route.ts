@@ -13,7 +13,7 @@ import { generateCandidates } from "@/lib/keyword-research/generate"
 export const maxDuration = 300
 
 const ApproveSeedsSchema = z.object({
-  seeds: z.array(z.string().trim().min(1).max(120)).min(1).max(40),
+  seeds: z.array(z.string().trim().min(1).max(200)).min(1).max(200),
 })
 
 /**

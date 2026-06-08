@@ -150,6 +150,14 @@ export async function listRunsForSession(
   return ((data as RunRow[] | null) ?? []).map(rowToRun)
 }
 
+/** Overwrite the seed proposal (used by the seed-regeneration flow). */
+export async function setSeedProposal(
+  id: string,
+  proposal: SeedProposalGroup[],
+): Promise<void> {
+  await updateRunRaw(id, { seeds: { proposal } })
+}
+
 /** Persist the approved seeds + status transition into generating. */
 export async function setApprovedSeeds(
   id: string,

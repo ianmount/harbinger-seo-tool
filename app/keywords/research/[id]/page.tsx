@@ -10,10 +10,12 @@ import {
   Download,
   Loader2,
   Plus,
+  RefreshCw,
   X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import type {
   JobProgress,
 } from "@/lib/jobs"
@@ -135,6 +137,8 @@ export default function KeywordResearchWorkspace() {
         <SeedsReview
           run={run}
           busy={busy}
+          onRunUpdate={setRun}
+          onError={setActionError}
           onSubmit={async (seeds) => {
             setBusy(true)
             setActionError(null)
@@ -254,21 +258,64 @@ function SeedsReview({
   run,
   busy,
   onSubmit,
+  onRunUpdate,
+  onError,
 }: {
   run: KeywordResearchRun
   busy: boolean
   onSubmit: (seeds: string[]) => void
+  onRunUpdate: (run: KeywordResearchRun) => void
+  onError: (msg: string | null) => void
 }) {
   const proposal = useMemo(() => run.seedProposal ?? [], [run.seedProposal])
   const allSeeds = useMemo(
     () => proposal.flatMap((g) => g.seeds.map((s) => s.seed)),
     [proposal],
   )
+  const seedsKey = useMemo(
+    () => allSeeds.join("|").toLowerCase(),
+    [allSeeds],
+  )
   const [checked, setChecked] = useState<Set<string>>(
     () => new Set(allSeeds.map((s) => s.toLowerCase())),
   )
   const [custom, setCustom] = useState<string[]>([])
   const [draft, setDraft] = useState("")
+  const [instructions, setInstructions] = useState("")
+  const [regenerating, setRegenerating] = useState(false)
+
+  // When the proposal changes (e.g. after a regeneration), re-check all of
+  // the new seeds so the user starts from "all selected" again.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setChecked(new Set(seedsKey ? seedsKey.split("|") : []))
+  }, [seedsKey])
+
+  async function regenerate() {
+    if (!instructions.trim()) return
+    setRegenerating(true)
+    onError(null)
+    try {
+      const res = await fetch(
+        `/api/keywords/research/runs/${run.id}/regenerate-seeds`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ instructions: instructions.trim() }),
+        },
+      )
+      const data = await res.json()
+      if (!res.ok) {
+        onError(data.error ?? `Error ${res.status}`)
+        return
+      }
+      onRunUpdate(data.run as KeywordResearchRun)
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Regeneration failed.")
+    } finally {
+      setRegenerating(false)
+    }
+  }
 
   function toggle(seed: string) {
     setChecked((prev) => {
@@ -381,8 +428,46 @@ function SeedsReview({
         </div>
       </div>
 
+      <div className="rounded-lg border border-line bg-card px-5 py-4">
+        <p className="font-sans text-[10.5px] font-bold uppercase tracking-[0.18em] text-ink-3">
+          Ask Claude to revise the seeds
+        </p>
+        <p className="mt-1 text-[12.5px] text-ink-2">
+          Not quite right? Tell Claude what to change and regenerate the whole
+          list — e.g. &ldquo;focus on emergency/repair intent&rdquo;, &ldquo;add
+          commercial/B2B terms&rdquo;, &ldquo;drop anything about installation&rdquo;.
+        </p>
+        <Textarea
+          value={instructions}
+          onChange={(e) => setInstructions(e.target.value)}
+          placeholder="Revision instructions for Claude…"
+          rows={3}
+          className="mt-2"
+          disabled={regenerating || busy}
+        />
+        <div className="mt-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={regenerating || busy || !instructions.trim()}
+            onClick={regenerate}
+          >
+            {regenerating ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-2 h-4 w-4" />
+            )}
+            Regenerate seeds
+          </Button>
+        </div>
+      </div>
+
       <div className="flex items-center gap-3">
-        <Button disabled={busy || finalSeeds.length === 0} onClick={() => onSubmit(finalSeeds)}>
+        <Button
+          disabled={busy || regenerating || finalSeeds.length === 0}
+          onClick={() => onSubmit(finalSeeds)}
+        >
           {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
           Generate candidates ({finalSeeds.length} seed{finalSeeds.length === 1 ? "" : "s"})
         </Button>

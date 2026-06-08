@@ -23,6 +23,7 @@ const CreateSchema = z.object({
   domain: z.string().trim().min(3).max(200),
   services: z.array(z.string().trim().min(1).max(160)).min(1).max(25),
   cities: z.array(CitySchema).min(1).max(10),
+  excludeServices: z.array(z.string().trim().min(1).max(160)).max(25).optional(),
   depth: z.number().int().min(20).max(300).optional(),
   targetPlanSize: z.number().int().min(20).max(1000).optional(),
   extraAllow: z.array(z.string().trim().min(1).max(60)).max(50).optional(),
@@ -103,13 +104,16 @@ export async function POST(request: Request): Promise<Response> {
     targetPlanSize: input.targetPlanSize ?? 400,
     market: deriveMarket(locations, input.extraAllow ?? []),
     competitors: [],
+    excludeServices: input.excludeServices ?? [],
     disableCategories: input.disableCategories ?? [],
   }
 
   // Propose seeds (Claude) + national volume probe.
   let seedProposal
   try {
-    seedProposal = await proposeSeeds(input.domain, input.services)
+    seedProposal = await proposeSeeds(input.domain, input.services, {
+      excludeServices: config.excludeServices,
+    })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     return NextResponse.json(

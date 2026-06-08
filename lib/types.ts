@@ -1933,6 +1933,8 @@ export interface KeywordResearchConfig {
   }
   /** Competitor business names whose brand terms get denylisted. */
   competitors: string[]
+  /** Services/topics to exclude — Claude avoids proposing seeds for these. */
+  excludeServices?: string[]
   /** Negative-keyword categories to disable (e.g. "manufacturer_brands"). */
   disableCategories: string[]
 }

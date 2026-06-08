@@ -44,7 +44,18 @@ function extractJsonObject(text: string): string {
   return stripped.slice(first, last + 1)
 }
 
-function buildPrompt(domain: string, services: string[]): { system: string; prompt: string } {
+export interface ProposeSeedsOptions {
+  /** Services/topics Claude must NOT propose seeds for. */
+  excludeServices?: string[]
+  /** Free-text revision instructions from the user (regeneration). */
+  instructions?: string
+}
+
+function buildPrompt(
+  domain: string,
+  services: string[],
+  opts: ProposeSeedsOptions,
+): { system: string; prompt: string } {
   const system =
     "You are an SEO strategist building keyword seeds for a local service business. Seeds are short head phrases that customers actually search and that DataForSEO's keyword_suggestions can anchor to. Return only the JSON the schema asks for — no markdown, no commentary."
   const lines: string[] = []
@@ -58,9 +69,23 @@ function buildPrompt(domain: string, services: string[]): { system: string; prom
   lines.push(`- Use plain head terms and the synonyms/phrasings real searchers use.`)
   lines.push(`- Keep seeds at phrase level — not a single broad noun like "pool" (too noisy), not a full long-tail query (too narrow for expansion).`)
   lines.push(`- Dedupe seeds that collapse across services.`)
+  const exclusions = (opts.excludeServices ?? [])
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (exclusions.length > 0) {
+    lines.push(
+      `- DO NOT propose seeds for these excluded services/topics (skip them entirely, and avoid seeds that would surface them): ${exclusions.join("; ")}.`,
+    )
+  }
   lines.push("")
   lines.push(`## Services`)
   for (const s of services) lines.push(`- ${s}`)
+  const instructions = (opts.instructions ?? "").trim()
+  if (instructions) {
+    lines.push("")
+    lines.push(`## Additional instructions from the user (apply these)`)
+    lines.push(instructions)
+  }
   lines.push("")
   lines.push(`## Output`)
   lines.push(
@@ -77,8 +102,9 @@ function buildPrompt(domain: string, services: string[]): { system: string; prom
 export async function proposeSeeds(
   domain: string,
   services: string[],
+  opts: ProposeSeedsOptions = {},
 ): Promise<SeedProposalGroup[]> {
-  const { system, prompt } = buildPrompt(domain, services)
+  const { system, prompt } = buildPrompt(domain, services, opts)
   let text: string
   try {
     text = await callClaude(prompt, { model: SEED_MODEL, maxTokens: 2048, system })

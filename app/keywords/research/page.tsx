@@ -112,6 +112,7 @@ export default function KeywordResearchLauncher() {
 
   const [domain, setDomain] = useState("")
   const [services, setServices] = useState<string[]>([])
+  const [excludeServices, setExcludeServices] = useState<string[]>([])
   const [cityLocations, setCityLocations] = useState<DfsLabsLocation[]>([])
   const [cityPicker, setCityPicker] = useState<DfsLabsLocation | null>(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -159,6 +160,7 @@ export default function KeywordResearchLauncher() {
         body: JSON.stringify({
           domain: domain.trim(),
           services,
+          excludeServices,
           cities: cityLocations.map((c) => ({
             location_code: c.location_code,
             location_name: c.location_name,
@@ -216,6 +218,15 @@ export default function KeywordResearchLauncher() {
             helpText="However the business phrases them — Claude turns these into search-aligned seeds you approve."
             values={services}
             onChange={setServices}
+            disabled={submitting}
+          />
+
+          <ChipInput
+            label="Services to exclude (optional)"
+            placeholder="Type a service/topic to exclude and press Enter"
+            helpText="Claude will skip these — anything the business offers but you don't want to target with SEO."
+            values={excludeServices}
+            onChange={setExcludeServices}
             disabled={submitting}
           />
 
