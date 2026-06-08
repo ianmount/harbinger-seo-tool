@@ -44,8 +44,12 @@ const envelopeSchema = z
     status_code: z.number(),
     status_message: z.string(),
     cost: z.number().optional(),
-    tasks: z
-      .array(
+    // DataForSEO returns `tasks: null` (not []) on some responses — notably
+    // tasks_ready when nothing is ready yet. Coerce null/undefined → [] before
+    // validating so callers always get an array.
+    tasks: z.preprocess(
+      (v) => v ?? [],
+      z.array(
         z
           .object({
             status_code: z.number(),
@@ -55,9 +59,8 @@ const envelopeSchema = z
             result: z.array(z.unknown()).nullable().optional(),
           })
           .passthrough(),
-      )
-      .optional()
-      .default([]),
+      ),
+    ),
   })
   .passthrough()
 
@@ -89,7 +92,7 @@ function locationAndLanguageParams(
 export async function dfsRequest<T = DfsEnvelope>(
   endpoint: string,
   body: unknown,
-  opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+  opts: { signal?: AbortSignal; timeoutMs?: number; method?: "GET" | "POST" } = {},
 ): Promise<T> {
   const url = `${DFS_BASE}${endpoint}`
   // Per-attempt timeout. Native fetch has no body-read timeout — without
@@ -98,19 +101,30 @@ export async function dfsRequest<T = DfsEnvelope>(
   // function budget for a single bad probe. 60s comfortably exceeds DFS's
   // typical 5-30s SERP latency while bounding worst-case stall.
   const timeoutMs = opts.timeoutMs ?? 60_000
+  const method = opts.method ?? "POST"
   const buildSignal = (): AbortSignal => {
     const t = AbortSignal.timeout(timeoutMs)
     return opts.signal ? AbortSignal.any([t, opts.signal]) : t
   }
-  const buildInit = (): RequestInit => ({
-    method: "POST",
-    headers: {
-      Authorization: authHeader(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-    signal: buildSignal(),
-  })
+  // DataForSEO's standard-queue read endpoints (tasks_ready, task_get) are
+  // GET-only; posting to them returns a 404-class error. task_post and the
+  // live endpoints are POST. Branch so GET requests carry no body.
+  const buildInit = (): RequestInit =>
+    method === "GET"
+      ? {
+          method: "GET",
+          headers: { Authorization: authHeader() },
+          signal: buildSignal(),
+        }
+      : {
+          method: "POST",
+          headers: {
+            Authorization: authHeader(),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+          signal: buildSignal(),
+        }
 
   // Retry up to 3 times on 429 with exponential backoff + jitter so a
   // burst of parallel calls doesn't all bunch up at the same retry instant.
@@ -1768,7 +1782,8 @@ const tasksReadyItemSchema = z
 export async function serpTasksReady(): Promise<string[]> {
   const envelope = await dfsRequest(
     "/v3/serp/google/organic/tasks_ready",
-    [],
+    null,
+    { method: "GET" },
   )
   const ids: string[] = []
   for (const taskRaw of envelope.tasks) {
@@ -1818,7 +1833,8 @@ export interface SerpTaskResult {
 export async function serpTaskGet(taskId: string): Promise<SerpTaskResult> {
   const envelope = await dfsRequest<DfsEnvelope>(
     `/v3/serp/google/organic/task_get/advanced/${encodeURIComponent(taskId)}`,
-    {},
+    null,
+    { method: "GET" },
   )
   const firstTask = envelope.tasks[0]
   const result = (firstTask?.result ?? [])[0] as
