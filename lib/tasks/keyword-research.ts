@@ -22,10 +22,13 @@ import {
   markRankTaskDone,
   markRankTaskFailed,
   type NewRankTask,
+  type RankTaskRow,
   setStatus,
 } from "@/lib/keyword-research-runs"
 import type {
   DfsLocation,
+  KeywordCandidate,
+  KeywordResearchLocation,
   KeywordResearchLocationResult,
   KeywordResearchResult,
   KeywordResearchResultRow,
@@ -67,12 +70,83 @@ const MAX_POLLS = 60 // × POLL_SLEEP ≈ 30 min of queue wait, across invocatio
 const POLL_SLEEP = "30s"
 const MAX_ERROR_SAMPLES = 5
 
-function stripDomain(domain: string): string {
-  return domain
-    .trim()
-    .replace(/^https?:\/\//i, "")
-    .replace(/\/+$/, "")
-    .toLowerCase()
+/**
+ * Canonical host key for domain matching. Strips scheme, any path, and a
+ * leading `www.`, lowercased — matching the normalization every other domain
+ * helper in this repo uses (dataforseo-ai.ts, branded-keywords.ts, etc.).
+ * The previous matcher compared raw strings without stripping `www.`, so a
+ * bare input domain never matched DataForSEO's www-prefixed organic host.
+ */
+export function hostKey(input: string): string {
+  let s = input.trim().toLowerCase()
+  if (/^[a-z]+:\/\//.test(s)) {
+    try {
+      s = new URL(s).hostname
+    } catch {
+      /* fall through to string stripping */
+    }
+  }
+  return s
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "")
+    .replace(/^www\./, "")
+}
+
+/** Host key for a SERP organic result — prefer the URL's hostname, fall back
+ * to the bare `domain` field. */
+export function organicHost(o: { domain: string; url: string }): string {
+  if (o.url) {
+    try {
+      return hostKey(new URL(o.url).hostname)
+    } catch {
+      /* fall through */
+    }
+  }
+  return hostKey(o.domain)
+}
+
+/**
+ * Build the per-location result blocks from the run's rank tasks. Shared by
+ * the localize task's assemble step and the rescan route so both produce
+ * identical output. `approvedCount` is the size of the approved keyword set
+ * (drives the droppedNoVolume count).
+ */
+export function buildLocationResults(
+  locations: KeywordResearchLocation[],
+  prospect: KeywordCandidate[] | null,
+  allTasks: RankTaskRow[],
+  approvedCount: number,
+): KeywordResearchLocationResult[] {
+  const prospectByKw = new Map<string, { seed: string; source: KeywordSource }>()
+  for (const c of prospect ?? []) {
+    prospectByKw.set(c.keyword.toLowerCase(), { seed: c.seed, source: c.source })
+  }
+  const byLocation = new Map<string, RankTaskRow[]>()
+  for (const t of allTasks) {
+    const arr = byLocation.get(t.location_slug) ?? []
+    if (!byLocation.has(t.location_slug)) byLocation.set(t.location_slug, arr)
+    arr.push(t)
+  }
+  return locations.map((loc) => {
+    const tasks = byLocation.get(loc.slug) ?? []
+    const rows: KeywordResearchResultRow[] = tasks.map((t) => {
+      const meta = prospectByKw.get(t.keyword.toLowerCase())
+      return {
+        seed: meta?.seed ?? "",
+        keyword: t.keyword,
+        source: meta?.source ?? "suggestions",
+        cityVolume: t.city_volume,
+        currentRank: t.status === "done" ? t.rank : null,
+      }
+    })
+    return {
+      slug: loc.slug,
+      label: loc.label,
+      rows,
+      droppedNoVolume: Math.max(0, approvedCount - tasks.length),
+      rankUnresolved: tasks.filter((t) => t.status !== "done").length,
+    }
+  })
 }
 
 async function mapWithConcurrency<T, R>(
@@ -204,7 +278,7 @@ export const runKeywordResearchTask: TaskRunner = async ({
           }))
           await insertRankTasks(runId, tasks)
         }
-        return { warnings: stepWarnings, target: stripDomain(run.domain) }
+        return { warnings: stepWarnings, target: hostKey(run.domain) }
       }),
     )
     costUsd += submit.costUsd
@@ -233,9 +307,7 @@ export const runKeywordResearchTask: TaskRunner = async ({
             try {
               const res = await serpTaskGetForPoll(t.dfs_task_id as string)
               if (res.state === "done") {
-                const hit = res.organic.find(
-                  (o) => stripDomain(o.domain) === target,
-                )
+                const hit = res.organic.find((o) => organicHost(o) === target)
                 await markRankTaskDone(t.id, hit ? hit.position : null)
               } else if (res.state === "error") {
                 await markRankTaskFailed(t.id)
@@ -276,44 +348,12 @@ export const runKeywordResearchTask: TaskRunner = async ({
     const assemble = await step.run("assemble-v3", async () => {
       const run = await getRun(runId)
       if (!run) throw new Error(`Keyword research run ${runId} not found`)
-      const prospectByKw = new Map<string, { seed: string; source: KeywordSource }>()
-      for (const c of run.prospect ?? []) {
-        prospectByKw.set(c.keyword.toLowerCase(), {
-          seed: c.seed,
-          source: c.source,
-        })
-      }
       const allTasks = await getAllRankTasks(runId)
-      const byLocation = new Map<string, typeof allTasks>()
-      for (const t of allTasks) {
-        const arr = byLocation.get(t.location_slug) ?? []
-        if (!byLocation.has(t.location_slug)) byLocation.set(t.location_slug, arr)
-        arr.push(t)
-      }
-
-      const locations: KeywordResearchLocationResult[] = run.locations.map(
-        (loc) => {
-          const tasks = byLocation.get(loc.slug) ?? []
-          const rows: KeywordResearchResultRow[] = tasks.map((t) => {
-            const meta = prospectByKw.get(t.keyword.toLowerCase())
-            return {
-              seed: meta?.seed ?? "",
-              keyword: t.keyword,
-              source: meta?.source ?? "suggestions",
-              cityVolume: t.city_volume,
-              currentRank: t.status === "done" ? t.rank : null,
-            }
-          })
-          const droppedNoVolume = Math.max(0, keywords.length - tasks.length)
-          const rankUnresolved = tasks.filter((t) => t.status !== "done").length
-          return {
-            slug: loc.slug,
-            label: loc.label,
-            rows,
-            droppedNoVolume,
-            rankUnresolved,
-          }
-        },
+      const locations = buildLocationResults(
+        run.locations,
+        run.prospect,
+        allTasks,
+        keywords.length,
       )
 
       const durationSeconds = Math.max(
