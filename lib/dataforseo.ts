@@ -1711,6 +1711,8 @@ export interface SerpTaskRequest {
   /** Human-readable label echoed back on the handle for UI use. Not sent to DFS. */
   locationLabel?: string
   depth?: number
+  /** DataForSEO queue priority: 1 = normal, 2 = high (faster, ~2× cost). */
+  priority?: 1 | 2
 }
 
 /**
@@ -1741,6 +1743,7 @@ export async function serpTaskPost(
       location_code: t.locationCode,
       language_code: DEFAULT_LANGUAGE_CODE,
       depth: t.depth ?? 20,
+      priority: t.priority ?? 2,
     }))
     const envelope = await dfsRequest("/v3/serp/google/organic/task_post", body)
     for (let j = 0; j < envelope.tasks.length; j++) {

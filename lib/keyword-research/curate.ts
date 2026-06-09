@@ -28,7 +28,7 @@ import type {
   KeywordSource,
 } from "@/lib/types"
 import { expandStateToken, getGazetteer } from "./gazetteer"
-import { activeNegativeTokens } from "./negatives"
+import { activeNegativeTokens, isNegativeExcepted } from "./negatives"
 
 export interface RawCandidate {
   seed: string
@@ -214,7 +214,11 @@ export function curateCandidates(
         drops.push({ keyword: c.keyword, seed, reason: `out-of-market: ${place}` })
         continue
       }
-      const neg = negatives.find((n) => containsToken(c.keyword, n.token))
+      const neg = negatives.find(
+        (n) =>
+          containsToken(c.keyword, n.token) &&
+          !isNegativeExcepted(c.keyword, n.token),
+      )
       if (neg) {
         drops.push({
           keyword: c.keyword,

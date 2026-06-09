@@ -71,7 +71,7 @@ const TASKS: Partial<Record<JobKind, TaskRunner>> = {
  * invocation, body re-executes from scratch on Inngest re-invocation if it
  * fails before completing).
  */
-const CHUNKED_TASKS = new Set<JobKind>(["comp_analysis"])
+const CHUNKED_TASKS = new Set<JobKind>(["comp_analysis", "keyword_research"])
 
 /**
  * The single Inngest function. One event (`jobs/run`) feeds it; it pulls the

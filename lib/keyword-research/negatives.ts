@@ -55,6 +55,46 @@ export const DEFAULT_ACTIVE_CATEGORIES: readonly string[] = [
   "meta_terms",
 ]
 
+// Service-intent anchors that make a "free …" term a legitimate lead query
+// rather than a freebie-seeker. "free estimate", "free quote", "free roofing
+// inspection" etc. should survive the freebie filter.
+const FREE_INTENT_ANCHORS: readonly string[] = [
+  "estimate",
+  "estimates",
+  "quote",
+  "quotes",
+  "consultation",
+  "consultations",
+  "inspection",
+  "inspections",
+  "evaluation",
+  "evaluations",
+  "assessment",
+  "assessments",
+  "appointment",
+  "appointments",
+  "diagnostic",
+  "diagnostics",
+]
+
+function hasWord(haystack: string, word: string): boolean {
+  return new RegExp(
+    `(^|[^a-z0-9])${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`,
+  ).test(haystack.toLowerCase())
+}
+
+/**
+ * Whether a matched negative token should be exempted for this keyword.
+ * Currently only the freebie "free" token: a "free estimate"/"free quote"/etc.
+ * is high-intent demand, not a freebie-seeker, so it must not be dropped.
+ */
+export function isNegativeExcepted(keyword: string, token: string): boolean {
+  if (token === "free") {
+    return FREE_INTENT_ANCHORS.some((a) => hasWord(keyword, a))
+  }
+  return false
+}
+
 /**
  * Resolve the active negative tokens for a run. Starts from the default
  * categories, removes any the run disabled. (Categories not in the default
