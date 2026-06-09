@@ -142,7 +142,17 @@ export async function proposeSeeds(
     return { service: g.service, seeds }
   })
 
-  // National-volume probe: one search_volume call over every unique seed.
+  return attachNationalVolume(groups)
+}
+
+/**
+ * Attach a national search-volume probe to each seed (one search_volume call
+ * over every unique seed). Best-effort: a failed probe leaves nationalVolume
+ * null. Shared by the Claude path and the services-as-seeds bypass.
+ */
+async function attachNationalVolume(
+  groups: { service: string; seeds: string[] }[],
+): Promise<SeedProposalGroup[]> {
   const uniqueSeeds = Array.from(
     new Set(groups.flatMap((g) => g.seeds.map((s) => s.toLowerCase()))),
   )
@@ -167,4 +177,32 @@ export async function proposeSeeds(
       nationalVolume: volByKw.get(seed.toLowerCase()) ?? null,
     })),
   }))
+}
+
+/**
+ * Bypass the Claude seed step: use the business's services verbatim as seeds
+ * (one seed per service). Excluded services are dropped, dupes collapsed. Still
+ * runs the national-volume probe so the review step shows the same evidence,
+ * and every downstream filter (generation, geo, negatives, curation) is
+ * untouched — only the seed source changes.
+ */
+export async function seedsFromServices(
+  services: string[],
+  opts: { excludeServices?: string[] } = {},
+): Promise<SeedProposalGroup[]> {
+  const excluded = new Set(
+    (opts.excludeServices ?? [])
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  )
+  const seen = new Set<string>()
+  const groups: { service: string; seeds: string[] }[] = []
+  for (const raw of services) {
+    const s = raw.trim()
+    const k = s.toLowerCase()
+    if (!s || seen.has(k) || excluded.has(k)) continue
+    seen.add(k)
+    groups.push({ service: s, seeds: [s] })
+  }
+  return attachNationalVolume(groups)
 }

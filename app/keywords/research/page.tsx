@@ -113,6 +113,7 @@ export default function KeywordResearchLauncher() {
   const [domain, setDomain] = useState("")
   const [services, setServices] = useState<string[]>([])
   const [excludeServices, setExcludeServices] = useState<string[]>([])
+  const [useClaudeSeeds, setUseClaudeSeeds] = useState(true)
   const [cityLocations, setCityLocations] = useState<DfsLabsLocation[]>([])
   const [cityPicker, setCityPicker] = useState<DfsLabsLocation | null>(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -161,6 +162,7 @@ export default function KeywordResearchLauncher() {
           domain: domain.trim(),
           services,
           excludeServices,
+          useClaudeSeeds,
           cities: cityLocations.map((c) => ({
             location_code: c.location_code,
             location_name: c.location_name,
@@ -215,7 +217,11 @@ export default function KeywordResearchLauncher() {
           <ChipInput
             label="Services"
             placeholder="Type a service and press Enter (e.g. pool cleaning)"
-            helpText="However the business phrases them — Claude turns these into search-aligned seeds you approve."
+            helpText={
+              useClaudeSeeds
+                ? "However the business phrases them — Claude turns these into search-aligned seeds you approve."
+                : "These are used verbatim as seeds (no Claude expansion). Enter them as the head terms you want researched."
+            }
             values={services}
             onChange={setServices}
             disabled={submitting}
@@ -224,11 +230,32 @@ export default function KeywordResearchLauncher() {
           <ChipInput
             label="Services to exclude (optional)"
             placeholder="Type a service/topic to exclude and press Enter"
-            helpText="Claude will skip these — anything the business offers but you don't want to target with SEO."
+            helpText="Skipped as seeds — anything the business offers but you don't want to target with SEO."
             values={excludeServices}
             onChange={setExcludeServices}
             disabled={submitting}
           />
+
+          <label className="flex cursor-pointer items-start gap-2.5 rounded-md border border-line bg-muted/30 px-3 py-2.5">
+            <input
+              type="checkbox"
+              checked={useClaudeSeeds}
+              onChange={(e) => setUseClaudeSeeds(e.target.checked)}
+              disabled={submitting}
+              className="mt-0.5 h-3.5 w-3.5"
+            />
+            <span className="space-y-0.5">
+              <span className="block text-[13px] font-medium text-foreground">
+                Use Claude to expand services into seeds
+              </span>
+              <span className="block font-mono text-[10.5px] leading-relaxed text-ink-3">
+                On: Claude drafts search-aligned seed phrases per service (strips
+                branding, adds synonyms). Off: your services are used directly as
+                seeds. Either way you review seeds next, and all downstream
+                filtering is identical.
+              </span>
+            </span>
+          </label>
 
           <div className="space-y-2">
             <div className="flex flex-wrap items-end gap-2">

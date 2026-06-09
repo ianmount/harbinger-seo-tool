@@ -5,7 +5,7 @@ import {
   createRun,
   listRunsForSession,
 } from "@/lib/keyword-research-runs"
-import { proposeSeeds } from "@/lib/keyword-research/seeds"
+import { proposeSeeds, seedsFromServices } from "@/lib/keyword-research/seeds"
 import type { KeywordResearchConfig, KeywordResearchLocation } from "@/lib/types"
 
 export const maxDuration = 120
@@ -24,6 +24,9 @@ const CreateSchema = z.object({
   services: z.array(z.string().trim().min(1).max(160)).min(1).max(25),
   cities: z.array(CitySchema).min(1).max(10),
   excludeServices: z.array(z.string().trim().min(1).max(160)).max(25).optional(),
+  // When false, skip the Claude seed expansion and use the provided services
+  // verbatim as seeds. Defaults to true (Claude expansion) for back-compat.
+  useClaudeSeeds: z.boolean().optional(),
   depth: z.number().int().min(20).max(300).optional(),
   targetPlanSize: z.number().int().min(20).max(1000).optional(),
   extraAllow: z.array(z.string().trim().min(1).max(60)).max(50).optional(),
@@ -108,12 +111,19 @@ export async function POST(request: Request): Promise<Response> {
     disableCategories: input.disableCategories ?? [],
   }
 
-  // Propose seeds (Claude) + national volume probe.
+  // Seeds: either Claude expansion (default) or the provided services verbatim.
+  // Both attach the national-volume probe and feed the identical review →
+  // generation → curation pipeline downstream.
   let seedProposal
   try {
-    seedProposal = await proposeSeeds(input.domain, input.services, {
-      excludeServices: config.excludeServices,
-    })
+    seedProposal =
+      input.useClaudeSeeds === false
+        ? await seedsFromServices(input.services, {
+            excludeServices: config.excludeServices,
+          })
+        : await proposeSeeds(input.domain, input.services, {
+            excludeServices: config.excludeServices,
+          })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     return NextResponse.json(
