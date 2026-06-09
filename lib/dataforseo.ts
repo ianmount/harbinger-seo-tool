@@ -92,7 +92,17 @@ function locationAndLanguageParams(
 export async function dfsRequest<T = DfsEnvelope>(
   endpoint: string,
   body: unknown,
-  opts: { signal?: AbortSignal; timeoutMs?: number; method?: "GET" | "POST" } = {},
+  opts: {
+    signal?: AbortSignal
+    timeoutMs?: number
+    method?: "GET" | "POST"
+    /**
+     * Skip the per-task status_code throw. Needed for polling task_get, where
+     * a not-yet-finished task legitimately returns a task-level status like
+     * 40602 "Task In Queue" — the caller wants to inspect that, not throw.
+     */
+    tolerateTaskErrors?: boolean
+  } = {},
 ): Promise<T> {
   const url = `${DFS_BASE}${endpoint}`
   // Per-attempt timeout. Native fetch has no body-read timeout — without
@@ -176,12 +186,14 @@ export async function dfsRequest<T = DfsEnvelope>(
   //           submission completed; result will be available via
   //           tasks_ready + task_get later).
   // Everything else is a genuine per-task error.
-  for (const task of envelope.tasks) {
-    if (task.status_code !== 20000 && task.status_code !== 20100) {
-      throw new DataForSEOError(
-        `DataForSEO task failed with status ${task.status_code}: ${task.status_message}`,
-        { dfsStatus: task.status_code },
-      )
+  if (!opts.tolerateTaskErrors) {
+    for (const task of envelope.tasks) {
+      if (task.status_code !== 20000 && task.status_code !== 20100) {
+        throw new DataForSEOError(
+          `DataForSEO task failed with status ${task.status_code}: ${task.status_message}`,
+          { dfsStatus: task.status_code },
+        )
+      }
     }
   }
 
@@ -1872,5 +1884,82 @@ export async function serpTaskGet(taskId: string): Promise<SerpTaskResult> {
     locationName: result?.location_name ?? "",
     itemTypes: Array.from(itemTypes),
     organic: organic.sort((a, b) => a.position - b.position),
+  }
+}
+
+export interface SerpTaskPollResult {
+  /** done = result available; pending = still in DFS queue; error = failed. */
+  state: "done" | "pending" | "error"
+  statusCode: number
+  statusMessage: string
+  organic: SerpOrganicResult[]
+}
+
+/**
+ * /v3/serp/google/organic/task_get/regular/{id}
+ *
+ * Polls a single Standard-queue task directly (instead of tasks_ready, which
+ * proved unreliable). Tolerates per-task error/in-queue statuses so the caller
+ * can distinguish:
+ *   - done    → task finished; organic results returned (empty = not ranking)
+ *   - pending → still queued/processing (status 4060x or a "queue"/"progress"
+ *               message) — poll again later
+ *   - error   → the task failed server-side; statusMessage explains why
+ *
+ * task_get is free under DataForSEO's billing (you're charged at task_post),
+ * so polling per-task costs nothing beyond the original submission.
+ */
+export async function serpTaskGetForPoll(
+  taskId: string,
+): Promise<SerpTaskPollResult> {
+  const envelope = await dfsRequest<DfsEnvelope>(
+    `/v3/serp/google/organic/task_get/regular/${encodeURIComponent(taskId)}`,
+    null,
+    { method: "GET", tolerateTaskErrors: true },
+  )
+  const task = envelope.tasks[0]
+  const statusCode = task?.status_code ?? 0
+  const statusMessage = task?.status_message ?? ""
+
+  if (statusCode === 20000) {
+    const result = (task?.result ?? [])[0] as { items?: unknown[] } | undefined
+    const items = result?.items ?? []
+    const organic: SerpOrganicResult[] = []
+    for (const raw of items) {
+      const parsed = serpTaskItemSchema.safeParse(raw)
+      if (!parsed.success) continue
+      const it = parsed.data
+      if (it.type !== "organic") continue
+      const position = it.rank_absolute ?? it.rank_group ?? 0
+      if (!position) continue
+      organic.push({
+        position,
+        domain: it.domain ?? "",
+        url: it.url ?? "",
+        title: it.title ?? "",
+      })
+    }
+    return {
+      state: "done",
+      statusCode,
+      statusMessage,
+      organic: organic.sort((a, b) => a.position - b.position),
+    }
+  }
+
+  // In-queue / still-processing codes (40601 "Task Handed", 40602 "Task In
+  // Queue") or any status whose message signals it's not finished yet.
+  const msg = statusMessage.toLowerCase()
+  const stillWorking =
+    statusCode === 40601 ||
+    statusCode === 40602 ||
+    msg.includes("queue") ||
+    msg.includes("progress") ||
+    msg.includes("process")
+  return {
+    state: stillWorking ? "pending" : "error",
+    statusCode,
+    statusMessage,
+    organic: [],
   }
 }
