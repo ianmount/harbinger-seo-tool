@@ -1,13 +1,7 @@
 import "server-only"
 import { z } from "zod"
 import { createCostAccumulator, withAuditCost } from "@/lib/audit-cost"
-import {
-  searchVolume,
-  serpTaskGet,
-  serpTaskPost,
-  serpTasksReady,
-  type SerpTaskHandle,
-} from "@/lib/dataforseo"
+import { searchVolume, serpRankedDomains } from "@/lib/dataforseo"
 import type { TaskContext, TaskRunner } from "@/lib/inngest/functions"
 import {
   isCancelRequested,
@@ -17,7 +11,6 @@ import {
 import {
   completeRun,
   getAllRankTasks,
-  getPendingRankTasks,
   getRun,
   insertRankTasks,
   markRankTaskDone,
@@ -35,24 +28,29 @@ import type {
 /**
  * Keyword Research — localize phase (the paid background job).
  *
- * Chunked Inngest task: the SERP rank step uses DataForSEO's async Standard
- * queue, which can take many minutes for hundreds of (keyword × city)
- * lookups. Polling inside one Vercel invocation is capped at ~800s, so we
- * spread the work across `step.run` blocks with `step.sleep` between polls —
- * Inngest re-invokes the function across step boundaries, so the run can wait
- * far longer than 800s without any single invocation running long.
+ * The interactive part (seed proposal → approval → candidate generation →
+ * curation → manual prune) runs synchronously in the API routes. By the time
+ * this fires, the run has an approved, pruned keyword list. This task does
+ * the expensive per-city work:
  *
- *   submit-tasks → city volume (live) per location, drop no-volume terms,
- *                  submit kept terms to the SERP queue (high priority) and
- *                  persist them to keyword_research_rank_tasks.
- *   poll-N       → intersect tasks_ready with our pending ids, collect each
- *                  finished SERP, record the target's rank. Repeats with a
- *                  sleep between rounds until nothing's pending or the cap.
- *   assemble     → build one result block per location from the rank-tasks
- *                  table; finalize the run.
+ *   price-tasks → city volume (live google_ads/search_volume) per location;
+ *                 drop terms with no local volume; persist the survivors
+ *                 (with city volume) to keyword_research_rank_tasks.
+ *   probe-N     → rank each survivor with the LIVE SERP endpoint
+ *                 (serp/google/organic/live/advanced), chunked across
+ *                 step.run blocks so a large list spans multiple short
+ *                 Vercel invocations. Records the target's organic position.
+ *   assemble    → one result block per location, read from the rank-tasks
+ *                 table; finalize the run.
  *
- * Cost is carried in each step's return value (acc per step) so it survives
- * re-invocations — same pattern as comp-analysis.
+ * We use the LIVE SERP endpoint rather than the async Standard task queue:
+ * the queue repeatedly failed to return ready tasks (the same issue that made
+ * an earlier implementation abandon it), whereas live SERP is what the Audit
+ * and Comp Analysis tabs use reliably. Live costs ~3× per lookup but it works.
+ *
+ * Chunked Inngest task: each chunk's step.run carries its own cost in the
+ * return value so the total survives re-invocations (same pattern as
+ * comp-analysis).
  */
 
 const KeywordResearchInputSchema = z.object({
@@ -61,10 +59,8 @@ const KeywordResearchInputSchema = z.object({
 })
 
 const SERP_DEPTH = 20
-const SERP_PRIORITY = 2 as const // high priority → faster queue turnaround
-const MAX_POLLS = 40 // × POLL_SLEEP ≈ 20 min of queue wait, across invocations
-const POLL_SLEEP = "30s"
-const COLLECT_CONCURRENCY = 8
+const SERP_CHUNK_SIZE = 50
+const SERP_CONCURRENCY = 10
 
 function stripDomain(domain: string): string {
   return domain
@@ -103,6 +99,12 @@ async function withStepCost<T>(
   return { value, costUsd: acc.dataforseoUsd + acc.claudeUsd }
 }
 
+interface ProbeTask {
+  id: string
+  keyword: string
+  locationCode: number
+}
+
 export const runKeywordResearchTask: TaskRunner = async ({
   jobId,
   job,
@@ -124,8 +126,8 @@ export const runKeywordResearchTask: TaskRunner = async ({
     let costUsd = 0
     const warnings: string[] = []
 
-    // ── Phase 1: submit (one step). City volume → drop → queue SERP tasks. ──
-    const submit = await step.run("submit-tasks-v1", () =>
+    // ── Phase 1: city volume → drop no-volume → persist rank tasks. ─────────
+    const price = await step.run("price-tasks-v2", () =>
       withStepCost(async () => {
         await checkCancel()
         const run = await getRun(runId)
@@ -162,107 +164,76 @@ export const runKeywordResearchTask: TaskRunner = async ({
             stepWarnings.push(`${loc.label}: no keywords had local search volume.`)
             continue
           }
-
-          await updateProgress(jobId, {
-            stage: "Queueing SERP rank checks",
-            detail: `${loc.label} — ${kept.length} keywords`,
-          }).catch(() => {})
-          let handles: SerpTaskHandle[] = []
-          try {
-            handles = await serpTaskPost(
-              kept.map((kw) => ({
-                keyword: kw,
-                locationCode: loc.locationCode,
-                locationLabel: loc.label,
-                depth: SERP_DEPTH,
-                priority: SERP_PRIORITY,
-              })),
-            )
-          } catch (err) {
-            stepWarnings.push(
-              `${loc.label}: SERP task submission failed (${
-                err instanceof Error ? err.message : "unknown"
-              }).`,
-            )
-            handles = []
-          }
-          if (handles.length < kept.length) {
-            stepWarnings.push(
-              `${loc.label}: ${handles.length}/${kept.length} SERP tasks accepted by DataForSEO.`,
-            )
-          }
-          const idByKw = new Map<string, string>()
-          for (const h of handles) idByKw.set(h.keyword.toLowerCase(), h.id)
-
           const tasks: NewRankTask[] = kept.map((kw) => ({
             locationSlug: loc.slug,
             locationCode: loc.locationCode,
             keyword: kw,
             cityVolume: volByKw.get(kw.toLowerCase()) ?? null,
-            dfsTaskId: idByKw.get(kw.toLowerCase()) ?? "",
+            // dfs_task_id unused for the live-SERP flow.
+            dfsTaskId: "",
           }))
           await insertRankTasks(runId, tasks)
         }
-        return { warnings: stepWarnings }
+
+        // Return a stable, ordered probe list so chunk boundaries are
+        // deterministic across Inngest re-invocations.
+        const all = (await getAllRankTasks(runId))
+          .slice()
+          .sort((a, b) => a.id.localeCompare(b.id))
+        const probeTasks: ProbeTask[] = all.map((t) => ({
+          id: t.id,
+          keyword: t.keyword,
+          locationCode: t.location_code,
+        }))
+        return {
+          warnings: stepWarnings,
+          target: stripDomain(run.domain),
+          probeTasks,
+        }
       }),
     )
-    costUsd += submit.costUsd
-    warnings.push(...submit.value.warnings)
+    costUsd += price.costUsd
+    warnings.push(...price.value.warnings)
+    const { target, probeTasks } = price.value
 
-    // ── Phase 2: poll the queue across invocations. ─────────────────────────
-    for (let i = 0; i < MAX_POLLS; i++) {
-      const poll = await step.run(`poll-${i}`, () =>
+    // ── Phase 2: rank each survivor via the live SERP endpoint, chunked. ────
+    const chunkCount = Math.max(1, Math.ceil(probeTasks.length / SERP_CHUNK_SIZE))
+    for (let ci = 0; ci < chunkCount; ci++) {
+      const chunk = probeTasks.slice(
+        ci * SERP_CHUNK_SIZE,
+        (ci + 1) * SERP_CHUNK_SIZE,
+      )
+      if (chunk.length === 0) continue
+      const probe = await step.run(`probe-${ci}`, () =>
         withStepCost(async () => {
           await checkCancel()
-          const pending = (await getPendingRankTasks(runId)).filter(
-            (t) => t.dfs_task_id,
-          )
-          if (pending.length === 0) return { remaining: 0, totalReady: 0 }
-
-          let readyIds: Set<string>
-          try {
-            const ready = await serpTasksReady()
-            readyIds = new Set(ready)
-          } catch {
-            return { remaining: pending.length, totalReady: -1 }
-          }
-          const collectable = pending.filter(
-            (t) => t.dfs_task_id && readyIds.has(t.dfs_task_id),
-          )
           await updateProgress(jobId, {
-            stage: "Collecting SERP results",
-            detail: `${pending.length} pending, ${collectable.length} ready this round`,
+            stage: "Checking ranks",
+            detail: `batch ${ci + 1}/${chunkCount} (${probeTasks.length} keyword×city lookups)`,
           }).catch(() => {})
-
-          const target = stripDomain(
-            (await getRun(runId))?.domain ?? "",
-          )
-          await mapWithConcurrency(collectable, COLLECT_CONCURRENCY, async (t) => {
+          await mapWithConcurrency(chunk, SERP_CONCURRENCY, async (t) => {
             try {
-              const serp = await serpTaskGet(t.dfs_task_id as string)
-              const hit = serp.organic.find(
-                (o) => stripDomain(o.domain) === target,
+              const hits = await serpRankedDomains(
+                t.keyword,
+                { code: t.locationCode },
+                { depth: SERP_DEPTH },
               )
-              await markRankTaskDone(t.id, hit ? hit.position : null)
+              const hit = hits.find((h) => stripDomain(h.domain) === target)
+              await markRankTaskDone(t.id, hit ? hit.rankAbsolute : null)
             } catch {
-              // leave pending; a later poll may pick it up.
+              // Leave pending → surfaces as rank-unresolved. A single failed
+              // lookup shouldn't sink the whole chunk.
             }
           })
-
-          const after = (await getPendingRankTasks(runId)).filter(
-            (t) => t.dfs_task_id,
-          )
-          return { remaining: after.length, totalReady: readyIds.size }
+          return null
         }),
       )
-      costUsd += poll.costUsd
-      if (poll.value.remaining === 0) break
-      await step.sleep(`wait-${i}`, POLL_SLEEP)
+      costUsd += probe.costUsd
     }
 
-    // ── Phase 3: assemble (one step). ───────────────────────────────────────
+    // ── Phase 3: assemble per-location results. ─────────────────────────────
     const finalCostUsd = Number(costUsd.toFixed(4))
-    const assemble = await step.run("assemble-v1", async () => {
+    const assemble = await step.run("assemble-v2", async () => {
       const run = await getRun(runId)
       if (!run) throw new Error(`Keyword research run ${runId} not found`)
       const prospectByKw = new Map<string, { seed: string; source: KeywordSource }>()
@@ -294,9 +265,7 @@ export const runKeywordResearchTask: TaskRunner = async ({
             }
           })
           const droppedNoVolume = Math.max(0, keywords.length - tasks.length)
-          const rankUnresolved = tasks.filter(
-            (t) => t.status !== "done" || !t.dfs_task_id,
-          ).length
+          const rankUnresolved = tasks.filter((t) => t.status !== "done").length
           return {
             slug: loc.slug,
             label: loc.label,
