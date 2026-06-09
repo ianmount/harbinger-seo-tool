@@ -2,18 +2,19 @@
  * Per-location CSV builder for the keyword-research deliverable.
  *
  * Column order (confirmed with the user — exactly these five):
- *   Seed/Category, Keyword, Source, Search Volume, Current Rank
+ *   Service, Keyword, Source, Search Volume, Current Rank
  *
- * "Search Volume" is the CITY-level number (google_ads/search_volume scoped to
- * the location). "Current Rank" is the target's organic position in that city;
- * null renders "Not in top 20". Rows are sorted by Seed, then Search Volume
- * descending — matching the skill's output.
+ * "Service" is the originally-provided service the keyword traces back to (not
+ * the intermediate seed). "Search Volume" is the CITY-level number
+ * (google_ads/search_volume scoped to the location). "Current Rank" is the
+ * target's organic position in that city; null renders "Not in top 20". Rows
+ * are sorted by Service, then Search Volume descending.
  */
 
 import type { KeywordResearchLocationResult } from "@/lib/types"
 
 const HEADERS = [
-  "Seed/Category",
+  "Service",
   "Keyword",
   "Source",
   "Search Volume",
@@ -31,7 +32,7 @@ function escapeCell(value: string | number | null): string {
 
 export function buildLocationCsv(loc: KeywordResearchLocationResult): string {
   const rows = [...loc.rows].sort((a, b) => {
-    if (a.seed !== b.seed) return a.seed.localeCompare(b.seed)
+    if (a.service !== b.service) return a.service.localeCompare(b.service)
     return (b.cityVolume ?? 0) - (a.cityVolume ?? 0)
   })
 
@@ -39,7 +40,7 @@ export function buildLocationCsv(loc: KeywordResearchLocationResult): string {
   for (const r of rows) {
     lines.push(
       [
-        escapeCell(r.seed),
+        escapeCell(r.service),
         escapeCell(r.keyword),
         escapeCell(r.source),
         escapeCell(r.cityVolume),

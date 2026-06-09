@@ -160,6 +160,7 @@ export async function POST(
     run.prospect,
     refreshed,
     approvedCount,
+    run.seedProposal,
   )
   const prior = run.result
   const warnings = [...(prior?.warnings ?? [])]

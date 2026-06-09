@@ -1975,6 +1975,10 @@ export interface KeywordDrop {
 
 /** One row in a per-location CSV (the deliverable). */
 export interface KeywordResearchResultRow {
+  /** The originally-provided service this keyword traces back to (via its
+   * seed). The deliverable groups by this, not the intermediate seed. */
+  service: string
+  /** The intermediate seed the keyword expanded from (kept for provenance). */
   seed: string
   keyword: string
   source: KeywordSource

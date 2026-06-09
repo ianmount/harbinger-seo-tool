@@ -33,6 +33,7 @@ import type {
   KeywordResearchResult,
   KeywordResearchResultRow,
   KeywordSource,
+  SeedProposalGroup,
 } from "@/lib/types"
 
 /**
@@ -116,10 +117,20 @@ export function buildLocationResults(
   prospect: KeywordCandidate[] | null,
   allTasks: RankTaskRow[],
   approvedCount: number,
+  seedProposal: SeedProposalGroup[] | null,
 ): KeywordResearchLocationResult[] {
   const prospectByKw = new Map<string, { seed: string; source: KeywordSource }>()
   for (const c of prospect ?? []) {
     prospectByKw.set(c.keyword.toLowerCase(), { seed: c.seed, source: c.source })
+  }
+  // Map each seed back to the originally-provided service it was proposed
+  // under. First group wins if a seed somehow appears under two services.
+  const seedToService = new Map<string, string>()
+  for (const group of seedProposal ?? []) {
+    for (const s of group.seeds) {
+      const key = s.seed.toLowerCase()
+      if (!seedToService.has(key)) seedToService.set(key, group.service)
+    }
   }
   const byLocation = new Map<string, RankTaskRow[]>()
   for (const t of allTasks) {
@@ -131,8 +142,13 @@ export function buildLocationResults(
     const tasks = byLocation.get(loc.slug) ?? []
     const rows: KeywordResearchResultRow[] = tasks.map((t) => {
       const meta = prospectByKw.get(t.keyword.toLowerCase())
+      const seed = meta?.seed ?? ""
+      // Fall back to the seed itself for manually-added seeds that don't
+      // belong to any proposed service group.
+      const service = seedToService.get(seed.toLowerCase()) ?? seed
       return {
-        seed: meta?.seed ?? "",
+        service,
+        seed,
         keyword: t.keyword,
         source: meta?.source ?? "suggestions",
         cityVolume: t.city_volume,
@@ -354,6 +370,7 @@ export const runKeywordResearchTask: TaskRunner = async ({
         run.prospect,
         allTasks,
         keywords.length,
+        run.seedProposal,
       )
 
       const durationSeconds = Math.max(

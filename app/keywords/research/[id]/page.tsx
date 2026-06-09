@@ -717,7 +717,7 @@ function Results({ run }: { run: KeywordResearchRun }) {
             <table className="w-full border-collapse text-[12px]">
               <thead>
                 <tr className="border-b border-line bg-muted/40 text-left">
-                  <th className="px-3 py-2 font-medium text-ink-2">Seed</th>
+                  <th className="px-3 py-2 font-medium text-ink-2">Service</th>
                   <th className="px-3 py-2 font-medium text-ink-2">Keyword</th>
                   <th className="px-3 py-2 font-medium text-ink-2">Source</th>
                   <th className="px-3 py-2 text-right font-medium text-ink-2">City vol</th>
@@ -734,13 +734,14 @@ function Results({ run }: { run: KeywordResearchRun }) {
                 ) : (
                   [...loc.rows]
                     .sort((a, b) => {
-                      if (a.seed !== b.seed) return a.seed.localeCompare(b.seed)
+                      if (a.service !== b.service)
+                        return a.service.localeCompare(b.service)
                       return (b.cityVolume ?? 0) - (a.cityVolume ?? 0)
                     })
                     .slice(0, 50)
                     .map((r) => (
                       <tr key={`${r.keyword}`} className="border-b border-line/60">
-                        <td className="px-3 py-1.5 text-ink-2">{r.seed}</td>
+                        <td className="px-3 py-1.5 text-ink-2">{r.service}</td>
                         <td className="px-3 py-1.5 text-foreground">{r.keyword}</td>
                         <td className="px-3 py-1.5">
                           <span className="rounded-sm bg-secondary px-1.5 py-0.5 font-mono text-[10px] uppercase text-ink-2">
