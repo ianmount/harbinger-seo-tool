@@ -58,10 +58,18 @@ const MAPS_SERP_ENDPOINT = "/v3/serp/google/maps/live/advanced"
 const MAPS_DEPTH = 100
 const MAPS_CONCURRENCY = 10
 const MAPS_ZOOM = "12z"
-// Points scanned per step.run. 40 points / 10 concurrency ≈ 4 sub-batches per
-// step; the slimmed item payload for 40 points × depth 100 stays comfortably
-// under Inngest's per-step output cap.
-const BATCH_POINTS = 40
+// Points scanned per step.run. One concurrency wave per step keeps each
+// Inngest step short (so a slow DataForSEO response can't push a single
+// invocation toward the function ceiling) and lets progress advance every
+// BATCH_POINTS rather than freezing for a third of the scan at a time.
+const BATCH_POINTS = MAPS_CONCURRENCY
+// Only the top-ranked businesses at each vantage point feed the competitor
+// rollup. The sidebar surfaces the 20 strongest competitors across the grid,
+// so a business sitting at rank 70 at one point is noise — and dropping it
+// keeps the per-step output (and the total memoized run state on a 441-point
+// grid) comfortably under Inngest's limits. The TARGET's rank is read from
+// the full result first, so this cap never hides the scanned business itself.
+const COMPETITOR_RANK_CUTOFF = 20
 
 /**
  * Minimal MapsSerpItem projection. Structurally assignable to MapsSerpItem
@@ -102,6 +110,8 @@ type ScannedPoint = {
   lat: number
   lng: number
   rank: number | null
+  /** Total Maps results seen at this point (before the competitor cap). */
+  foundCount: number
   items: SlimItem[]
 }
 
@@ -160,9 +170,11 @@ export const runGbpHeatmapTask: TaskRunner = async ({
     const slice = gridPoints.slice(start, start + BATCH_POINTS)
     const batch = await step.run(`scan-${b}`, async () => {
       await checkCancel()
+      // `start` = points already completed before this batch, so the bar
+      // reflects real progress instead of jumping ahead to the batch's end.
       await updateProgress(jobId, {
         stage: "Scanning vantage points",
-        detail: `${Math.min(start + slice.length, total)} / ${total}`,
+        detail: `${start} / ${total}`,
         percent: Math.round((start / total) * 100),
       }).catch(() => {})
 
@@ -179,13 +191,22 @@ export const runGbpHeatmapTask: TaskRunner = async ({
             },
           ]).catch(() => null)
           const items = env ? extractMapsItems(env).map(slim) : []
+          // Read the target's rank from the full result, then keep only the
+          // top-ranked rows for the competitor rollup (see cutoff comment).
+          const rank = findTargetRank(items, target.place_id, target.title)
+          const competitorItems = items.filter(
+            (it) =>
+              it.rank_absolute != null &&
+              it.rank_absolute <= COMPETITOR_RANK_CUTOFF,
+          )
           return {
             row: pt.row,
             col: pt.col,
             lat: pt.lat,
             lng: pt.lng,
-            rank: findTargetRank(items, target.place_id, target.title),
-            items,
+            rank,
+            foundCount: items.length,
+            items: competitorItems,
             cost: dfsCost(env),
           }
         },
@@ -198,6 +219,7 @@ export const runGbpHeatmapTask: TaskRunner = async ({
         lat: p.lat,
         lng: p.lng,
         rank: p.rank,
+        foundCount: p.foundCount,
         items: p.items,
       }))
       return { points: scannedPoints, cost }
@@ -214,7 +236,7 @@ export const runGbpHeatmapTask: TaskRunner = async ({
     lat: s.lat,
     lng: s.lng,
     rank: s.rank,
-    found_count: s.items.length,
+    found_count: s.foundCount,
   }))
   const kpis = computeKPIs(points)
   const competitors = rollupCompetitors(
