@@ -293,7 +293,7 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
         category: "local",
         label: "GBP Heatmap",
         description:
-          "Geo-grid rank tracker for a business + keyword. Resolves the business via Google Business Profile, then runs a parallel Google Maps SERP scan across a 5×7 grid of vantage points and rolls the results up into rank KPIs and a competitor sidebar.",
+          "Geo-grid rank tracker for a business + keyword. Resolves the business via Google Business Profile, then runs a parallel Google Maps SERP scan across a configurable grid of vantage points (neighborhood up to a ~30-mile radius) and rolls the results up into rank KPIs and a competitor sidebar. Large grids run as a background job.",
         href: "/local/gbp-heatmap",
         endpoints: [
           "/v3/business_data/google/my_business_info/live",

@@ -11,6 +11,7 @@ const KINDS = [
   "alt_tags",
   "full_audit",
   "keyword_research",
+  "gbp_heatmap",
 ] as const
 
 const StartSchema = z.object({

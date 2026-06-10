@@ -39,6 +39,7 @@ export type JobKind =
   | "alt_tags"
   | "full_audit"
   | "keyword_research"
+  | "gbp_heatmap"
 
 interface Job {
   id: string

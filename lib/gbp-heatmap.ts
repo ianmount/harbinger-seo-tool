@@ -61,6 +61,131 @@ export interface CompetitorRow {
 }
 
 const KM_PER_DEG_LAT = 111.0
+const KM_PER_MILE = 1.609344
+
+/**
+ * Above this many vantage points a scan is too slow to run inside the
+ * synchronous route's 300s budget, so it's dispatched to the background-jobs
+ * pipeline (Inngest) instead. 49 = a 7×7 grid, the largest square that
+ * comfortably finishes synchronously at MAPS_CONCURRENCY=10.
+ */
+export const SYNC_MAX_POINTS = 49
+
+/**
+ * Hard ceilings on grid dimensions, shared by the route's Zod schema, the
+ * background task's input schema, and the UI's custom-grid inputs so all
+ * three agree. 21×21 = 441 points reaches a ~30-mile radius at ~4.8km
+ * spacing — see HEATMAP_PRESETS.
+ */
+export const MAX_GRID_DIM = 21
+export const MIN_GRID_DIM = 3
+export const MAX_SPACING_KM = 10
+export const MIN_SPACING_KM = 0.25
+
+/**
+ * Per-call cost of a Google Maps `live/advanced` SERP request at depth 100.
+ * Used only for the UI's up-front cost estimate; the real per-run cost is
+ * summed from each DataForSEO envelope's `cost` field.
+ */
+export const DFS_MAPS_COST_PER_CALL = 0.003
+
+export interface HeatmapPreset {
+  key: string
+  label: string
+  rows: number
+  cols: number
+  spacingKm: number
+  blurb: string
+}
+
+/**
+ * Canned grid configurations surfaced in the UI. Each trades resolution for
+ * reach. Point counts: 35 / 81 / 169 / 225 / 441. Everything above
+ * SYNC_MAX_POINTS runs as a background job.
+ */
+export const HEATMAP_PRESETS: readonly HeatmapPreset[] = [
+  {
+    key: "neighborhood",
+    label: "Neighborhood",
+    rows: 5,
+    cols: 7,
+    spacingKm: 1,
+    blurb: "Tight local footprint — the original default.",
+  },
+  {
+    key: "city",
+    label: "City",
+    rows: 9,
+    cols: 9,
+    spacingKm: 1.5,
+    blurb: "Citywide coverage at street resolution.",
+  },
+  {
+    key: "metro",
+    label: "Metro",
+    rows: 13,
+    cols: 13,
+    spacingKm: 2.5,
+    blurb: "Metro-wide spread for multi-suburb businesses.",
+  },
+  {
+    key: "service-area",
+    label: "Service area (~17 mi)",
+    rows: 15,
+    cols: 15,
+    spacingKm: 4,
+    blurb: "Multi-city service area.",
+  },
+  {
+    key: "wide",
+    label: "Wide (~30 mi)",
+    rows: 21,
+    cols: 21,
+    spacingKm: 4.8,
+    blurb: "County-scale reach. Coarse between points.",
+  },
+] as const
+
+export interface GridEstimate {
+  points: number
+  /** Reach to the nearest edge midpoint — the radius fully enclosed by the grid. */
+  edgeRadiusMiles: number
+  /** Reach to the farthest corner. */
+  cornerRadiusMiles: number
+  widthMiles: number
+  heightMiles: number
+  /** Rough up-front cost in USD (points × per-call). */
+  estCostUsd: number
+  /** True when the point count exceeds the synchronous ceiling. */
+  background: boolean
+}
+
+/**
+ * Geometry + cost estimate for a grid. Pure — safe to call from the client.
+ * The grid is a rectangle centered on the business; "radius" therefore
+ * differs by direction, so we surface both the enclosed-edge radius and the
+ * corner radius.
+ */
+export function estimateGrid(
+  rows: number,
+  cols: number,
+  spacingKm: number,
+): GridEstimate {
+  const points = rows * cols
+  const halfNS = ((rows - 1) / 2) * spacingKm
+  const halfEW = ((cols - 1) / 2) * spacingKm
+  const edgeKm = Math.min(halfNS, halfEW)
+  const cornerKm = Math.hypot(halfNS, halfEW)
+  return {
+    points,
+    edgeRadiusMiles: edgeKm / KM_PER_MILE,
+    cornerRadiusMiles: cornerKm / KM_PER_MILE,
+    widthMiles: ((cols - 1) * spacingKm) / KM_PER_MILE,
+    heightMiles: ((rows - 1) * spacingKm) / KM_PER_MILE,
+    estCostUsd: points * DFS_MAPS_COST_PER_CALL,
+    background: points > SYNC_MAX_POINTS,
+  }
+}
 
 export function buildGrid(
   centerLat: number,

@@ -16,6 +16,7 @@ import { runAltTagsTask } from "@/lib/tasks/alt-tags"
 import { runAuditTask } from "@/lib/tasks/audit"
 import { runCompAnalysisTask } from "@/lib/tasks/comp-analysis"
 import { runFullAuditTask } from "@/lib/tasks/full-audit"
+import { runGbpHeatmapTask } from "@/lib/tasks/gbp-heatmap"
 import { runInitialStrategyTask } from "@/lib/tasks/initial-strategy"
 import { runKeywordResearchTask } from "@/lib/tasks/keyword-research"
 import { runTechnicalCrawlTask } from "@/lib/tasks/technical-crawl"
@@ -55,6 +56,7 @@ const TASKS: Partial<Record<JobKind, TaskRunner>> = {
   alt_tags: runAltTagsTask,
   comp_analysis: runCompAnalysisTask,
   full_audit: runFullAuditTask,
+  gbp_heatmap: runGbpHeatmapTask,
   initial_strategy: runInitialStrategyTask,
   keyword_research: runKeywordResearchTask,
   technical_crawl: runTechnicalCrawlTask,
@@ -71,7 +73,11 @@ const TASKS: Partial<Record<JobKind, TaskRunner>> = {
  * invocation, body re-executes from scratch on Inngest re-invocation if it
  * fails before completing).
  */
-const CHUNKED_TASKS = new Set<JobKind>(["comp_analysis", "keyword_research"])
+const CHUNKED_TASKS = new Set<JobKind>([
+  "comp_analysis",
+  "keyword_research",
+  "gbp_heatmap",
+])
 
 /**
  * The single Inngest function. One event (`jobs/run`) feeds it; it pulls the

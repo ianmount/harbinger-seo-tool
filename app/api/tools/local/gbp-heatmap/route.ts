@@ -4,7 +4,12 @@ import {
   computeKPIs,
   extractMapsItems,
   findTargetRank,
+  MAX_GRID_DIM,
+  MAX_SPACING_KM,
+  MIN_GRID_DIM,
+  MIN_SPACING_KM,
   rollupCompetitors,
+  SYNC_MAX_POINTS,
   type GridPointResult,
   type MapsSerpItem,
 } from "@/lib/gbp-heatmap"
@@ -24,9 +29,9 @@ const Input = z.object({
   location_code: z.number().int().optional(),
   location_name: z.string().optional(),
   language_code: z.string().default("en"),
-  grid_rows: z.number().int().min(3).max(11).default(5),
-  grid_cols: z.number().int().min(3).max(11).default(7),
-  spacing_km: z.number().min(0.25).max(5).default(1),
+  grid_rows: z.number().int().min(MIN_GRID_DIM).max(MAX_GRID_DIM).default(5),
+  grid_cols: z.number().int().min(MIN_GRID_DIM).max(MAX_GRID_DIM).default(7),
+  spacing_km: z.number().min(MIN_SPACING_KM).max(MAX_SPACING_KM).default(1),
   // When set, the resolution step is skipped and the scan runs directly
   // against the supplied center. Used after the user picks one of the
   // disambiguation candidates from a prior call.
@@ -77,6 +82,13 @@ type Competitor = {
 
 type Data = {
   status: Status
+  /**
+   * Set when the grid exceeds SYNC_MAX_POINTS. The route resolves the business
+   * (so the caller gets `target`) but does NOT scan — the client starts a
+   * background job with the resolved target instead. `grid`/`kpis`/
+   * `competitors` are absent in this case.
+   */
+  requires_job?: boolean
   target?: ResolvedTarget
   candidates?: Candidate[]
   grid?: {
@@ -232,6 +244,29 @@ export async function POST(request: Request) {
         data: {
           status: "not_found",
           candidates: [],
+          endpoints_called: endpointsCalled,
+        },
+        endpoints: endpointsCalled,
+        costUsd: resolveCost,
+      }
+    }
+
+    // Large grids exceed what the 300s synchronous budget can scan. Hand the
+    // resolved target back to the client so it can kick off a background job
+    // (Inngest) instead of scanning here. The resolution cost is still
+    // charged; the job skips re-resolution by accepting `place_id` + center.
+    if (input.grid_rows * input.grid_cols > SYNC_MAX_POINTS) {
+      return {
+        data: {
+          status: "ok",
+          requires_job: true,
+          target: resolved,
+          grid: {
+            rows: input.grid_rows,
+            cols: input.grid_cols,
+            spacing_km: input.spacing_km,
+            points: [],
+          },
           endpoints_called: endpointsCalled,
         },
         endpoints: endpointsCalled,

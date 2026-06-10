@@ -1,23 +1,35 @@
 "use client"
 
-import { useMemo, useState, type FormEvent } from "react"
+import { useEffect, useMemo, useState, type FormEvent } from "react"
 import { Loader2, MapPin, Printer, Star } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { JobsForKindCard } from "@/components/JobsForKindCard"
 import { MarketPicker } from "@/components/tool/MarketPicker"
 import { ToolShell } from "@/components/tool/ToolShell"
 import {
   ToolError,
   ToolSection,
-  useToolRun,
+  type ToolRunMeta,
 } from "@/components/tool/use-tool-run"
 import {
   HeatmapMap,
   isGoogleMapsConfigured,
 } from "@/components/tool/HeatmapMap"
-import { rankColor } from "@/lib/gbp-heatmap"
+import {
+  estimateGrid,
+  HEATMAP_PRESETS,
+  rankColor,
+} from "@/lib/gbp-heatmap"
 import { findToolByPathname } from "@/lib/tool-config"
 import { cn } from "@/lib/utils"
 import type { DfsLabsLocation } from "@/lib/types"
@@ -79,6 +91,8 @@ type Kpis = {
 
 type Data = {
   status: "ok" | "ambiguous" | "not_found"
+  /** Set by the route when the grid is too big to scan synchronously. */
+  requires_job?: boolean
   target?: Target
   candidates?: Candidate[]
   grid?: {
@@ -148,27 +162,190 @@ function kpisFromRanks(ranks: readonly (number | null)[]): Kpis {
   }
 }
 
+type JobProgress = { stage?: string; detail?: string; percent?: number | null }
+
 export default function GbpHeatmapPage() {
   const tool = findToolByPathname("/local/gbp-heatmap")!
   const [business, setBusiness] = useState("")
   const [keyword, setKeyword] = useState("")
   const [market, setMarket] = useState<DfsLabsLocation | null>(null)
+  const [presetKey, setPresetKey] = useState<string>(HEATMAP_PRESETS[0].key)
   const [selected, setSelected] = useState<SelectedKey>("target")
-  const { data, meta, loading, error, run, setError } =
-    useToolRun<Data>("/api/tools/local/gbp-heatmap")
+
+  // Flow state. `data` is the full scan result (synchronous or job-completed)
+  // that ResultsView renders. The other slots cover the in-between states.
+  const [data, setData] = useState<Data | null>(null)
+  const [candidates, setCandidates] = useState<Candidate[] | null>(null)
+  const [notFound, setNotFound] = useState(false)
+  const [meta, setMeta] = useState<ToolRunMeta | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [jobId, setJobId] = useState<string | null>(null)
+  const [jobProgress, setJobProgress] = useState<JobProgress | null>(null)
+
+  const preset = useMemo(
+    () => HEATMAP_PRESETS.find((p) => p.key === presetKey) ?? HEATMAP_PRESETS[0],
+    [presetKey],
+  )
+  const est = useMemo(
+    () => estimateGrid(preset.rows, preset.cols, preset.spacingKm),
+    [preset],
+  )
+  const busy = loading || jobId != null
+
+  // Resume a previously-started scan when landing on ?job=<id> (e.g. from the
+  // header Jobs tray or the per-kind card's View link). Read from the URL
+  // directly to avoid a Suspense boundary around useSearchParams.
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const j = new URLSearchParams(window.location.search).get("job")
+    // One-time sync of the URL's ?job= into state on mount; an effect is the
+    // right tool here (avoids a hydration mismatch from reading window during
+    // render). The polling effect below takes over once jobId is set.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (j) setJobId(j)
+  }, [])
+
+  // Poll the background job until it reaches a terminal state, then fold its
+  // result into `data` so ResultsView renders identically to a sync scan.
+  useEffect(() => {
+    if (!jobId) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/jobs/${jobId}`, { cache: "no-store" })
+        if (res.ok) {
+          const body = (await res.json()) as {
+            job: {
+              status: string
+              result:
+                | (Data & { costUsd?: number; durationSeconds?: number })
+                | null
+              error: string | null
+              progress: JobProgress | null
+            }
+          }
+          if (cancelled) return
+          setJobProgress(body.job.progress ?? null)
+          if (body.job.status === "completed") {
+            const result = body.job.result ?? null
+            setData(result)
+            if (result) {
+              setMeta({
+                endpoints: result.endpoints_called ?? [],
+                costUsd: result.costUsd,
+                durationMs:
+                  typeof result.durationSeconds === "number"
+                    ? result.durationSeconds * 1000
+                    : 0,
+              })
+            }
+            setJobId(null)
+            return
+          }
+          if (body.job.status === "failed") {
+            setError(body.job.error ?? "Background scan failed.")
+            setJobId(null)
+            return
+          }
+          if (body.job.status === "cancelled") {
+            setError("Scan cancelled.")
+            setJobId(null)
+            return
+          }
+        }
+      } catch {
+        /* transient — retry on the next tick */
+      }
+      if (!cancelled) timer = setTimeout(poll, 3000)
+    }
+    void poll()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [jobId])
+
+  async function startJob(target: Target) {
+    const res = await fetch("/api/jobs/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "gbp_heatmap",
+        title: `${keyword.trim()} — ${target.title}`,
+        input: {
+          keyword: keyword.trim(),
+          language_code: "en",
+          grid_rows: preset.rows,
+          grid_cols: preset.cols,
+          spacing_km: preset.spacingKm,
+          target,
+        },
+      }),
+    })
+    const body = (await res.json()) as { jobId?: string; error?: string }
+    if (!res.ok || !body.jobId) {
+      throw new Error(body.error ?? "Could not start background scan.")
+    }
+    // Drop the resolution-only meta (one cheap GBP call); the real scan
+    // cost/duration get filled in from the job result on completion.
+    setMeta(null)
+    setJobProgress({ stage: "Queued" })
+    setJobId(body.jobId)
+  }
 
   async function submit(override?: SubmitOverride) {
     if (!business.trim()) return setError("Enter a business name.")
     if (!keyword.trim()) return setError("Enter a keyword.")
     if (!override && !market) return setError("Pick a market (city/state).")
+    setError(null)
     setSelected("target")
-    await run({
-      business: business.trim(),
-      keyword: keyword.trim(),
-      location_code: market?.location_code,
-      location_name: market ? undefined : "United States",
-      ...override,
-    })
+    setData(null)
+    setCandidates(null)
+    setNotFound(false)
+    setJobId(null)
+    setJobProgress(null)
+    setLoading(true)
+    try {
+      const res = await fetch("/api/tools/local/gbp-heatmap", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          business: business.trim(),
+          keyword: keyword.trim(),
+          location_code: market?.location_code,
+          location_name: market ? undefined : "United States",
+          grid_rows: preset.rows,
+          grid_cols: preset.cols,
+          spacing_km: preset.spacingKm,
+          ...override,
+        }),
+      })
+      const payload = (await res.json()) as {
+        data?: Data
+        meta?: ToolRunMeta
+        error?: string
+      }
+      if (!res.ok) throw new Error(payload.error ?? `HTTP ${res.status}`)
+      const d = payload.data
+      setMeta(payload.meta ?? null)
+      if (!d) throw new Error("Empty response.")
+      if (d.status === "not_found") {
+        setNotFound(true)
+      } else if (d.status === "ambiguous") {
+        setCandidates(d.candidates ?? [])
+      } else if (d.requires_job) {
+        if (!d.target) throw new Error("Resolution returned no business to scan.")
+        await startJob(d.target)
+      } else {
+        setData(d)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Request failed")
+    } finally {
+      setLoading(false)
+    }
   }
 
   async function onSubmit(e: FormEvent) {
@@ -208,59 +385,102 @@ export default function GbpHeatmapPage() {
         }),
       }}
       form={
-        <form
-          onSubmit={onSubmit}
-          className="grid grid-cols-1 gap-4 print:hidden md:grid-cols-[1fr_1fr_260px_auto] md:items-end"
-        >
-          <div className="space-y-1.5">
-            <Label htmlFor="business">Business name</Label>
-            <Input
-              id="business"
-              value={business}
-              onChange={(e) => setBusiness(e.target.value)}
-              placeholder="Shade Number Seven"
-              disabled={loading}
-            />
+        <form onSubmit={onSubmit} className="space-y-4 print:hidden">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_1fr_260px]">
+            <div className="space-y-1.5">
+              <Label htmlFor="business">Business name</Label>
+              <Input
+                id="business"
+                value={business}
+                onChange={(e) => setBusiness(e.target.value)}
+                placeholder="Shade Number Seven"
+                disabled={busy}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="keyword">Keyword</Label>
+              <Input
+                id="keyword"
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                placeholder="window blinds"
+                disabled={busy}
+              />
+            </div>
+            <MarketPicker value={market} onChange={setMarket} label="City" />
           </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="keyword">Keyword</Label>
-            <Input
-              id="keyword"
-              value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
-              placeholder="window blinds"
-              disabled={loading}
-            />
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-[260px_1fr_auto] md:items-end">
+            <div className="space-y-1.5">
+              <Label htmlFor="preset">Coverage</Label>
+              <Select
+                value={presetKey}
+                onValueChange={setPresetKey}
+                disabled={busy}
+              >
+                <SelectTrigger id="preset">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {HEATMAP_PRESETS.map((p) => (
+                    <SelectItem key={p.key} value={p.key}>
+                      {p.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <p className="font-mono text-[11px] leading-relaxed text-ink-3 md:pb-2">
+              {est.points} vantage points · ~{est.edgeRadiusMiles.toFixed(0)} mi
+              radius (~{est.widthMiles.toFixed(0)}×{est.heightMiles.toFixed(0)} mi)
+              · est. ${est.estCostUsd.toFixed(2)}
+              {est.background ? (
+                <>
+                  {" · "}
+                  <span className="font-semibold text-amber-700">
+                    runs in background
+                  </span>
+                </>
+              ) : null}
+              <br />
+              <span className="text-ink-3/80">{preset.blurb}</span>
+            </p>
+            <Button type="submit" disabled={busy}>
+              {busy ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              {est.background ? "Run Background Scan" : "Run Heatmap Scan"}
+            </Button>
           </div>
-          <MarketPicker value={market} onChange={setMarket} label="City" />
-          <Button type="submit" disabled={loading}>
-            {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-            Run Heatmap Scan
-          </Button>
         </form>
       }
       results={
-        error ? (
-          <ToolError message={error} />
-        ) : !data ? (
-          loading ? <ScanProgress /> : null
-        ) : data.status === "not_found" ? (
-          <NotFoundPanel business={business} />
-        ) : data.status === "ambiguous" ? (
-          <Disambiguation
-            candidates={data.candidates ?? []}
-            onPick={selectCandidate}
-            disabled={loading}
+        <>
+          <JobsForKindCard
+            kind="gbp_heatmap"
+            title="Recent heatmap scans"
           />
-        ) : (
-          <ResultsView
-            data={data}
-            selected={selected}
-            onSelect={setSelected}
-            onExport={exportPdf}
-            keyword={keyword}
-          />
-        )
+          {error ? (
+            <ToolError message={error} />
+          ) : data && data.status === "ok" && !data.requires_job ? (
+            <ResultsView
+              data={data}
+              selected={selected}
+              onSelect={setSelected}
+              onExport={exportPdf}
+              keyword={keyword}
+            />
+          ) : notFound ? (
+            <NotFoundPanel business={business} />
+          ) : candidates ? (
+            <Disambiguation
+              candidates={candidates}
+              onPick={selectCandidate}
+              disabled={busy}
+            />
+          ) : busy ? (
+            <ScanProgress background={jobId != null} progress={jobProgress} />
+          ) : null}
+        </>
       }
     />
   )
@@ -403,16 +623,27 @@ function PrintHeader({
   )
 }
 
-function ScanProgress() {
+function ScanProgress({
+  background = false,
+  progress = null,
+}: {
+  background?: boolean
+  progress?: { stage?: string; detail?: string; percent?: number | null } | null
+}) {
+  const stage = progress?.stage
+  const detail = progress?.detail
   return (
     <div className="rounded-xl border border-dashed border-line bg-card/40 px-6 py-10 text-center">
       <Loader2 className="mx-auto h-6 w-6 animate-spin text-ink-3" />
       <p className="mt-3 font-sans text-[13px] font-semibold text-foreground">
-        Scanning Google Maps from each grid vantage point…
+        {stage
+          ? `${stage}${detail ? ` — ${detail}` : ""}`
+          : "Scanning Google Maps from each grid vantage point…"}
       </p>
       <p className="mt-1 font-serif text-[12px] text-ink-3">
-        ~10-30 seconds. Resolving business, then running 35 parallel SERP
-        calls.
+        {background
+          ? "Large grids run as a background job — you can leave this page and we'll email you when it finishes. Progress also shows in the Jobs tray."
+          : "~10-30 seconds. Resolving business, then running the grid SERP calls in parallel."}
       </p>
     </div>
   )
@@ -452,7 +683,7 @@ function Disambiguation({
         </p>
         <p className="font-serif text-[12px] text-ink-3">
           Google Business Profile returned more than one candidate. Selecting
-          one will trigger the 35-point scan against that location.
+          one will trigger the grid scan against that location.
         </p>
       </div>
       <ul className="grid grid-cols-1 gap-2 md:grid-cols-2">
