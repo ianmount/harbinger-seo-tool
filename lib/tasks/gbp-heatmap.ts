@@ -4,6 +4,7 @@ import { dfsRequest } from "@/lib/dataforseo"
 import {
   buildGrid,
   computeKPIs,
+  CUSTOM_MAX_POINTS,
   extractMapsItems,
   findTargetRank,
   MAX_GRID_DIM,
@@ -52,9 +53,17 @@ const TargetSchema = z.object({
 const InputSchema = z.object({
   keyword: z.string().min(1),
   language_code: z.string().default("en"),
-  grid_rows: z.number().int().min(MIN_GRID_DIM).max(MAX_GRID_DIM),
-  grid_cols: z.number().int().min(MIN_GRID_DIM).max(MAX_GRID_DIM),
-  spacing_km: z.number().min(MIN_SPACING_KM).max(MAX_SPACING_KM),
+  grid_rows: z.number().int().min(MIN_GRID_DIM).max(MAX_GRID_DIM).optional(),
+  grid_cols: z.number().int().min(MIN_GRID_DIM).max(MAX_GRID_DIM).optional(),
+  spacing_km: z.number().min(MIN_SPACING_KM).max(MAX_SPACING_KM).optional(),
+  // Custom-area mode: explicit vantage points drawn on the map. When present,
+  // the rectangular grid params are ignored.
+  points: z
+    .array(z.object({ lat: z.number(), lng: z.number() }))
+    .min(1)
+    .max(CUSTOM_MAX_POINTS)
+    .optional(),
+  radius_miles: z.number().optional(),
   target: TargetSchema,
 })
 
@@ -149,20 +158,38 @@ export const runGbpHeatmapTask: TaskRunner = async ({
       `Invalid GBP heatmap input: ${JSON.stringify(parsed.error.flatten())}`,
     )
   }
-  const { keyword, language_code, grid_rows, grid_cols, spacing_km, target } =
-    parsed.data
+  const {
+    keyword,
+    language_code,
+    grid_rows,
+    grid_cols,
+    spacing_km,
+    points: customPoints,
+    radius_miles,
+    target,
+  } = parsed.data
+  const isCustom = Array.isArray(customPoints) && customPoints.length > 0
 
   const checkCancel = async () => {
     if (await isCancelRequested(jobId)) throw new JobCancelledError(jobId)
   }
 
-  const gridPoints = buildGrid(
-    target.lat,
-    target.lng,
-    grid_rows,
-    grid_cols,
-    spacing_km,
-  )
+  let gridPoints: { row: number; col: number; lat: number; lng: number }[]
+  if (isCustom) {
+    gridPoints = customPoints!.map((p, i) => ({
+      row: 0,
+      col: i,
+      lat: p.lat,
+      lng: p.lng,
+    }))
+  } else {
+    if (grid_rows == null || grid_cols == null || spacing_km == null) {
+      throw new Error(
+        "GBP heatmap input needs either `points` or grid_rows/grid_cols/spacing_km",
+      )
+    }
+    gridPoints = buildGrid(target.lat, target.lng, grid_rows, grid_cols, spacing_km)
+  }
   const total = gridPoints.length
   const numBatches = Math.ceil(total / BATCH_POINTS)
 
@@ -261,10 +288,12 @@ export const runGbpHeatmapTask: TaskRunner = async ({
     status: "ok" as const,
     target,
     grid: {
-      rows: grid_rows,
-      cols: grid_cols,
-      spacing_km,
+      rows: isCustom ? 0 : grid_rows,
+      cols: isCustom ? 0 : grid_cols,
+      spacing_km: isCustom ? 0 : spacing_km,
       points,
+      custom: isCustom,
+      radius_miles,
     },
     kpis: {
       total: kpis.total,

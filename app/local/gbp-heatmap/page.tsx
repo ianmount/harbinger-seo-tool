@@ -22,13 +22,19 @@ import {
   type ToolRunMeta,
 } from "@/components/tool/use-tool-run"
 import {
+  CircleDrawMap,
+  type DrawnCircle,
   HeatmapMap,
   isGoogleMapsConfigured,
 } from "@/components/tool/HeatmapMap"
 import {
+  CUSTOM_MAX_POINTS,
+  DFS_MAPS_COST_PER_CALL,
   estimateGrid,
   HEATMAP_PRESETS,
+  pointsInCircle,
   rankColor,
+  SYNC_MAX_POINTS,
 } from "@/lib/gbp-heatmap"
 import { findToolByPathname } from "@/lib/tool-config"
 import { cn } from "@/lib/utils"
@@ -100,6 +106,8 @@ type Data = {
     cols: number
     spacing_km: number
     points: GridPoint[]
+    custom?: boolean
+    radius_miles?: number
   }
   kpis?: Kpis
   competitors?: Competitor[]
@@ -164,6 +172,19 @@ function kpisFromRanks(ranks: readonly (number | null)[]): Kpis {
 
 type JobProgress = { stage?: string; detail?: string; percent?: number | null }
 
+/** Sentinel Coverage value for the draw-your-own-circle mode. */
+const CUSTOM_KEY = "custom"
+const METERS_PER_MILE = 1609.344
+/** Default drawn circle radius (~5 miles). */
+const DEFAULT_CIRCLE_RADIUS_M = 8047
+/** Density options for the custom circle, in km between vantage points. */
+const CUSTOM_SPACINGS: { km: number; label: string }[] = [
+  { km: 1, label: "Fine (1 km)" },
+  { km: 2, label: "Medium (2 km)" },
+  { km: 3, label: "Coarse (3 km)" },
+  { km: 5, label: "Sparse (5 km)" },
+]
+
 export default function GbpHeatmapPage() {
   const tool = findToolByPathname("/local/gbp-heatmap")!
   const [business, setBusiness] = useState("")
@@ -183,15 +204,40 @@ export default function GbpHeatmapPage() {
   const [jobId, setJobId] = useState<string | null>(null)
   const [jobProgress, setJobProgress] = useState<JobProgress | null>(null)
 
+  // Custom-area (circle) mode.
+  const [drawTarget, setDrawTarget] = useState<Target | null>(null)
+  const [circle, setCircle] = useState<DrawnCircle | null>(null)
+  const [customSpacingKm, setCustomSpacingKm] = useState<number>(2)
+
+  const isCustomMode = presetKey === CUSTOM_KEY
   const preset = useMemo(
-    () => HEATMAP_PRESETS.find((p) => p.key === presetKey) ?? HEATMAP_PRESETS[0],
+    () => HEATMAP_PRESETS.find((p) => p.key === presetKey),
     [presetKey],
   )
   const est = useMemo(
-    () => estimateGrid(preset.rows, preset.cols, preset.spacingKm),
+    () =>
+      preset ? estimateGrid(preset.rows, preset.cols, preset.spacingKm) : null,
     [preset],
   )
   const busy = loading || jobId != null
+
+  // Live preview of the vantage points inside the drawn circle.
+  const circleRadiusMiles = circle ? circle.radiusMeters / METERS_PER_MILE : 0
+  const previewPoints = useMemo(
+    () =>
+      circle
+        ? pointsInCircle(
+            circle.lat,
+            circle.lng,
+            circleRadiusMiles,
+            customSpacingKm,
+          )
+        : [],
+    [circle, circleRadiusMiles, customSpacingKm],
+  )
+  const customCount = previewPoints.length
+  const customOverCap = customCount > CUSTOM_MAX_POINTS
+  const customBackground = customCount > SYNC_MAX_POINTS
 
   // Resume a previously-started scan when landing on ?job=<id> (e.g. from the
   // header Jobs tray or the per-kind card's View link). Read from the URL
@@ -267,7 +313,12 @@ export default function GbpHeatmapPage() {
     }
   }, [jobId])
 
-  async function startJob(target: Target) {
+  async function startJob(
+    target: Target,
+    scan:
+      | { grid_rows: number; grid_cols: number; spacing_km: number }
+      | { points: { lat: number; lng: number }[]; radius_miles: number },
+  ) {
     const res = await fetch("/api/jobs/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -277,9 +328,7 @@ export default function GbpHeatmapPage() {
         input: {
           keyword: keyword.trim(),
           language_code: "en",
-          grid_rows: preset.rows,
-          grid_cols: preset.cols,
-          spacing_km: preset.spacingKm,
+          ...scan,
           target,
         },
       }),
@@ -296,6 +345,7 @@ export default function GbpHeatmapPage() {
   }
 
   async function submit(override?: SubmitOverride) {
+    if (!preset) return // custom mode uses resolveForDraw, not submit
     if (!business.trim()) return setError("Enter a business name.")
     if (!keyword.trim()) return setError("Enter a keyword.")
     if (!override && !market) return setError("Pick a market (city/state).")
@@ -337,7 +387,11 @@ export default function GbpHeatmapPage() {
         setCandidates(d.candidates ?? [])
       } else if (d.requires_job) {
         if (!d.target) throw new Error("Resolution returned no business to scan.")
-        await startJob(d.target)
+        await startJob(d.target, {
+          grid_rows: preset!.rows,
+          grid_cols: preset!.cols,
+          spacing_km: preset!.spacingKm,
+        })
       } else {
         setData(d)
       }
@@ -348,19 +402,147 @@ export default function GbpHeatmapPage() {
     }
   }
 
+  // ── Custom-area (circle) flow ──────────────────────────────────────────────
+
+  function resetResults() {
+    setData(null)
+    setCandidates(null)
+    setNotFound(false)
+    setJobId(null)
+    setJobProgress(null)
+  }
+
+  // Step 1: resolve the business (no scan) so we have a center to draw around.
+  async function resolveForDraw(override?: SubmitOverride) {
+    if (!business.trim()) return setError("Enter a business name.")
+    if (!keyword.trim()) return setError("Enter a keyword.")
+    if (!override && !market) return setError("Pick a market (city/state).")
+    setError(null)
+    setSelected("target")
+    resetResults()
+    setDrawTarget(null)
+    setCircle(null)
+    setLoading(true)
+    try {
+      const res = await fetch("/api/tools/local/gbp-heatmap", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          business: business.trim(),
+          keyword: keyword.trim(),
+          location_code: market?.location_code,
+          location_name: market ? undefined : "United States",
+          resolve_only: true,
+          ...override,
+        }),
+      })
+      const payload = (await res.json()) as { data?: Data; error?: string }
+      if (!res.ok) throw new Error(payload.error ?? `HTTP ${res.status}`)
+      const d = payload.data
+      if (!d) throw new Error("Empty response.")
+      if (d.status === "not_found") {
+        setNotFound(true)
+      } else if (d.status === "ambiguous") {
+        setCandidates(d.candidates ?? [])
+      } else if (d.target) {
+        setDrawTarget(d.target)
+        setCircle({
+          lat: d.target.lat,
+          lng: d.target.lng,
+          radiusMeters: DEFAULT_CIRCLE_RADIUS_M,
+        })
+      } else {
+        throw new Error("Resolution returned no business.")
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Request failed")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Step 2: scan the vantage points that fall inside the drawn circle.
+  async function runCustomScan() {
+    if (!drawTarget || !circle) return
+    const pts = previewPoints
+    if (pts.length === 0) return setError("Draw a circle to define the area.")
+    if (pts.length > CUSTOM_MAX_POINTS) {
+      return setError(
+        `That area has ${pts.length} points — over the ${CUSTOM_MAX_POINTS} cap. Increase the spacing or shrink the circle.`,
+      )
+    }
+    setError(null)
+    setSelected("target")
+    resetResults()
+    setLoading(true)
+    try {
+      const override: Record<string, unknown> = {
+        center_lat: drawTarget.lat,
+        center_lng: drawTarget.lng,
+        business_title: drawTarget.title,
+      }
+      if (drawTarget.place_id) override.place_id = drawTarget.place_id
+      const res = await fetch("/api/tools/local/gbp-heatmap", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          business: business.trim(),
+          keyword: keyword.trim(),
+          location_code: market?.location_code,
+          location_name: market ? undefined : "United States",
+          points: pts,
+          radius_miles: circleRadiusMiles,
+          ...override,
+        }),
+      })
+      const payload = (await res.json()) as {
+        data?: Data
+        meta?: ToolRunMeta
+        error?: string
+      }
+      if (!res.ok) throw new Error(payload.error ?? `HTTP ${res.status}`)
+      const d = payload.data
+      setMeta(payload.meta ?? null)
+      if (!d) throw new Error("Empty response.")
+      if (d.requires_job) {
+        await startJob(drawTarget, {
+          points: pts,
+          radius_miles: circleRadiusMiles,
+        })
+        setDrawTarget(null)
+      } else {
+        setData(d)
+        setDrawTarget(null)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Request failed")
+    } finally {
+      setLoading(false)
+    }
+  }
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
-    await submit()
+    if (isCustomMode) {
+      await resolveForDraw()
+    } else {
+      await submit()
+    }
   }
 
   function selectCandidate(c: Candidate) {
     if (c.lat == null || c.lng == null || !c.place_id) return
-    submit({
+    const override: SubmitOverride = {
       place_id: c.place_id,
       center_lat: c.lat,
       center_lng: c.lng,
       business_title: c.title,
-    })
+    }
+    if (isCustomMode) {
+      resolveForDraw(override)
+    } else {
+      submit(override)
+    }
   }
 
   function exportPdf() {
@@ -426,29 +608,48 @@ export default function GbpHeatmapPage() {
                       {p.label}
                     </SelectItem>
                   ))}
+                  <SelectItem value={CUSTOM_KEY}>Custom area (draw)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-            <p className="font-mono text-[11px] leading-relaxed text-ink-3 md:pb-2">
-              {est.points} vantage points · ~{est.edgeRadiusMiles.toFixed(0)} mi
-              radius (~{est.widthMiles.toFixed(0)}×{est.heightMiles.toFixed(0)} mi)
-              · est. ${est.estCostUsd.toFixed(2)}
-              {est.background ? (
-                <>
-                  {" · "}
-                  <span className="font-semibold text-amber-700">
-                    runs in background
-                  </span>
-                </>
-              ) : null}
-              <br />
-              <span className="text-ink-3/80">{preset.blurb}</span>
-            </p>
+            {isCustomMode ? (
+              <p className="font-mono text-[11px] leading-relaxed text-ink-3 md:pb-2">
+                Resolve the business, then drag a circle on the map to set the
+                area and density.
+                <br />
+                <span className="text-ink-3/80">
+                  Vantage points are generated inside the circle.
+                </span>
+              </p>
+            ) : est ? (
+              <p className="font-mono text-[11px] leading-relaxed text-ink-3 md:pb-2">
+                {est.points} vantage points · ~{est.edgeRadiusMiles.toFixed(0)}{" "}
+                mi radius (~{est.widthMiles.toFixed(0)}×
+                {est.heightMiles.toFixed(0)} mi) · est. $
+                {est.estCostUsd.toFixed(2)}
+                {est.background ? (
+                  <>
+                    {" · "}
+                    <span className="font-semibold text-amber-700">
+                      runs in background
+                    </span>
+                  </>
+                ) : null}
+                <br />
+                <span className="text-ink-3/80">{preset?.blurb}</span>
+              </p>
+            ) : (
+              <span />
+            )}
             <Button type="submit" disabled={busy}>
               {busy ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : null}
-              {est.background ? "Run Background Scan" : "Run Heatmap Scan"}
+              {isCustomMode
+                ? "Resolve & Draw Area"
+                : est?.background
+                  ? "Run Background Scan"
+                  : "Run Heatmap Scan"}
             </Button>
           </div>
         </form>
@@ -479,6 +680,25 @@ export default function GbpHeatmapPage() {
             />
           ) : busy ? (
             <ScanProgress background={jobId != null} progress={jobProgress} />
+          ) : drawTarget && circle && isCustomMode ? (
+            <CustomAreaPanel
+              target={drawTarget}
+              circle={circle}
+              onCircleChange={setCircle}
+              previewPoints={previewPoints}
+              spacingKm={customSpacingKm}
+              onSpacingChange={setCustomSpacingKm}
+              radiusMiles={circleRadiusMiles}
+              count={customCount}
+              overCap={customOverCap}
+              background={customBackground}
+              costUsd={customCount * DFS_MAPS_COST_PER_CALL}
+              onRun={runCustomScan}
+              onCancel={() => {
+                setDrawTarget(null)
+                setCircle(null)
+              }}
+            />
           ) : null}
         </>
       }
@@ -579,7 +799,15 @@ function ResultsView({
 
       <ToolSection
         title="Geographic Heatmap"
-        description={`${grid.rows}×${grid.cols} grid · ${grid.spacing_km}km spacing · ${grid.points.length} vantage points`}
+        description={
+          grid.custom
+            ? `Custom area · ${grid.points.length} vantage points${
+                grid.radius_miles
+                  ? ` · ~${grid.radius_miles.toFixed(1)} mi radius`
+                  : ""
+              }`
+            : `${grid.rows}×${grid.cols} grid · ${grid.spacing_km}km spacing · ${grid.points.length} vantage points`
+        }
       >
         <HeatmapPanel
           grid={grid}
@@ -646,6 +874,114 @@ function ScanProgress({
           : "~10-30 seconds. Resolving business, then running the grid SERP calls in parallel."}
       </p>
     </div>
+  )
+}
+
+function CustomAreaPanel({
+  target,
+  circle,
+  onCircleChange,
+  previewPoints,
+  spacingKm,
+  onSpacingChange,
+  radiusMiles,
+  count,
+  overCap,
+  background,
+  costUsd,
+  onRun,
+  onCancel,
+}: {
+  target: Target
+  circle: DrawnCircle
+  onCircleChange: (c: DrawnCircle) => void
+  previewPoints: { lat: number; lng: number }[]
+  spacingKm: number
+  onSpacingChange: (km: number) => void
+  radiusMiles: number
+  count: number
+  overCap: boolean
+  background: boolean
+  costUsd: number
+  onRun: () => void
+  onCancel: () => void
+}) {
+  if (!isGoogleMapsConfigured()) {
+    return (
+      <div className="rounded-xl border border-amber-300/60 bg-amber-50/60 px-5 py-4">
+        <p className="font-sans text-[13px] font-bold text-amber-900">
+          Custom-area scans need Google Maps
+        </p>
+        <p className="mt-1 font-serif text-[12px] text-amber-900/80">
+          Set <code>NEXT_PUBLIC_GOOGLE_MAPS_API_KEY</code> in Vercel env vars to
+          draw a custom area on the map. Use a preset coverage level in the
+          meantime.
+        </p>
+      </div>
+    )
+  }
+  return (
+    <ToolSection
+      title="Draw scan area"
+      description={`Centered on ${target.title}. Drag the circle to move it, drag the edge to resize.`}
+    >
+      <CircleDrawMap
+        center={{ lat: target.lat, lng: target.lng }}
+        circle={circle}
+        onCircleChange={onCircleChange}
+        previewPoints={previewPoints}
+      />
+      <div className="mt-3 flex flex-col gap-3 rounded-xl border border-line bg-card px-4 py-3 md:flex-row md:items-end md:justify-between">
+        <div className="flex flex-wrap items-end gap-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="density">Density</Label>
+            <Select
+              value={String(spacingKm)}
+              onValueChange={(v) => onSpacingChange(Number(v))}
+            >
+              <SelectTrigger id="density" className="w-[170px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CUSTOM_SPACINGS.map((s) => (
+                  <SelectItem key={s.km} value={String(s.km)}>
+                    {s.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <p className="font-mono text-[11px] leading-relaxed text-ink-3">
+            {count} vantage points · ~{radiusMiles.toFixed(1)} mi radius · est. $
+            {costUsd.toFixed(2)}
+            {overCap ? (
+              <>
+                <br />
+                <span className="font-semibold text-destructive">
+                  Over the {CUSTOM_MAX_POINTS}-point cap — increase density
+                  spacing or shrink the circle.
+                </span>
+              </>
+            ) : background ? (
+              <>
+                {" · "}
+                <span className="font-semibold text-amber-700">
+                  runs in background
+                </span>
+              </>
+            ) : null}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button type="button" variant="outline" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={onRun} disabled={overCap || count === 0}>
+            {background ? "Run Background Scan" : "Run Scan"}
+          </Button>
+        </div>
+      </div>
+    </ToolSection>
   )
 }
 
@@ -878,9 +1214,10 @@ function HeatmapPanel({
           onSelect={onSelect}
         />
         <div className="border-t border-line p-4 md:border-l md:border-t-0">
-          {/* Screen view: Google Maps (when configured), with SVG hidden. */}
-          {mapConfigured ? (
-            <div className="print:hidden">
+          {grid.custom ? (
+            // Custom areas have no row/col lattice, so the schematic SVG grid
+            // doesn't apply — they always render on the map.
+            mapConfigured ? (
               <HeatmapMap
                 grid={grid}
                 ranks={view.ranks}
@@ -888,19 +1225,36 @@ function HeatmapPanel({
                 markerLng={view.lng}
                 markerTitle={view.title}
               />
-            </div>
-          ) : (
-            <div className="print:hidden">
+            ) : (
               <MapSetupBanner />
-              <HeatmapGrid grid={grid} ranks={view.ranks} />
-            </div>
+            )
+          ) : (
+            <>
+              {/* Screen view: Google Maps (when configured), with SVG hidden. */}
+              {mapConfigured ? (
+                <div className="print:hidden">
+                  <HeatmapMap
+                    grid={grid}
+                    ranks={view.ranks}
+                    markerLat={view.lat}
+                    markerLng={view.lng}
+                    markerTitle={view.title}
+                  />
+                </div>
+              ) : (
+                <div className="print:hidden">
+                  <MapSetupBanner />
+                  <HeatmapGrid grid={grid} ranks={view.ranks} />
+                </div>
+              )}
+              {/* Print view: always use the SVG grid so the PDF renders
+                  deterministically without depending on Google Maps tile
+                  loading state. */}
+              <div className="hidden print:block">
+                <HeatmapGrid grid={grid} ranks={view.ranks} />
+              </div>
+            </>
           )}
-          {/* Print view: always use the SVG grid so the PDF renders
-              deterministically without depending on Google Maps tile
-              loading state. */}
-          <div className="hidden print:block">
-            <HeatmapGrid grid={grid} ranks={view.ranks} />
-          </div>
           <Legend />
         </div>
       </div>

@@ -213,6 +213,99 @@ export function buildGrid(
   return points
 }
 
+// ── Custom circle area ──────────────────────────────────────────────────────
+
+/**
+ * Hard cap on the number of vantage points a custom-drawn area may generate.
+ * Protects against a huge circle at tight spacing running away on cost/time.
+ * The UI surfaces this and asks the user to widen the spacing if exceeded.
+ */
+export const CUSTOM_MAX_POINTS = 150
+
+/** Great-circle distance in km between two lat/lng points. */
+function haversineKm(
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number,
+): number {
+  const R = 6371
+  const dLat = ((lat2 - lat1) * Math.PI) / 180
+  const dLng = ((lng2 - lng1) * Math.PI) / 180
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLng / 2) ** 2
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
+export interface LatLng {
+  lat: number
+  lng: number
+}
+
+/**
+ * Lay a square lattice (spacing `spacingKm`) over a circle's bounding box and
+ * keep the points that fall inside the circle. The center is always included.
+ * Pure — used by the UI to preview/estimate and to produce the exact point set
+ * that gets sent to the scan, so client preview and server scan never drift.
+ */
+export function pointsInCircle(
+  centerLat: number,
+  centerLng: number,
+  radiusMiles: number,
+  spacingKm: number,
+): LatLng[] {
+  const radiusKm = radiusMiles * KM_PER_MILE
+  const safeSpacing = Math.max(spacingKm, 0.1)
+  const latStep = safeSpacing / KM_PER_DEG_LAT
+  const lngStep =
+    safeSpacing / (KM_PER_DEG_LAT * Math.cos((centerLat * Math.PI) / 180))
+  const steps = Math.floor(radiusKm / safeSpacing)
+  const out: LatLng[] = []
+  for (let i = -steps; i <= steps; i++) {
+    for (let j = -steps; j <= steps; j++) {
+      const lat = centerLat + i * latStep
+      const lng = centerLng + j * lngStep
+      if (haversineKm(centerLat, centerLng, lat, lng) <= radiusKm) {
+        out.push({ lat, lng })
+      }
+    }
+  }
+  // Always sample the exact center, even at coarse spacing.
+  if (!out.some((p) => p.lat === centerLat && p.lng === centerLng)) {
+    out.unshift({ lat: centerLat, lng: centerLng })
+  }
+  return out
+}
+
+export interface CircleEstimate {
+  points: number
+  estCostUsd: number
+  /** True when the point count exceeds the synchronous ceiling. */
+  background: boolean
+  /** True when the point count exceeds CUSTOM_MAX_POINTS. */
+  overCap: boolean
+}
+
+/** Point count + cost estimate for a custom circle, mirroring estimateGrid. */
+export function estimateCircle(
+  centerLat: number,
+  centerLng: number,
+  radiusMiles: number,
+  spacingKm: number,
+): CircleEstimate {
+  const n = pointsInCircle(centerLat, centerLng, radiusMiles, spacingKm).length
+  return {
+    points: n,
+    estCostUsd: n * DFS_MAPS_COST_PER_CALL,
+    background: n > SYNC_MAX_POINTS,
+    overCap: n > CUSTOM_MAX_POINTS,
+  }
+}
+
+
 /**
  * Shape of a single Maps SERP item we care about. DFSEO returns more
  * fields; we only validate the ones we use.

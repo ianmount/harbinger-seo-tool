@@ -2,6 +2,7 @@ import { z } from "zod"
 import {
   buildGrid,
   computeKPIs,
+  CUSTOM_MAX_POINTS,
   extractMapsItems,
   findTargetRank,
   MAX_GRID_DIM,
@@ -39,6 +40,18 @@ const Input = z.object({
   center_lat: z.number().optional(),
   center_lng: z.number().optional(),
   business_title: z.string().optional(),
+  // Resolve the business and return the target/candidates without scanning.
+  // Used by the custom-area flow to center the map before the user draws.
+  resolve_only: z.boolean().optional(),
+  // Custom-area mode: an explicit list of vantage points to scan (drawn on the
+  // map). When present, the rectangular grid is ignored. Capped to keep cost
+  // bounded; the UI enforces the same cap before sending.
+  points: z
+    .array(z.object({ lat: z.number(), lng: z.number() }))
+    .min(1)
+    .max(CUSTOM_MAX_POINTS)
+    .optional(),
+  radius_miles: z.number().optional(),
 })
 
 type Status = "ok" | "ambiguous" | "not_found"
@@ -96,6 +109,9 @@ type Data = {
     cols: number
     spacing_km: number
     points: Point[]
+    /** Custom-drawn area instead of a rectangular grid (no row/col layout). */
+    custom?: boolean
+    radius_miles?: number
   }
   kpis?: {
     total: number
@@ -251,21 +267,42 @@ export async function POST(request: Request) {
       }
     }
 
-    // Large grids exceed what the 300s synchronous budget can scan. Hand the
-    // resolved target back to the client so it can kick off a background job
-    // (Inngest) instead of scanning here. The resolution cost is still
-    // charged; the job skips re-resolution by accepting `place_id` + center.
-    if (input.grid_rows * input.grid_cols > SYNC_MAX_POINTS) {
+    // Resolve-only: the custom-area flow needs the business center to draw the
+    // circle on the map before any scanning. Return the target and stop.
+    if (input.resolve_only) {
+      return {
+        data: {
+          status: "ok",
+          target: resolved,
+          endpoints_called: endpointsCalled,
+        },
+        endpoints: endpointsCalled,
+        costUsd: resolveCost,
+      }
+    }
+
+    // Custom-area mode scans an explicit point list; otherwise build the grid.
+    const isCustom = Array.isArray(input.points) && input.points.length > 0
+    const pointCount = isCustom
+      ? input.points!.length
+      : input.grid_rows * input.grid_cols
+
+    // Anything beyond the synchronous budget is handed back so the client can
+    // kick off a background job. The resolution cost is still charged; the job
+    // skips re-resolution by accepting `place_id` + center.
+    if (pointCount > SYNC_MAX_POINTS) {
       return {
         data: {
           status: "ok",
           requires_job: true,
           target: resolved,
           grid: {
-            rows: input.grid_rows,
-            cols: input.grid_cols,
-            spacing_km: input.spacing_km,
+            rows: isCustom ? 0 : input.grid_rows,
+            cols: isCustom ? 0 : input.grid_cols,
+            spacing_km: isCustom ? 0 : input.spacing_km,
             points: [],
+            custom: isCustom,
+            radius_miles: input.radius_miles,
           },
           endpoints_called: endpointsCalled,
         },
@@ -274,16 +311,23 @@ export async function POST(request: Request) {
       }
     }
 
-    // Branch 3: scan. Build the grid, fire one Maps SERP call per point in
-    // parallel, then aggregate. Each call costs ~$0.003; 35 points ≈
-    // $0.10.
-    const gridPoints = buildGrid(
-      resolved.lat,
-      resolved.lng,
-      input.grid_rows,
-      input.grid_cols,
-      input.spacing_km,
-    )
+    // Branch 3: scan. Fire one Maps SERP call per vantage point in parallel,
+    // then aggregate. Each call costs ~$0.003.
+    const gridPoints: { row: number; col: number; lat: number; lng: number }[] =
+      isCustom
+      ? input.points!.map((p, i) => ({
+          row: 0,
+          col: i,
+          lat: p.lat,
+          lng: p.lng,
+        }))
+      : buildGrid(
+          resolved.lat,
+          resolved.lng,
+          input.grid_rows,
+          input.grid_cols,
+          input.spacing_km,
+        )
 
     type ScanResult = {
       point: { row: number; col: number; lat: number; lng: number }
@@ -332,10 +376,12 @@ export async function POST(request: Request) {
         status: "ok",
         target: resolved,
         grid: {
-          rows: input.grid_rows,
-          cols: input.grid_cols,
-          spacing_km: input.spacing_km,
+          rows: isCustom ? 0 : input.grid_rows,
+          cols: isCustom ? 0 : input.grid_cols,
+          spacing_km: isCustom ? 0 : input.spacing_km,
           points,
+          custom: isCustom,
+          radius_miles: input.radius_miles,
         },
         kpis: {
           total: kpis.total,
