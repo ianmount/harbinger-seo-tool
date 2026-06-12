@@ -420,6 +420,42 @@ export function computeKPIs(points: readonly GridPointResult[]): HeatmapKPIs {
 }
 
 /**
+ * Position-range buckets shown in the KPI grid and the PDF. Non-overlapping
+ * by design (1–3, 4–10, 11–20, then everything else / not found), matching the
+ * thresholds in `bucketRank`. Colors match the map legend.
+ */
+export interface PositionBucket {
+  label: string
+  color: string
+  count: number
+  total: number
+  pct: number
+}
+
+export function positionBuckets(
+  ranks: readonly (number | null)[],
+): PositionBucket[] {
+  const defs: { label: string; color: string; match: (r: RankBucket) => boolean }[] =
+    [
+      { label: "Position 1–3", color: "#0F6E56", match: (b) => b === "good" },
+      { label: "Position 4–10", color: "#EF9F27", match: (b) => b === "average" },
+      { label: "Position 11–20", color: "#D85A30", match: (b) => b === "poor" },
+      { label: "Not in top 20", color: "#9D9D9D", match: (b) => b === "oot20" },
+    ]
+  const total = ranks.length
+  return defs.map((d) => {
+    const count = ranks.filter((r) => d.match(bucketRank(r))).length
+    return {
+      label: d.label,
+      color: d.color,
+      count,
+      total,
+      pct: total > 0 ? (count / total) * 100 : 0,
+    }
+  })
+}
+
+/**
  * Roll competitor appearances up across all grid points. Each non-target
  * business that appears in any grid point's top-N is counted; we surface
  * the top 20 by average rank.

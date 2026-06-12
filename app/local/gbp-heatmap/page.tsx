@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState, type FormEvent } from "react"
-import { Loader2, MapPin, Printer, Star } from "lucide-react"
+import { Download, Loader2, MapPin, Star } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { JobsForKindCard } from "@/components/JobsForKindCard"
+import { HeatmapExportDialog } from "@/components/tool/HeatmapExportDialog"
 import { MarketPicker } from "@/components/tool/MarketPicker"
 import { ToolShell } from "@/components/tool/ToolShell"
 import {
@@ -203,6 +204,7 @@ export default function GbpHeatmapPage() {
   const [loading, setLoading] = useState(false)
   const [jobId, setJobId] = useState<string | null>(null)
   const [jobProgress, setJobProgress] = useState<JobProgress | null>(null)
+  const [exportOpen, setExportOpen] = useState(false)
 
   // Custom-area (circle) mode.
   const [drawTarget, setDrawTarget] = useState<Target | null>(null)
@@ -546,10 +548,11 @@ export default function GbpHeatmapPage() {
   }
 
   function exportPdf() {
-    if (typeof window !== "undefined") window.print()
+    setExportOpen(true)
   }
 
   return (
+    <>
     <ToolShell
       category="Local"
       title={tool.label}
@@ -703,6 +706,44 @@ export default function GbpHeatmapPage() {
         </>
       }
     />
+      {data && data.status === "ok" && data.target && data.grid ? (
+        <HeatmapExportDialog
+          open={exportOpen}
+          onOpenChange={setExportOpen}
+          business={data.target.title || business}
+          keyword={keyword}
+          areaLabel={
+            data.grid.custom
+              ? `Custom area · ${data.grid.points.length} vantage points${
+                  data.grid.radius_miles
+                    ? ` · ~${data.grid.radius_miles.toFixed(1)} mi radius`
+                    : ""
+                }`
+              : `${data.grid.rows}×${data.grid.cols} grid · ${data.grid.spacing_km}km spacing · ${data.grid.points.length} vantage points`
+          }
+          points={data.grid.points.map((p) => ({ lat: p.lat, lng: p.lng }))}
+          target={{
+            title: data.target.title,
+            rating: data.target.rating,
+            ratingCount: data.target.rating_count,
+            address: data.target.address,
+            lat: data.target.lat,
+            lng: data.target.lng,
+            ranks: data.grid.points.map((p) => p.rank),
+          }}
+          competitors={(data.competitors ?? []).map((c) => ({
+            key: competitorKey(c),
+            title: c.title,
+            rating: c.rating,
+            ratingCount: c.rating_count,
+            address: c.address,
+            lat: c.lat,
+            lng: c.lng,
+            ranks: c.ranks,
+          }))}
+        />
+      ) : null}
+    </>
   )
 }
 
@@ -774,6 +815,14 @@ function ResultsView({
   return (
     <div className="space-y-6">
       <PrintHeader keyword={keyword} target={target} viewTitle={view.title} />
+      <div className="flex flex-wrap items-center gap-2.5 print:hidden">
+        <span className="rounded-md bg-foreground px-2.5 py-1 font-sans text-[10px] font-bold uppercase tracking-[0.12em] text-background">
+          Keyword
+        </span>
+        <span className="font-sans text-[16px] font-semibold text-foreground">
+          {keyword || "—"}
+        </span>
+      </div>
       <ToolSection title={view.kind === "target" ? "Target Business" : "Viewing competitor"}>
         <div className="flex items-start justify-between gap-3">
           <div className="flex-1">
@@ -786,14 +835,17 @@ function ResultsView({
               onClick={onExport}
               className="shrink-0"
             >
-              <Printer className="mr-2 h-4 w-4" />
+              <Download className="mr-2 h-4 w-4" />
               Export PDF
             </Button>
           </div>
         </div>
       </ToolSection>
 
-      <ToolSection title="Rank KPIs">
+      <ToolSection
+        title="Rank KPIs"
+        description="Vantage points by Google Maps position for this keyword."
+      >
         <KpiGrid kpis={view.kpis} />
       </ToolSection>
 
@@ -1122,27 +1174,27 @@ function KpiGrid({ kpis }: { kpis: Kpis }) {
       color: undefined,
     },
     {
-      label: "Good",
-      value: `${pct(kpis.good, kpis.total)}%`,
-      sub: `${kpis.good} of ${kpis.total}`,
+      label: "Position 1–3",
+      value: `${kpis.good}`,
+      sub: `${pct(kpis.good, kpis.total)}% of ${kpis.total} pts`,
       color: "#0F6E56",
     },
     {
-      label: "Average",
-      value: `${pct(kpis.average, kpis.total)}%`,
-      sub: `${kpis.average} of ${kpis.total}`,
+      label: "Position 4–10",
+      value: `${kpis.average}`,
+      sub: `${pct(kpis.average, kpis.total)}% of ${kpis.total} pts`,
       color: "#EF9F27",
     },
     {
-      label: "Poor",
-      value: `${pct(kpis.poor, kpis.total)}%`,
-      sub: `${kpis.poor} of ${kpis.total}`,
+      label: "Position 11–20",
+      value: `${kpis.poor}`,
+      sub: `${pct(kpis.poor, kpis.total)}% of ${kpis.total} pts`,
       color: "#D85A30",
     },
     {
-      label: "Out of top 20",
-      value: `${pct(kpis.oot20, kpis.total)}%`,
-      sub: `${kpis.oot20} of ${kpis.total}`,
+      label: "Not in top 20",
+      value: `${kpis.oot20}`,
+      sub: `${pct(kpis.oot20, kpis.total)}% of ${kpis.total} pts`,
       color: "#9D9D9D",
     },
   ]
