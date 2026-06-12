@@ -56,13 +56,15 @@ const InputSchema = z.object({
 
 const MAPS_SERP_ENDPOINT = "/v3/serp/google/maps/live/advanced"
 const MAPS_DEPTH = 100
-const MAPS_CONCURRENCY = 10
+const MAPS_CONCURRENCY = 12
 const MAPS_ZOOM = "12z"
-// Points scanned per step.run. One concurrency wave per step keeps each
-// Inngest step short (so a slow DataForSEO response can't push a single
-// invocation toward the function ceiling) and lets progress advance every
-// BATCH_POINTS rather than freezing for a third of the scan at a time.
-const BATCH_POINTS = MAPS_CONCURRENCY
+// Points scanned per step.run (~2 concurrency waves). Each step stays well
+// under the 800s function ceiling even if DataForSEO is slow, writes a
+// progress update on entry (so `updated_at` keeps moving and the 18-min stale
+// sweeper never kills an actively-progressing run), and — because the GBP
+// heatmap function runs with retries — is the unit that gets re-billed if a
+// single batch's invocation fails transiently. A 441-point grid is ~19 steps.
+const BATCH_POINTS = 24
 // Only the top-ranked businesses at each vantage point feed the competitor
 // rollup. The sidebar surfaces the 20 strongest competitors across the grid,
 // so a business sitting at rank 70 at one point is noise — and dropping it
