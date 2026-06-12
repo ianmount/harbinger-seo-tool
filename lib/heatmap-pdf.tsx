@@ -1,6 +1,7 @@
 import {
   Circle,
   Document,
+  Image,
   Line,
   Page,
   pdf,
@@ -17,14 +18,14 @@ import { positionBuckets, rankColor } from "@/lib/gbp-heatmap"
  * Client-side GBP Heatmap PDF.
  *
  * Each selected business (target + chosen competitors) gets a page with a
- * geographic "snapshot" of its rank across the scanned vantage points and the
- * position-range KPIs. The snapshot is drawn as a native @react-pdf SVG
- * (points projected from lat/lng, colored by rank) rather than a screenshot of
- * the live Google map — Google's vector/WebGL tiles can't be reliably captured
- * into a canvas/PDF from the browser, and an SVG renders deterministically.
- *
- * Built in the browser via `pdf(...).toBlob()`; the module is dynamically
- * imported so @react-pdf isn't in the page's initial bundle.
+ * geographic "snapshot" — the scanned vantage points colored by rank — drawn
+ * over a real Google street map. The base map is a Static Maps image fetched
+ * via our server proxy (the browser can't read Google's image bytes directly
+ * because Static Maps sends no CORS headers); the rank dots are overlaid as a
+ * native @react-pdf SVG, projected with the same Web-Mercator math the Static
+ * Maps API uses so they line up with the streets. If the base map can't be
+ * fetched (key restricted / Static Maps API off), we fall back to a plain
+ * vector snapshot so the export still works.
  */
 
 export interface HeatmapPdfEntity {
@@ -99,6 +100,9 @@ const styles = StyleSheet.create({
   entityTitle: { fontSize: 13, fontFamily: "Helvetica-Bold", color: C.ink },
   badge: { fontSize: 7.5, color: C.muted, fontFamily: "Helvetica-Bold", marginTop: 2 },
   rating: { fontSize: 9, color: C.muted },
+  snapshot: { marginTop: 12, position: "relative" },
+  snapshotImg: { position: "absolute", top: 0, left: 0, borderRadius: 6 },
+  snapshotSvg: { position: "absolute", top: 0, left: 0 },
   kpis: { flexDirection: "row", gap: 8, marginTop: 12 },
   kpiCard: {
     flex: 1,
@@ -130,7 +134,78 @@ const styles = StyleSheet.create({
 
 const SNAP_W = 523
 const SNAP_H = 300
-const PAD = 26
+const PAD = 30
+const TILE = 256
+
+// ── Web-Mercator (matches Google Static Maps projection) ─────────────────────
+
+function lngToWorldX(lng: number): number {
+  return ((lng + 180) / 360) * TILE
+}
+function latToWorldY(lat: number): number {
+  const s = Math.min(Math.max(Math.sin((lat * Math.PI) / 180), -0.9999), 0.9999)
+  return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * TILE
+}
+function worldYToLat(y: number): number {
+  const a = (0.5 - y / TILE) * 4 * Math.PI
+  const e = Math.exp(a)
+  return (Math.asin((e - 1) / (e + 1)) * 180) / Math.PI
+}
+
+interface ViewParams {
+  centerLat: number
+  centerLng: number
+  zoom: number
+}
+
+/** Center + zoom that fits all points inside a w×h box with padding. */
+function fitView(
+  points: { lat: number; lng: number }[],
+  w: number,
+  h: number,
+  pad: number,
+): ViewParams {
+  const xs = points.map((p) => lngToWorldX(p.lng))
+  const ys = points.map((p) => latToWorldY(p.lat))
+  const minX = Math.min(...xs)
+  const maxX = Math.max(...xs)
+  const minY = Math.min(...ys)
+  const maxY = Math.max(...ys)
+  const dx = maxX - minX || 1e-6
+  const dy = maxY - minY || 1e-6
+  const zoom = Math.max(
+    0,
+    Math.min(
+      20,
+      Math.floor(
+        Math.min(Math.log2((w - 2 * pad) / dx), Math.log2((h - 2 * pad) / dy)),
+      ),
+    ),
+  )
+  const cWorldX = (minX + maxX) / 2
+  const cWorldY = (minY + maxY) / 2
+  return {
+    centerLat: worldYToLat(cWorldY),
+    centerLng: (cWorldX / TILE) * 360 - 180,
+    zoom,
+  }
+}
+
+function projectPoint(
+  lat: number,
+  lng: number,
+  view: ViewParams,
+  w: number,
+  h: number,
+): { x: number; y: number } {
+  const scale = 2 ** view.zoom
+  const cwx = lngToWorldX(view.centerLng) * scale
+  const cwy = latToWorldY(view.centerLat) * scale
+  return {
+    x: w / 2 + (lngToWorldX(lng) * scale - cwx),
+    y: h / 2 + (latToWorldY(lat) * scale - cwy),
+  }
+}
 
 function avgRank(ranks: (number | null)[]): number | null {
   const nums = ranks.filter((r): r is number => typeof r === "number")
@@ -138,82 +213,97 @@ function avgRank(ranks: (number | null)[]): number | null {
   return nums.reduce((a, b) => a + b, 0) / nums.length
 }
 
-/** Project lat/lng points into the snapshot box (lat inverted for screen y). */
-function project(
-  points: { lat: number; lng: number }[],
-): { x: number; y: number }[] {
-  if (points.length === 0) return []
-  const lats = points.map((p) => p.lat)
-  const lngs = points.map((p) => p.lng)
-  const minLat = Math.min(...lats)
-  const maxLat = Math.max(...lats)
-  const minLng = Math.min(...lngs)
-  const maxLng = Math.max(...lngs)
-  const latSpan = maxLat - minLat || 0.001
-  const lngSpan = maxLng - minLng || 0.001
-  return points.map((p) => ({
-    x: PAD + ((p.lng - minLng) / lngSpan) * (SNAP_W - 2 * PAD),
-    y: PAD + ((maxLat - p.lat) / latSpan) * (SNAP_H - 2 * PAD),
-  }))
+async function fetchBaseMap(view: ViewParams): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `/api/tools/local/gbp-heatmap/staticmap?center_lat=${view.centerLat}` +
+        `&center_lng=${view.centerLng}&zoom=${view.zoom}&w=${SNAP_W}&h=${SNAP_H}`,
+    )
+    if (!res.ok) return null
+    const blob = await res.blob()
+    return await new Promise<string | null>((resolve) => {
+      const fr = new FileReader()
+      fr.onload = () => resolve(typeof fr.result === "string" ? fr.result : null)
+      fr.onerror = () => resolve(null)
+      fr.readAsDataURL(blob)
+    })
+  } catch {
+    return null
+  }
 }
 
+// ── Document ─────────────────────────────────────────────────────────────────
+
 function Snapshot({
-  points,
+  xy,
   ranks,
-  markerLat,
-  markerLng,
+  markerXY,
+  baseMap,
 }: {
-  points: { lat: number; lng: number }[]
+  xy: { x: number; y: number }[]
   ranks: (number | null)[]
-  markerLat: number | null
-  markerLng: number | null
+  markerXY: { x: number; y: number } | null
+  baseMap: string | null
 }) {
-  const xy = project(points)
-  const showNumbers = points.length <= 80
-  const r = points.length > 90 ? 5 : points.length > 49 ? 7 : 9
-  // Project the business/competitor marker into the same box.
-  let marker: { x: number; y: number } | null = null
-  if (markerLat != null && markerLng != null) {
-    const [m] = project([
-      ...points,
-      { lat: markerLat, lng: markerLng },
-    ]).slice(-1)
-    marker = m ?? null
-  }
+  const showNumbers = xy.length <= 80
+  const r = xy.length > 90 ? 5 : xy.length > 49 ? 7 : 9
+  const inBox = (p: { x: number; y: number }) =>
+    p.x >= -10 && p.x <= SNAP_W + 10 && p.y >= -10 && p.y <= SNAP_H + 10
   return (
-    <View style={{ marginTop: 12 }}>
-      <Svg width={SNAP_W} height={SNAP_H}>
-        <Rect
-          x={0}
-          y={0}
-          width={SNAP_W}
-          height={SNAP_H}
-          rx={6}
-          fill={C.paper}
-          stroke={C.hairline}
+    <View style={[styles.snapshot, { width: SNAP_W, height: SNAP_H }]}>
+      {baseMap ? (
+        // eslint-disable-next-line jsx-a11y/alt-text -- @react-pdf Image, not HTML img
+        <Image
+          src={baseMap}
+          style={[styles.snapshotImg, { width: SNAP_W, height: SNAP_H }]}
         />
-        {/* faint reference gridlines */}
-        {[0.25, 0.5, 0.75].map((f) => (
-          <Line
-            key={`v${f}`}
-            x1={f * SNAP_W}
-            y1={0}
-            x2={f * SNAP_W}
-            y2={SNAP_H}
-            stroke="#E8E6DB"
+      ) : null}
+      <Svg width={SNAP_W} height={SNAP_H} style={styles.snapshotSvg}>
+        {!baseMap ? (
+          <>
+            <Rect
+              x={0}
+              y={0}
+              width={SNAP_W}
+              height={SNAP_H}
+              rx={6}
+              fill={C.paper}
+              stroke={C.hairline}
+            />
+            {[0.25, 0.5, 0.75].map((f) => (
+              <Line
+                key={`v${f}`}
+                x1={f * SNAP_W}
+                y1={0}
+                x2={f * SNAP_W}
+                y2={SNAP_H}
+                stroke="#E8E6DB"
+              />
+            ))}
+            {[0.25, 0.5, 0.75].map((f) => (
+              <Line
+                key={`h${f}`}
+                x1={0}
+                y1={f * SNAP_H}
+                x2={SNAP_W}
+                y2={f * SNAP_H}
+                stroke="#E8E6DB"
+              />
+            ))}
+          </>
+        ) : (
+          <Rect
+            x={0}
+            y={0}
+            width={SNAP_W}
+            height={SNAP_H}
+            rx={6}
+            fill="transparent"
+            stroke={C.hairline}
           />
-        ))}
-        {[0.25, 0.5, 0.75].map((f) => (
-          <Line
-            key={`h${f}`}
-            x1={0}
-            y1={f * SNAP_H}
-            x2={SNAP_W}
-            y2={f * SNAP_H}
-            stroke="#E8E6DB"
-          />
-        ))}
+        )}
         {xy.map((p, i) => {
+          if (!inBox(p)) return null
           const rank = ranks[i] ?? null
           return (
             <React.Fragment key={i}>
@@ -223,7 +313,7 @@ function Snapshot({
                 r={r}
                 fill={rankColor(rank)}
                 stroke="#FFFFFF"
-                strokeWidth={1}
+                strokeWidth={1.25}
               />
               {showNumbers ? (
                 <Text
@@ -239,10 +329,10 @@ function Snapshot({
             </React.Fragment>
           )
         })}
-        {marker ? (
+        {markerXY && inBox(markerXY) ? (
           <Circle
-            cx={marker.x}
-            cy={marker.y}
+            cx={markerXY.x}
+            cy={markerXY.y}
             r={5}
             fill={C.brandRed}
             stroke="#FFFFFF"
@@ -255,10 +345,9 @@ function Snapshot({
 }
 
 function Buckets({ ranks }: { ranks: (number | null)[] }) {
-  const buckets = positionBuckets(ranks)
   return (
     <View style={styles.kpis}>
-      {buckets.map((b) => (
+      {positionBuckets(ranks).map((b) => (
         <View key={b.label} style={styles.kpiCard}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
             <Svg width={8} height={8}>
@@ -279,13 +368,23 @@ function Buckets({ ranks }: { ranks: (number | null)[] }) {
 function EntityPage({
   data,
   entity,
+  xy,
+  view,
+  baseMap,
 }: {
   data: HeatmapPdfData
   entity: HeatmapPdfEntity
+  xy: { x: number; y: number }[]
+  view: ViewParams
+  baseMap: string | null
 }) {
   const ar = avgRank(entity.ranks)
   const found = entity.ranks.filter((r) => typeof r === "number").length
   const sov = positionBuckets(entity.ranks)[0]
+  const markerXY =
+    entity.markerLat != null && entity.markerLng != null
+      ? projectPoint(entity.markerLat, entity.markerLng, view, SNAP_W, SNAP_H)
+      : null
   return (
     <Page size="A4" style={styles.page}>
       <Text style={styles.eyebrow}>GBP Geo-Grid Heatmap</Text>
@@ -315,12 +414,7 @@ function EntityPage({
         </Text>
       </View>
 
-      <Snapshot
-        points={data.points}
-        ranks={entity.ranks}
-        markerLat={entity.markerLat}
-        markerLng={entity.markerLng}
-      />
+      <Snapshot xy={xy} ranks={entity.ranks} markerXY={markerXY} baseMap={baseMap} />
 
       <View style={styles.legend}>
         {positionBuckets(entity.ranks).map((b) => (
@@ -366,20 +460,50 @@ function EntityPage({
   )
 }
 
-function HeatmapReport({ data }: { data: HeatmapPdfData }) {
+function HeatmapReport({
+  data,
+  xy,
+  view,
+  baseMap,
+}: {
+  data: HeatmapPdfData
+  xy: { x: number; y: number }[]
+  view: ViewParams
+  baseMap: string | null
+}) {
   return (
     <Document
       title={`GBP Heatmap — ${data.business} — ${data.keyword}`}
       author="Harbinger SEO"
     >
-      <EntityPage data={data} entity={data.target} />
+      <EntityPage
+        data={data}
+        entity={data.target}
+        xy={xy}
+        view={view}
+        baseMap={baseMap}
+      />
       {data.competitors.map((c, i) => (
-        <EntityPage key={i} data={data} entity={c} />
+        <EntityPage
+          key={i}
+          data={data}
+          entity={c}
+          xy={xy}
+          view={view}
+          baseMap={baseMap}
+        />
       ))}
     </Document>
   )
 }
 
 export async function buildHeatmapPdfBlob(data: HeatmapPdfData): Promise<Blob> {
-  return pdf(<HeatmapReport data={data} />).toBlob()
+  // One shared base map + projection for the scanned area (geography is the
+  // same across entities; only the dot colors differ per business).
+  const view = fitView(data.points, SNAP_W, SNAP_H, PAD)
+  const xy = data.points.map((p) => projectPoint(p.lat, p.lng, view, SNAP_W, SNAP_H))
+  const baseMap = await fetchBaseMap(view)
+  return pdf(
+    <HeatmapReport data={data} xy={xy} view={view} baseMap={baseMap} />,
+  ).toBlob()
 }
