@@ -73,84 +73,69 @@ const TASKS: Partial<Record<JobKind, TaskRunner>> = {
  * invocation, body re-executes from scratch on Inngest re-invocation if it
  * fails before completing).
  */
-const CHUNKED_TASKS = new Set<JobKind>([
-  "comp_analysis",
-  "keyword_research",
-  "gbp_heatmap",
-])
+const CHUNKED_TASKS = new Set<JobKind>(["comp_analysis", "keyword_research"])
 
 /**
- * Shared onFailure handler. Runs in a separate Inngest invocation when a job
- * function exhausts its retries (or fails with retries:0) for any reason —
- * including Vercel's hard 800s function-timeout kill, instance recycles, and
- * OOM crashes. Without this, a killed function leaves its background_jobs row
- * stuck in `running` (the runtime is dead before the catch block fires).
- */
-async function onJobFailure({
-  event,
-  error,
-}: {
-  event: { data: unknown }
-  error: unknown
-}): Promise<void> {
-  // The original event is wrapped under event.data.event when invoked via the
-  // Inngest failure pipeline.
-  const original = (event.data as { event?: { data?: { jobId?: string } } })
-    .event
-  const jobId = original?.data?.jobId
-  if (!jobId) return
-  const message =
-    error instanceof Error ? error.message : String(error ?? "Unknown error")
-  try {
-    const row = await getJob(jobId)
-    if (!row) return
-    if (
-      row.status === "completed" ||
-      row.status === "failed" ||
-      row.status === "cancelled"
-    ) {
-      return
-    }
-    await failJob(
-      jobId,
-      message.includes("function") || message.toLowerCase().includes("timeout")
-        ? `Function timed out or was killed before finishing: ${message}`
-        : message,
-    )
-    const finalized = (await getJob(jobId)) ?? row
-    await sendJobCompletionEmail(finalized)
-  } catch (cleanupErr) {
-    console.error(`[onFailure] cleanup for job ${jobId} threw:`, cleanupErr)
-  }
-}
-
-/**
- * The dispatcher body, parameterised by which kinds a given Inngest function
- * is responsible for. Both functions subscribe to `jobs/run`; each loads the
- * row and bails immediately if `handles(kind)` is false, so exactly one runs a
- * given job to completion (partitioned by kind, no double markRunning).
+ * The single Inngest function. One event (`jobs/run`) feeds it; it pulls the
+ * row, dispatches by kind, and finalizes. Per-kind concurrency / rate limits
+ * can be added later by splitting into one function per kind — for now the
+ * task volume is tiny and a shared worker is enough.
  *
- * Splitting the worker this way lets the GBP heatmap function carry its own
- * retry policy. The shared `run-job` function keeps `retries: 0` because most
- * tasks make paid API calls inside a single un-checkpointed step, so a retry
- * would re-bill the whole task. The GBP heatmap function opts into retries
- * (see below) — safe there because every paid call lives inside a memoised
- * `step.run`, so a retry only re-runs the one failed batch.
+ * `retries: 0` because every task in this app makes external API calls
+ * worth real money (Claude, DataForSEO). A retry on a partial failure could
+ * double-charge. Tasks that *want* retries can opt in by re-throwing inside
+ * step.run blocks once we get there.
+ *
+ * `onFailure` runs in a separate Inngest invocation when the main function
+ * fails for any reason — including Vercel's hard 800s function-timeout
+ * kill, instance recycles, and out-of-memory crashes. Without this, a
+ * function that hits the timeout leaves its background_jobs row stuck in
+ * `running` forever (the runtime is dead before the catch block fires).
  */
-async function runJobBody(
-  ctx: {
-    event: { data: { jobId?: string } }
-    step: StepTools
-    logger: {
-      info: (...a: unknown[]) => void
-      error: (...a: unknown[]) => void
-    }
-  },
-  handles: (kind: JobKind) => boolean,
-) {
-  const { event, step, logger } = ctx
+export const runJobFunction = inngest.createFunction(
   {
-    const jobId = event.data.jobId
+    id: "run-job",
+    name: "Run background job",
+    retries: 0,
+    triggers: [{ event: "jobs/run" }],
+    onFailure: async ({ event, error }) => {
+      // The original event is wrapped under event.data.event when invoked
+      // via the Inngest failure pipeline.
+      const original = (event.data as { event?: { data?: { jobId?: string } } })
+        .event
+      const jobId = original?.data?.jobId
+      if (!jobId) return
+      const message =
+        error instanceof Error ? error.message : String(error ?? "Unknown error")
+      try {
+        const row = await getJob(jobId)
+        if (!row) return
+        if (
+          row.status === "completed" ||
+          row.status === "failed" ||
+          row.status === "cancelled"
+        ) {
+          return
+        }
+        await failJob(
+          jobId,
+          message.includes("function") ||
+            message.toLowerCase().includes("timeout")
+            ? `Function timed out or was killed before finishing: ${message}`
+            : message,
+        )
+        const finalized = (await getJob(jobId)) ?? row
+        await sendJobCompletionEmail(finalized)
+      } catch (cleanupErr) {
+        console.error(
+          `[onFailure] cleanup for job ${jobId} threw:`,
+          cleanupErr,
+        )
+      }
+    },
+  },
+  async ({ event, step, logger }) => {
+    const jobId = event.data.jobId as string | undefined
     if (!jobId) throw new Error("jobs/run event missing jobId")
 
     const job = await step.run("load-job", async () => {
@@ -158,11 +143,6 @@ async function runJobBody(
       if (!row) throw new Error(`Job ${jobId} not found`)
       return row
     })
-
-    // Kind partitioning: the other function owns this job.
-    if (!handles(job.kind)) {
-      return { skipped: true, reason: "kind-not-handled", kind: job.kind }
-    }
 
     if (job.status !== "queued") {
       // Defensive: if a duplicate event lands, don't re-run a job that's
@@ -217,7 +197,8 @@ async function runJobBody(
       const isCancelled =
         err instanceof JobCancelledError ||
         (err as { name?: string })?.name === "JobCancelledError" ||
-        (err instanceof Error && err.message.includes("JobCancelledError"))
+        (err instanceof Error &&
+          err.message.includes("JobCancelledError"))
 
       if (isCancelled) {
         logger.info(`Job ${jobId} cancelled`)
@@ -225,17 +206,13 @@ async function runJobBody(
           cancelJob(jobId, "Cancelled by user"),
         )
       } else {
-        // Re-throw so Inngest's retry machinery (for functions that have
-        // retries) gets a chance to re-run the failed step from its memoised
-        // checkpoint. The retry replays completed steps and only re-executes
-        // the one that threw. onJobFailure marks the row failed once retries
-        // are exhausted. (For retries:0 functions this is equivalent to the
-        // previous catch-and-fail behaviour.)
         const message = err instanceof Error ? err.message : String(err)
         logger.error(`Job ${jobId} failed:`, err)
-        throw err instanceof Error ? err : new Error(message)
+        await step.run("fail-job", () => failJob(jobId, message))
       }
     }
+    // Note: no separate "complete-job" step. completeJob() was called inside
+    // run-task above — that's where the row flips to status=completed.
     void runResult
 
     const final = (await getJob(jobId)) ?? job
@@ -245,42 +222,7 @@ async function runJobBody(
       await step.run("send-email", () => sendJobCompletionEmail(final))
     }
     return { ok: final.status === "completed", status: final.status }
-  }
-}
-
-/**
- * Default worker: every kind except GBP heatmap. `retries: 0` — most tasks run
- * their paid work in a single un-checkpointed step, so a retry would re-bill.
- */
-export const runJobFunction = inngest.createFunction(
-  {
-    id: "run-job",
-    name: "Run background job",
-    retries: 0,
-    triggers: [{ event: "jobs/run" }],
-    onFailure: onJobFailure,
   },
-  (ctx) => runJobBody(ctx, (kind) => kind !== "gbp_heatmap"),
 )
 
-/**
- * GBP heatmap worker. Opts into retries because the scan is chunked into
- * `step.run` batches: a transient invocation failure (cold start, 5xx, recycle)
- * on any one of the many steps a large grid produces would otherwise abandon
- * the whole run with `retries: 0`, leaving the row to be killed by the 18-min
- * stale sweeper. With retries, Inngest replays the memoised completed batches
- * and re-runs only the failed one — so the re-bill is bounded to a single batch
- * of Maps calls, not the whole scan.
- */
-export const runGbpHeatmapJobFunction = inngest.createFunction(
-  {
-    id: "run-gbp-heatmap-job",
-    name: "Run GBP heatmap job",
-    retries: 3,
-    triggers: [{ event: "jobs/run" }],
-    onFailure: onJobFailure,
-  },
-  (ctx) => runJobBody(ctx, (kind) => kind === "gbp_heatmap"),
-)
-
-export const inngestFunctions = [runJobFunction, runGbpHeatmapJobFunction]
+export const inngestFunctions = [runJobFunction]

@@ -27,11 +27,15 @@ import { dfsCost } from "@/lib/tool-route"
  * route passes the resolved `target` (place_id + center) in the job input, so
  * there's no second my_business_info call and no disambiguation to handle.
  *
- * The scan is chunked across `step.run` batches so cumulative wall-clock can
- * exceed a single Vercel invocation's ceiling (Inngest re-invokes between
- * steps). Each batch returns a *slim* projection of the Maps SERP items it
- * saw — only the fields the rollup needs — to stay well under Inngest's
- * per-step output limit even on a 441-point grid.
+ * The whole scan runs inside the dispatcher's single `run-task` step (one
+ * Vercel invocation), not chunked across Inngest steps. At MAPS_CONCURRENCY
+ * the largest supported grid (441 points) finishes in ~6-10 min, well under
+ * the 800s ceiling, so cross-invocation chunking isn't needed — and avoiding
+ * it keeps the job on the single, already-registered Inngest function (a
+ * separate function risks not being registered on deploy, which strands jobs
+ * in `queued`). The heavy result is written straight to Supabase by the
+ * dispatcher's `completeJob`, so it never passes through Inngest's serialized
+ * step output. Progress + cancellation are checked every BATCH_POINTS points.
  */
 
 const TargetSchema = z.object({
@@ -56,14 +60,13 @@ const InputSchema = z.object({
 
 const MAPS_SERP_ENDPOINT = "/v3/serp/google/maps/live/advanced"
 const MAPS_DEPTH = 100
-const MAPS_CONCURRENCY = 12
+const MAPS_CONCURRENCY = 16
 const MAPS_ZOOM = "12z"
-// Points scanned per step.run (~2 concurrency waves). Each step stays well
-// under the 800s function ceiling even if DataForSEO is slow, writes a
-// progress update on entry (so `updated_at` keeps moving and the 18-min stale
-// sweeper never kills an actively-progressing run), and — because the GBP
-// heatmap function runs with retries — is the unit that gets re-billed if a
-// single batch's invocation fails transiently. A 441-point grid is ~19 steps.
+// Points per progress checkpoint. The whole scan runs inside one Inngest step
+// (one Vercel invocation), so this no longer bounds an Inngest step — it just
+// sets how often we write a progress update and check for cancellation. Every
+// BATCH_POINTS points the bar advances and `updated_at` is bumped, which keeps
+// the 18-min stale sweeper from ever touching an actively-progressing run.
 const BATCH_POINTS = 24
 // Only the top-ranked businesses at each vantage point feed the competitor
 // rollup. The sidebar surfaces the 20 strongest competitors across the grid,
@@ -139,7 +142,6 @@ async function mapWithConcurrency<T, U>(
 export const runGbpHeatmapTask: TaskRunner = async ({
   jobId,
   job,
-  step,
 }: TaskContext) => {
   const parsed = InputSchema.safeParse(job.input)
   if (!parsed.success) {
@@ -170,52 +172,51 @@ export const runGbpHeatmapTask: TaskRunner = async ({
   for (let b = 0; b < numBatches; b++) {
     const start = b * BATCH_POINTS
     const slice = gridPoints.slice(start, start + BATCH_POINTS)
-    const batch = await step.run(`scan-${b}`, async () => {
-      await checkCancel()
-      // `start` = points already completed before this batch, so the bar
-      // reflects real progress instead of jumping ahead to the batch's end.
-      await updateProgress(jobId, {
-        stage: "Scanning vantage points",
-        detail: `${start} / ${total}`,
-        percent: Math.round((start / total) * 100),
-      }).catch(() => {})
+    await checkCancel()
+    // `start` = points already completed before this batch, so the bar
+    // reflects real progress instead of jumping ahead to the batch's end.
+    await updateProgress(jobId, {
+      stage: "Scanning vantage points",
+      detail: `${start} / ${total}`,
+      percent: Math.round((start / total) * 100),
+    }).catch(() => {})
 
-      const points = await mapWithConcurrency(
-        slice,
-        MAPS_CONCURRENCY,
-        async (pt) => {
-          const env = await dfsRequest(MAPS_SERP_ENDPOINT, [
-            {
-              keyword,
-              location_coordinate: `${pt.lat.toFixed(6)},${pt.lng.toFixed(6)},${MAPS_ZOOM}`,
-              language_code,
-              depth: MAPS_DEPTH,
-            },
-          ]).catch(() => null)
-          const items = env ? extractMapsItems(env).map(slim) : []
-          // Read the target's rank from the full result, then keep only the
-          // top-ranked rows for the competitor rollup (see cutoff comment).
-          const rank = findTargetRank(items, target.place_id, target.title)
-          const competitorItems = items.filter(
-            (it) =>
-              it.rank_absolute != null &&
-              it.rank_absolute <= COMPETITOR_RANK_CUTOFF,
-          )
-          return {
-            row: pt.row,
-            col: pt.col,
-            lat: pt.lat,
-            lng: pt.lng,
-            rank,
-            foundCount: items.length,
-            items: competitorItems,
-            cost: dfsCost(env),
-          }
-        },
-      )
+    const batchPoints = await mapWithConcurrency(
+      slice,
+      MAPS_CONCURRENCY,
+      async (pt) => {
+        const env = await dfsRequest(MAPS_SERP_ENDPOINT, [
+          {
+            keyword,
+            location_coordinate: `${pt.lat.toFixed(6)},${pt.lng.toFixed(6)},${MAPS_ZOOM}`,
+            language_code,
+            depth: MAPS_DEPTH,
+          },
+        ]).catch(() => null)
+        const items = env ? extractMapsItems(env).map(slim) : []
+        // Read the target's rank from the full result, then keep only the
+        // top-ranked rows for the competitor rollup (see cutoff comment).
+        const rank = findTargetRank(items, target.place_id, target.title)
+        const competitorItems = items.filter(
+          (it) =>
+            it.rank_absolute != null &&
+            it.rank_absolute <= COMPETITOR_RANK_CUTOFF,
+        )
+        return {
+          row: pt.row,
+          col: pt.col,
+          lat: pt.lat,
+          lng: pt.lng,
+          rank,
+          foundCount: items.length,
+          items: competitorItems,
+          cost: dfsCost(env),
+        }
+      },
+    )
 
-      const cost = points.reduce((sum, p) => sum + p.cost, 0)
-      const scannedPoints: ScannedPoint[] = points.map((p) => ({
+    for (const p of batchPoints) {
+      scanned.push({
         row: p.row,
         col: p.col,
         lat: p.lat,
@@ -223,11 +224,9 @@ export const runGbpHeatmapTask: TaskRunner = async ({
         rank: p.rank,
         foundCount: p.foundCount,
         items: p.items,
-      }))
-      return { points: scannedPoints, cost }
-    })
-    scanned.push(...batch.points)
-    costUsd += batch.cost
+      })
+      costUsd += p.cost
+    }
   }
 
   // Aggregate. `scanned` is in global grid order (batches concatenated in
