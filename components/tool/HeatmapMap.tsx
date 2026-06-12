@@ -62,7 +62,7 @@ export function HeatmapMap({
 
   return (
     <APIProvider apiKey={API_KEY}>
-      <div className="h-[660px] w-full overflow-hidden rounded-lg border border-line">
+      <div className="h-[85vh] min-h-[660px] w-full overflow-hidden rounded-lg border border-line">
         <Map
           mapId={MAP_ID}
           defaultCenter={{ lat: markerLat, lng: markerLng }}
@@ -127,7 +127,7 @@ export function CircleDrawMap({
   if (!API_KEY) return null
   return (
     <APIProvider apiKey={API_KEY}>
-      <div className="h-[660px] w-full overflow-hidden rounded-lg border border-line">
+      <div className="h-[85vh] min-h-[660px] w-full overflow-hidden rounded-lg border border-line">
         <Map
           mapId={MAP_ID}
           defaultCenter={{ lat: center.lat, lng: center.lng }}
