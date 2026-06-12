@@ -62,7 +62,7 @@ export function HeatmapMap({
 
   return (
     <APIProvider apiKey={API_KEY}>
-      <div className="h-[480px] w-full overflow-hidden rounded-lg border border-line">
+      <div className="h-[660px] w-full overflow-hidden rounded-lg border border-line">
         <Map
           mapId={MAP_ID}
           defaultCenter={{ lat: markerLat, lng: markerLng }}
@@ -127,11 +127,11 @@ export function CircleDrawMap({
   if (!API_KEY) return null
   return (
     <APIProvider apiKey={API_KEY}>
-      <div className="h-[480px] w-full overflow-hidden rounded-lg border border-line">
+      <div className="h-[660px] w-full overflow-hidden rounded-lg border border-line">
         <Map
           mapId={MAP_ID}
           defaultCenter={{ lat: center.lat, lng: center.lng }}
-          defaultZoom={10}
+          defaultZoom={11}
           gestureHandling="cooperative"
           mapTypeControl={false}
           streetViewControl={false}
@@ -300,7 +300,7 @@ function FitGridOnce({ points }: { points: HeatmapPoint[] }) {
     if (!map || fittedRef.current || points.length === 0) return
     const bounds = new google.maps.LatLngBounds()
     for (const p of points) bounds.extend({ lat: p.lat, lng: p.lng })
-    map.fitBounds(bounds, 60)
+    map.fitBounds(bounds, 40)
     fittedRef.current = true
   }, [map, points])
   return null
