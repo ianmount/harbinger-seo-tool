@@ -66,20 +66,20 @@ const KM_PER_MILE = 1.609344
 /**
  * Above this many vantage points a scan is too slow to run inside the
  * synchronous route's 300s budget, so it's dispatched to the background-jobs
- * pipeline (Inngest) instead. 49 = a 7×7 grid, the largest square that
- * comfortably finishes synchronously at MAPS_CONCURRENCY=10.
+ * pipeline (Inngest) instead. Every built-in preset sits at or below this, so
+ * presets all run synchronously; only oversized custom grids background.
  */
-export const SYNC_MAX_POINTS = 49
+export const SYNC_MAX_POINTS = 64
 
 /**
  * Hard ceilings on grid dimensions, shared by the route's Zod schema, the
  * background task's input schema, and the UI's custom-grid inputs so all
- * three agree. 21×21 = 441 points reaches a ~30-mile radius at ~4.8km
- * spacing — see HEATMAP_PRESETS.
+ * three agree. Spacing goes up to 20km so wide-area grids can reach a ~30-mile
+ * span with only a handful of points (see HEATMAP_PRESETS).
  */
 export const MAX_GRID_DIM = 21
 export const MIN_GRID_DIM = 3
-export const MAX_SPACING_KM = 10
+export const MAX_SPACING_KM = 20
 export const MIN_SPACING_KM = 0.25
 
 /**
@@ -99,50 +99,52 @@ export interface HeatmapPreset {
 }
 
 /**
- * Canned grid configurations surfaced in the UI. Each trades resolution for
- * reach. Point counts: 35 / 81 / 169 / 225 / 441. Everything above
- * SYNC_MAX_POINTS runs as a background job.
+ * Canned grid configurations surfaced in the UI. Density *decreases* as
+ * coverage grows: a wide-area scan only needs a sparse grid to show the rank
+ * gradient, so we widen the spacing and drop the point count rather than
+ * blanketing 30 miles in hundreds of dots. Point counts: 64 / 49 / 36 / 25 /
+ * 16. Approx. coverage (full box width): 4 / 7.5 / 12 / 20 / 30 miles.
  */
 export const HEATMAP_PRESETS: readonly HeatmapPreset[] = [
   {
     key: "neighborhood",
     label: "Neighborhood",
-    rows: 5,
-    cols: 7,
+    rows: 8,
+    cols: 8,
     spacingKm: 1,
-    blurb: "Tight local footprint — the original default.",
+    blurb: "Tight local footprint at street resolution. 64 points.",
   },
   {
     key: "city",
     label: "City",
-    rows: 9,
-    cols: 9,
-    spacingKm: 1.5,
-    blurb: "Citywide coverage at street resolution.",
+    rows: 7,
+    cols: 7,
+    spacingKm: 2,
+    blurb: "Citywide coverage. 49 points.",
   },
   {
     key: "metro",
     label: "Metro",
-    rows: 13,
-    cols: 13,
-    spacingKm: 2.5,
-    blurb: "Metro-wide spread for multi-suburb businesses.",
+    rows: 6,
+    cols: 6,
+    spacingKm: 4,
+    blurb: "Metro-wide spread for multi-suburb businesses. 36 points.",
   },
   {
     key: "service-area",
-    label: "Service area (~17 mi)",
-    rows: 15,
-    cols: 15,
-    spacingKm: 4,
-    blurb: "Multi-city service area.",
+    label: "Service area (~20 mi)",
+    rows: 5,
+    cols: 5,
+    spacingKm: 8,
+    blurb: "Multi-city service area, sparse grid. 25 points.",
   },
   {
     key: "wide",
     label: "Wide (~30 mi)",
-    rows: 21,
-    cols: 21,
-    spacingKm: 4.8,
-    blurb: "County-scale reach. Coarse between points.",
+    rows: 4,
+    cols: 4,
+    spacingKm: 16,
+    blurb: "Regional overview — coarse, just the broad rank picture. 16 points.",
   },
 ] as const
 

@@ -114,7 +114,7 @@ type Data = {
 const BUSINESS_INFO_ENDPOINT = "/v3/business_data/google/my_business_info/live"
 const MAPS_SERP_ENDPOINT = "/v3/serp/google/maps/live/advanced"
 const MAPS_DEPTH = 100
-const MAPS_CONCURRENCY = 10
+const MAPS_CONCURRENCY = 16
 // Maps SERP wants the searcher's location as "lat,lng,radius_km" or
 // "lat,lng,zoom". The zoom format with a trailing `z` is the canonical
 // "simulate a Google Maps user zoomed in to street level" form.
