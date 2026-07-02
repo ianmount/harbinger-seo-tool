@@ -21,7 +21,10 @@ const CitySchema = z.object({
 
 const CreateSchema = z.object({
   domain: z.string().trim().min(3).max(200),
-  services: z.array(z.string().trim().min(1).max(160)).min(1).max(25),
+  // No upper bound on the number of services (or their length): the SEO
+  // engineer may paste a long real-world service list. Still require at least
+  // one non-empty service so the seed pipeline has something to work with.
+  services: z.array(z.string().trim().min(1)).min(1),
   cities: z.array(CitySchema).min(1).max(10),
   excludeServices: z.array(z.string().trim().min(1).max(160)).max(25).optional(),
   // When false, skip the Claude seed expansion and use the provided services
